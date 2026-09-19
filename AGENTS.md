@@ -15,19 +15,51 @@ Octarel orchestrates work against **managed projects**. A managed project's own 
 validation command remain authoritative for that project. Never copy a managed project's product truth into
 Octarel state.
 
+## Octarel owner override
+
+The repository owner may explicitly waive Octarel-only process requirements for a bounded change. An override
+must be stated in the current instruction and should identify the control being waived when practical.
+
+Owner-overridable Octarel process controls include:
+- dedicated branch/worktree requirements;
+- PR/review workflow;
+- independent-provider review;
+- focused, subsystem, full-suite, browser, UI-audit, or exact-tree gate execution;
+- documentation reconciliation;
+- commit/push/merge sequencing.
+
+For a valid owner override:
+- follow the override only for the stated Octarel change; do not silently generalize it;
+- report every waived control as `WAIVED_BY_OWNER` in the final result;
+- never describe skipped review/tests/gates as passed or produce fabricated evidence;
+- preserve existing legitimate tests even when their execution is waived;
+- do not apply an Octarel override to a managed project such as OctaScene unless that project's own current
+  policy is separately satisfied or explicitly changed.
+
+The following protections are not process conveniences and are not waived by a generic "skip rules" request:
+never expose secrets, cross repository-data authorization boundaries, make unauthorized live/billable calls,
+bypass spend/provider/security controls, falsify evidence, or destructively overwrite unrelated work. Any
+instruction seeking one of those actions must be handled explicitly and safely.
+
 ## Universal invariants
 
-- Normal work never writes directly to `main`/`master`. Substantial work uses a dedicated branch/worktree,
-  and exactly one write-capable owner may use a checkout at a time.
+- Default development is risk-based. Low-risk Octarel-only work may use the canonical checkout; a separate
+  sibling worktree is not required. Use a dedicated branch by default unless the owner explicitly authorizes
+  direct canonical-main work for a bounded low-risk change.
+- Substantial, parallel, stateful, security-sensitive, migration, provider-routing, or cross-cutting work should
+  use a dedicated branch/worktree unless explicitly waived by the owner.
+- Exactly one write-capable owner may use a checkout at a time. Parallel writers require separate worktrees
+  unless the owner deliberately serializes ownership.
 - Preserve unrelated work. Never force-push, destructively reset/clean, or bypass worktree locks.
 - Never expose secrets or cross repository-data authorization boundaries.
 - Never make live/billable product-provider calls without explicit authorization or silently enable API-key,
   paid, or premium fallback.
 - Never bypass provider enablement, capability, CC-required, spend, accounting, authorization, or
   production-readiness controls.
-- Never delete, skip, `xfail`, relax, or rewrite legitimate tests merely to pass.
-- Use risk-based deterministic local validation. Exact-tree local-gate evidence—not GitHub Actions—is the
-  engineering acceptance authority.
+- Never delete, skip, `xfail`, relax, or rewrite legitimate tests merely to pass. Owner test waivers skip
+  execution only; they do not permit weakening the test suite.
+- Use risk-based deterministic validation by default. Exact-tree local-gate evidence is the engineering
+  acceptance authority when that gate is required and not explicitly waived.
 - Keep Octarel code-root distinct from every selected project root. Process cwd is never implicit project truth.
 - Report actual providers/models/results and failure/fallback reasons. Never claim work or evidence that did
   not run on the stated candidate.
