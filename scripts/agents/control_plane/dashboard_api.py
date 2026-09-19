@@ -483,6 +483,9 @@ def _runbook_to_dict(runbook: Any, *, state: Any = None, registry: Any = None) -
         "acceptance_stage": runbook.acceptance_stage,
         "acceptance_evidence": runbook.acceptance_evidence,
     }
+    if state is not None:
+        # OCTAREL-OPS-02: persisted advancement decision (never recomputed on read).
+        body["advancement"] = state.get_advancement(runbook.id)
     if state is not None and registry is not None:
         from .runbooks import eligible_retry_workers
 
@@ -1741,6 +1744,20 @@ def create_app(
             if e.task_id == runbook.task_id
         ]
         return body
+
+    @app.post("/api/runbooks/{runbook_id}/advance")
+    def runbook_advance(runbook_id: str) -> dict[str, Any]:
+        """Re-evaluate advancement from current repository truth (idempotent once a successor started)."""
+
+        from .advancement import advance_after_success
+
+        runbook = ctx.state.get_runbook(runbook_id)
+        if runbook is None:
+            raise HTTPException(status_code=404, detail=f"unknown runbook {runbook_id!r}")
+        return advance_after_success(
+            state=ctx.state, runbook=runbook, registry=ctx.registry,
+            supervisor=ctx.supervisor, scheduler=ctx.scheduler,
+        )
 
     @app.get("/api/runbooks/{runbook_id}/report")
     def runbook_report(runbook_id: str) -> dict[str, Any]:

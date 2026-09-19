@@ -30,6 +30,7 @@ from .acceptance import (
     is_acceptance_applicable,
     start_acceptance,
 )
+from .advancement import advance_after_success
 from .dispatch import managed_admit
 from .models import (
     DEFAULT_SAFETY_PROFILE,
@@ -1653,6 +1654,19 @@ def reconcile_runbooks(
                         message=f"runbook {runbook.id} finalized as {runbook.status}",
                     )
                     finalized += 1
+                    if runbook.project_id:
+                        # OCTAREL-OPS-02: accepted work continues from the project's
+                        # *current* repository truth; a failure here is recorded, never fatal.
+                        try:
+                            advance_after_success(
+                                state=state, runbook=runbook, registry=registry,
+                                supervisor=supervisor, scheduler=scheduler,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            state.record_event(
+                                category="advancement", level="error", task_id=task.id,
+                                message=f"advancement error for runbook {runbook.id}: {exc}",
+                            )
                 elif runbook.status in (RUNBOOK_BLOCKED, RUNBOOK_OWNER_ACTION_REQUIRED):
                     generate_report(state=state, repo_root=repo_root, runbook=runbook, task=task)
                     state.record_event(

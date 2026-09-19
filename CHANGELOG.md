@@ -9,6 +9,7 @@ All notable changes to Octarel are documented in this file.
 - CPX-07 public-safety scanner, clean-room acceptance, and public-history snapshot helper
 - `octarel project`, `octarel providers`, `octarel public-safety`, and `octarel service canonicalize-state`
 - Maintained install, architecture, provider, release, state, and publication docs
+- OCTAREL-OPS-02: after an accepted run, Octarel re-reads the managed project's current repository truth and records the next eligible task (or the exact reason advancement stopped: blocked, no eligible task, owner decision required). Shown on the Runs view; `auto_advance=true` project capability opts in to starting it automatically; `POST /api/runbooks/{id}/advance` re-evaluates.
 
 ### Changed
 

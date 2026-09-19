@@ -217,6 +217,15 @@ CREATE TABLE IF NOT EXISTS dispatch_decisions (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS advancements (
+    runbook_id TEXT PRIMARY KEY,
+    project_id TEXT,
+    state TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_projects_enabled ON projects (enabled, project_id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks (state);
@@ -1058,6 +1067,53 @@ class State:
             item["scores"] = json.loads(item["scores"] or "{}")
             result.append(item)
         return result
+
+    # ---------------------------------------------------------- advancement
+
+    @_serialized
+    def get_advancement(self, runbook_id: str) -> dict[str, Any] | None:
+        """Durable OCTAREL-OPS-02 advancement record for one completed runbook."""
+
+        row = self._conn.execute("SELECT * FROM advancements WHERE runbook_id = ?", (runbook_id,)).fetchone()
+        return self._advancement_from_row(row) if row else None
+
+    @_serialized
+    def upsert_advancement(self, record: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        self._conn.execute(
+            "INSERT INTO advancements (runbook_id, project_id, state, payload, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(runbook_id) DO UPDATE SET "
+            "project_id=excluded.project_id, state=excluded.state, payload=excluded.payload, "
+            "updated_at=excluded.updated_at",
+            (
+                record["runbook_id"],
+                record.get("project_id"),
+                record["state"],
+                json.dumps(record, sort_keys=True),
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    @_serialized
+    def list_advancements(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
+        if project_id is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM advancements WHERE project_id = ? ORDER BY updated_at DESC, runbook_id", (project_id,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM advancements ORDER BY updated_at DESC, runbook_id").fetchall()
+        return [self._advancement_from_row(row) for row in rows]
+
+    @staticmethod
+    def _advancement_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        record = json.loads(row["payload"] or "{}")
+        record["runbook_id"] = row["runbook_id"]
+        record["project_id"] = row["project_id"]
+        record["state"] = row["state"]
+        record["updated_at"] = row["updated_at"]
+        return record
 
     # ------------------------------------------------------- control settings
 

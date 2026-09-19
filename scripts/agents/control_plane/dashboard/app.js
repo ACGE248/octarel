@@ -2632,6 +2632,48 @@
     runbookFormInitialized = true;
   }
 
+  // OCTAREL-OPS-02: Completed -> Advancing -> Next task selected / Blocked / No eligible task.
+  const ADVANCEMENT_LABELS = {
+    COMPLETED: "Completed",
+    ADVANCING: "Advancing...",
+    NEXT_SELECTED: "Next task selected",
+    BLOCKED: "Blocked",
+    NO_ELIGIBLE_TASK: "No eligible task",
+    OWNER_DECISION_REQUIRED: "Owner decision required",
+  };
+
+  function renderAdvancement(a) {
+    const wrap = el("div", {
+      class: "runbook-advancement",
+      role: "status",
+      "data-advancement-state": a.state,
+      "aria-label": "Task advancement",
+    });
+    const steps = ["Completed"];
+    if (a.state !== "COMPLETED") steps.push(ADVANCEMENT_LABELS[a.state] || a.state);
+    wrap.appendChild(
+      el("div", { class: "runbook-phases" }, steps.map((label, i) =>
+        el("span", { class: `phase-chip ${i ? statusClass(a.state) : ""}`, text: i ? `\u2193 ${label}` : label })
+      ))
+    );
+    const next = a.next_task;
+    if (next && (a.state === "NEXT_SELECTED" || a.state === "ADVANCING")) {
+      wrap.appendChild(el("div", { class: "entity-meta", text: `${next.task_id} \u2014 ${next.title}` }));
+      if (a.selection_reason) wrap.appendChild(el("div", { class: "entity-meta", text: `Why: ${a.selection_reason}` }));
+      const deps = (a.dependency_status || []).map((d) => `${d.task_id}: ${d.status}`).join(", ");
+      wrap.appendChild(el("div", { class: "entity-meta", text: `Dependencies: ${deps || "none declared"}` }));
+      if (a.intended_worker) {
+        wrap.appendChild(
+          el("div", { class: "entity-meta", text: `Worker: ${displayName(a.intended_worker)}${a.intended_provider ? ` (${a.intended_provider})` : ""}` })
+        );
+      }
+      if (a.started_runbook_id) wrap.appendChild(el("div", { class: "entity-meta", text: `Started as ${a.started_runbook_id}` }));
+    } else if (a.reason) {
+      wrap.appendChild(el("div", { class: "entity-meta", text: `reason: ${a.reason}` }));
+    }
+    return wrap;
+  }
+
   function renderRunbookCards(runbooks) {
     const root = document.getElementById("runbooks-cards");
     root.innerHTML = "";
@@ -2676,6 +2718,7 @@
         });
         card.appendChild(acceptanceWrap);
       }
+      if (r.advancement) card.appendChild(renderAdvancement(r.advancement));
       if (r.recovery_note) card.appendChild(el("div", { class: "entity-meta", text: `Note: ${r.recovery_note}` }));
       if (r.failure_reason) {
         const failure = el("div", { class: "runbook-failure", role: "alert" });
