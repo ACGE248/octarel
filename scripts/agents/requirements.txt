@@ -1,0 +1,18 @@
+# ENG-CP-02 (issue #165): the Control Plane's OWN runtime dependency manifest.
+#
+# Installing only this file (never the repository root's requirements.txt,
+# which pulls in OctaScene's full application/media/provider-SDK stack) is
+# enough to run the Control Plane daemon and dashboard
+# (`python -m scripts.agents.orchestrator dashboard`). This is a deliberately
+# small, closed set -- verified by `tests/test_control_plane_dependency_isolation.py`,
+# which statically audits every import under `scripts/agents/` and fails if a
+# new third-party or `app.*` import appears here without this file being
+# updated to match. Pins are kept identical to the root `requirements.txt`
+# entries they mirror today (both currently need the same FastAPI/Uvicorn
+# versions); CPX-05's standalone-repository extraction is what makes this
+# manifest fully independent rather than a mirror.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+httpx>=0.27,<1.0  # Cloudflare Access token verification HTTP calls (ENG-AGENT-02-S6 remote Control Center)
+psutil>=5.9,<7.0  # CPU/RAM/load/disk resource panel (ENG-AGENT-02 Control Center)
+PyJWT[crypto]>=2.8,<3.0  # Cloudflare Access JWT verification (ENG-AGENT-02-S6 remote Control Center)

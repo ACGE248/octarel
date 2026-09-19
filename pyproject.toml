@@ -1,0 +1,17 @@
+[project]
+name = "octarel"
+version = "0.1.0"
+description = "Standalone Octarel orchestration control plane"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[project.scripts]
+octarel = "octarel.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"

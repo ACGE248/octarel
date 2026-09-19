@@ -1,0 +1,7 @@
+# Octarel runtime dependencies. Installing only this file is enough to run
+# the daemon and dashboard. It does not pull the OctaScene application stack.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+httpx>=0.27,<1.0
+psutil>=5.9,<7.0
+PyJWT[crypto]>=2.8,<3.0

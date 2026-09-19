@@ -1,0 +1,372 @@
+{
+  "_about": "Executable worker facts for the provider-neutral local orchestrator. Canonical prose policy lives under .agents/.",
+  "intensities": ["low", "medium", "high"],
+  "provider_repository_data_authorizations": {
+    "Google": "preauthorized-scoped-reuse",
+    "xAI": "preauthorized-scoped-reuse"
+  },
+  "routes": {
+    "primary-implementation": ["claude-code", "codex-build", "grok-build"],
+    "secondary-implementation": ["grok-build", "claude-code", "codex-build"],
+    "mechanical-testing": ["opencode2-gemini-flash-lite", "antigravity-focused-tests"],
+    "focused-tests": ["opencode2-gemini-flash-lite", "antigravity-focused-tests"],
+    "impact-search": ["antigravity-impact-search", "opencode2-gemini-flash-lite"],
+    "doc-drift-review": ["antigravity-doc-drift"],
+    "diff-review": ["antigravity-diff-review", "opencode2-gemini-flash-lite-review", "grok-build-review", "codex-review"],
+    "overflow": ["deepseek-overflow"]
+  },
+  "workers": {
+    "claude-code": {
+      "display_name": "Claude Code",
+      "description": "Primary substantial implementation worker for bounded feature, UI, API, refactor, and documentation-heavy engineering.",
+      "best_for": ["Substantial implementation", "UI and API work", "Refactors", "Documentation-heavy changes"],
+      "execution_system": "Claude Code",
+      "provider": "Anthropic",
+      "default_model": "claude-sonnet-5",
+      "default_intensity": "medium",
+      "capability": "write",
+      "cost_class": "premium-subscription",
+      "allowed_policy_roles": ["ORCHESTRATOR", "IMPLEMENTER"],
+      "provider_policy": ".agents/providers/CLAUDE.md",
+      "auth_mode": "local-subscription-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": true,
+      "roles": ["primary-implementation", "secondary-implementation"],
+      "cli": {
+        "bin": "claude",
+        "version_args": ["--version"],
+        "auth_check": {
+          "args": ["auth", "status"],
+          "success_pattern": "\"authMethod\": \"claude.ai\""
+        },
+        "launch_probe": {
+          "args": ["-p", "Reply with exactly: CLAUDE_OK"],
+          "success_pattern": "CLAUDE_OK"
+        },
+        "template": [
+          "-p", "--output-format", "json", "--model", "{model}",
+          "--effort", "{intensity}", "--permission-mode", "manual",
+          "--no-session-persistence"
+        ],
+        "permission_profiles": {
+          "repo_configured_auto": [
+            "-p", "--output-format", "json", "--model", "{model}",
+            "--effort", "{intensity}", "--dangerously-skip-permissions",
+            "--no-session-persistence"
+          ]
+        }
+      },
+      "notes": "Primary implementation worker; standard and explicitly configured unattended CLI profiles. Authentication probes require the existing Claude.ai subscription session and never treat API-key authentication as eligible."
+    },
+    "codex-build": {
+      "display_name": "Codex Build",
+      "description": "Write-capable OpenAI Codex implementation fallback using the maintainer's ChatGPT subscription session, never API-key billing.",
+      "best_for": ["Implementation fallback", "Bounded unattended runbooks", "Integration fixes"],
+      "execution_system": "Codex",
+      "provider": "OpenAI",
+      "default_model": "gpt-5.6-sol",
+      "default_intensity": "medium",
+      "capability": "write",
+      "cost_class": "premium-subscription",
+      "allowed_policy_roles": ["ORCHESTRATOR", "IMPLEMENTER"],
+      "provider_policy": ".agents/providers/CODEX_OPENAI.md",
+      "auth_mode": "chatgpt-subscription-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": true,
+      "roles": ["primary-implementation", "secondary-implementation"],
+      "cli": {
+        "bin": "codex",
+        "version_args": ["--version"],
+        "auth_check": {
+          "args": ["login", "status"],
+          "success_pattern": "Logged in using ChatGPT"
+        },
+        "template": [
+          "exec", "--sandbox", "workspace-write", "--model", "{model}",
+          "--json", "--ephemeral", "{prompt}"
+        ],
+        "permission_profiles": {
+          "repo_configured_auto": [
+            "exec", "--sandbox", "workspace-write", "--model", "{model}",
+            "--json", "--ephemeral", "{prompt}"
+          ]
+        }
+      },
+      "notes": "Subscription-authenticated write route; separate from Codex Review."
+    },
+    "grok-build": {
+      "display_name": "Grok Build",
+      "description": "Write-capable xAI implementation worker used for substantial frontend work and independent provider diversity.",
+      "best_for": ["Frontend implementation", "Secondary implementation", "Provider diversity"],
+      "execution_system": "Grok Build",
+      "provider": "xAI",
+      "default_model": "grok-4.6",
+      "default_intensity": "medium",
+      "capability": "write",
+      "cost_class": "metered-configured",
+      "allowed_policy_roles": ["IMPLEMENTER"],
+      "provider_policy": ".agents/providers/GROK.md",
+      "auth_mode": "configured-cli-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": true,
+      "roles": ["primary-implementation", "secondary-implementation"],
+      "cli": {
+        "bin": "grok",
+        "version_args": ["--version"],
+        "template": [
+          "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
+          "--reasoning-effort", "{intensity}", "--permission-mode", "default",
+          "--sandbox", "work-tree", "--no-subagents", "--disable-web-search"
+        ]
+      },
+      "notes": "Secondary implementation when configured. Uses normal permission prompts plus a sandbox, never auto-approval. Write runs require --allow-write and a dedicated worktree."
+    },
+    "grok-build-review": {
+      "display_name": "Grok Build Review",
+      "description": "Read-only xAI reviewer for bounded code, integration, and documentation diffs.",
+      "best_for": ["Independent diff review", "Integration review", "UI review"],
+      "execution_system": "Grok Build",
+      "provider": "xAI",
+      "default_model": "grok-4.6",
+      "default_intensity": "medium",
+      "capability": "read-only",
+      "cost_class": "metered-configured",
+      "allowed_policy_roles": ["REVIEWER"],
+      "provider_policy": ".agents/providers/GROK.md",
+      "auth_mode": "configured-cli-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["diff-review"],
+      "cli": {
+        "bin": "grok",
+        "version_args": ["--version"],
+        "template": [
+          "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
+          "--reasoning-effort", "{intensity}", "--permission-mode", "plan",
+          "--sandbox", "read-only", "--tools", "", "--no-subagents", "--disable-web-search"
+        ]
+      },
+      "notes": "Independent bounded read-only review through Grok Build. Plan+sandbox, no subagents, and web access disabled."
+    },
+    "codex-review": {
+      "display_name": "Codex Review",
+      "description": "OpenAI-backed independent code and integration reviewer, read-only in this registry.",
+      "best_for": ["Independent code review", "Integration review", "Architecture consistency"],
+      "execution_system": "Codex",
+      "provider": "OpenAI",
+      "default_model": "gpt-5.6-sol",
+      "default_intensity": "medium",
+      "capability": "read-only",
+      "cost_class": "premium-subscription",
+      "allowed_policy_roles": ["REVIEWER"],
+      "provider_policy": ".agents/providers/CODEX_OPENAI.md",
+      "auth_mode": "chatgpt-subscription-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["diff-review"],
+      "cli": {
+        "bin": "codex",
+        "version_args": ["--version"],
+        "auth_check": {
+          "args": ["login", "status"],
+          "success_pattern": "Logged in using ChatGPT"
+        },
+        "template": [
+          "exec", "--sandbox", "read-only", "--model", "{model}", "--json", "{prompt}"
+        ]
+      },
+      "notes": "OpenAI Codex CLI (ENG-AGENT-02-S7, issue #97), authenticated via the maintainer's existing ChatGPT subscription session -- 'codex login status' reports chatgpt auth with no stored API key, and this entry never requests, stores, or falls back to a paid OpenAI API key. Read-only sandboxed review only (--sandbox read-only); Codex may also act as orchestrator/supervisor per AGENTS.md, but this entry intentionally grants it no write-capable role here, since Claude remains preferred for routine implementation. availability_reason() reports NOT_AUTHENTICATED (via the auth_check above) rather than collapsing every unavailability cause into NOT_CONFIGURED when the CLI is present but no session is logged in. No reasoning-effort/intensity CLI flag is templated: this CLI version's model aliases (e.g. Terra/Sol/Astra per AGENTS.md) already encode capability tier, and no verified equivalent per-call effort flag exists to map {intensity} onto."
+    },
+    "opencode2-gemini-flash-lite": {
+      "display_name": "Gemini Flash Lite",
+      "description": "Low-cost/free mechanical testing and focused verification worker through OpenCode2.",
+      "best_for": ["Focused tests", "Mechanical verification", "Simple failure diagnosis"],
+      "execution_system": "OpenCode2",
+      "provider": "Google",
+      "default_model": "google/gemini-3.5-flash-lite",
+      "default_intensity": "low",
+      "capability": "read-only",
+      "cost_class": "free-verified",
+      "allowed_policy_roles": ["TESTER", "RESEARCHER"],
+      "provider_policy": ".agents/providers/GEMINI.md",
+      "auth_mode": "opencode-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["mechanical-testing", "focused-tests", "impact-search"],
+      "preserve": true,
+      "cli": {
+        "bin": "opencode",
+        "version_args": ["--version"],
+        "template": ["run", "--model", "{model}", "--agent", "tester"]
+      },
+      "notes": "Existing verified cheapest focused-test route (AGENTS.md 'Verified low-cost Gemini test worker'). The orchestration entry is read-only and fails if the worker edits; Antigravity supplements it, it is not a replacement."
+    },
+    "opencode2-gemini-flash-lite-review": {
+      "display_name": "Gemini Flash Lite Review",
+      "description": "Free read-only fallback for bounded exact-tree review when the preferred Antigravity transport is unhealthy.",
+      "best_for": ["Independent diff review", "Exact-tree gate review", "Documentation consistency"],
+      "execution_system": "OpenCode2",
+      "provider": "Google",
+      "default_model": "google/gemini-3.5-flash-lite",
+      "default_intensity": "low",
+      "capability": "read-only",
+      "cost_class": "free-verified",
+      "allowed_policy_roles": ["REVIEWER"],
+      "provider_policy": ".agents/providers/GEMINI.md",
+      "auth_mode": "opencode-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["diff-review"],
+      "cli": {
+        "bin": "opencode",
+        "version_args": ["--version"],
+        "template": ["run", "--model", "{model}", "--agent", "reviewer"]
+      },
+      "notes": "Bounded read-only review route. It cannot edit and is selected only explicitly or after a recorded equivalent-role transport failure."
+    },
+    "antigravity-focused-tests": {
+      "display_name": "Antigravity Focused Tests",
+      "description": "Read-only Gemini worker for targeted test execution and failure analysis.",
+      "best_for": ["Targeted tests", "Failure analysis", "Regression verification"],
+      "execution_system": "Antigravity",
+      "provider": "Google",
+      "default_model": "gemini-3.8-flash-medium",
+      "default_intensity": "medium",
+      "capability": "read-only",
+      "cost_class": "supplemental-configured",
+      "allowed_policy_roles": ["TESTER"],
+      "provider_policy": ".agents/providers/ANTIGRAVITY.md",
+      "auth_mode": "antigravity-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["focused-tests", "mechanical-testing"],
+      "cli": {
+        "bin": "agy",
+        "version_args": ["--version"],
+        "template": [
+          "--print", "{prompt}", "--output-format", "json",
+          "--model", "{model}",
+          "--effort", "{intensity}", "--mode", "plan", "--sandbox"
+        ]
+      },
+      "notes": "Bounded repository-scoped read-only worker: run focused tests and simple failure diagnosis. plan+sandbox enforce no edits. Never commits, never reads secrets, never makes live product-provider calls."
+    },
+    "antigravity-impact-search": {
+      "display_name": "Antigravity Impact Search",
+      "description": "Read-only Gemini worker for repository impact and blast-radius searches.",
+      "best_for": ["Impact search", "Dependency discovery", "Change scoping"],
+      "execution_system": "Antigravity",
+      "provider": "Google",
+      "default_model": "gemini-3.8-flash-medium",
+      "default_intensity": "medium",
+      "capability": "read-only",
+      "cost_class": "supplemental-configured",
+      "allowed_policy_roles": ["RESEARCHER"],
+      "provider_policy": ".agents/providers/ANTIGRAVITY.md",
+      "auth_mode": "antigravity-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["impact-search"],
+      "cli": {
+        "bin": "agy",
+        "version_args": ["--version"],
+        "template": [
+          "--print", "{prompt}", "--output-format", "json",
+          "--model", "{model}",
+          "--effort", "{intensity}", "--mode", "plan", "--sandbox"
+        ]
+      },
+      "notes": "Bounded read-only worker: repository impact / blast-radius search for a proposed change. Read-only, no secrets, no commits."
+    },
+    "antigravity-doc-drift": {
+      "display_name": "Antigravity Documentation Review",
+      "description": "Read-only Gemini worker that compares changes with maintained sources of truth.",
+      "best_for": ["Documentation drift", "Roadmap reconciliation", "Status-ledger review"],
+      "execution_system": "Antigravity",
+      "provider": "Google",
+      "default_model": "gemini-3.8-flash-medium",
+      "default_intensity": "medium",
+      "capability": "read-only",
+      "cost_class": "supplemental-configured",
+      "allowed_policy_roles": ["REVIEWER"],
+      "provider_policy": ".agents/providers/ANTIGRAVITY.md",
+      "auth_mode": "antigravity-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["doc-drift-review"],
+      "cli": {
+        "bin": "agy",
+        "version_args": ["--version"],
+        "template": [
+          "--print", "{prompt}", "--output-format", "json",
+          "--model", "{model}",
+          "--effort", "{intensity}", "--mode", "plan", "--sandbox"
+        ]
+      },
+      "notes": "Bounded read-only worker: documentation-drift review comparing a diff against maintained sources of truth. Read-only, no secrets, no commits."
+    },
+    "antigravity-diff-review": {
+      "display_name": "Antigravity Diff Review",
+      "description": "Read-only Gemini reviewer for bounded correctness, contract, and documentation diffs.",
+      "best_for": ["Diff review", "Contract review", "Documentation impact"],
+      "execution_system": "Antigravity",
+      "provider": "Google",
+      "default_model": "gemini-3.8-flash-medium",
+      "default_intensity": "medium",
+      "capability": "read-only",
+      "cost_class": "supplemental-configured",
+      "allowed_policy_roles": ["REVIEWER"],
+      "provider_policy": ".agents/providers/ANTIGRAVITY.md",
+      "auth_mode": "antigravity-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["diff-review"],
+      "cli": {
+        "bin": "agy",
+        "version_args": ["--version"],
+        "template": [
+          "--print", "{prompt}", "--output-format", "json",
+          "--model", "{model}",
+          "--effort", "{intensity}", "--mode", "plan", "--sandbox"
+        ]
+      },
+      "notes": "Bounded read-only worker: focused diff review for correctness and contract/documentation impact. Read-only, no secrets, no commits."
+    },
+    "deepseek-overflow": {
+      "display_name": "DeepSeek Overflow",
+      "description": "Optional disabled overflow route; never selected automatically or without explicit authorization.",
+      "best_for": ["Explicitly authorized overflow only"],
+      "execution_system": "OpenCode2",
+      "provider": "DeepSeek",
+      "default_model": "deepseek/deepseek-chat",
+      "default_intensity": "low",
+      "capability": "focused-edit",
+      "cost_class": "optional-overflow",
+      "allowed_policy_roles": ["IMPLEMENTER"],
+      "provider_policy": ".agents/providers/DEEPSEEK.md",
+      "auth_mode": "manual-api-authorization",
+      "repository_data_authorization": "explicit-per-run",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": true,
+      "roles": ["overflow"],
+      "enabled": false,
+      "cli": {
+        "bin": "opencode",
+        "version_args": ["--version"],
+        "template": ["run", "--model", "{model}"]
+      },
+      "notes": "Optional overflow worker. Disabled by default; requires --allow-overflow and prior authorization. Never used as an automatic paid fallback when a cheaper worker fails or is unavailable."
+    }
+  }
+}

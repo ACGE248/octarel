@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Octarel Control Center</title>
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<div class="shell">
+  <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
+  <aside class="sidebar" id="sidebar" aria-label="Control Center">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="32" height="32" focusable="false">
+          <defs>
+            <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#7c6bff" />
+              <stop offset="100%" stop-color="#a78bfa" />
+            </linearGradient>
+          </defs>
+          <circle cx="16" cy="16" r="16" fill="url(#brand-grad)" />
+          <circle cx="16" cy="12" r="4" fill="#fff" />
+          <path d="M8 24c1.6-4 4.4-6 8-6s6.4 2 8 6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" />
+        </svg>
+      </span>
+      <div class="brand-copy">
+        <span class="brand-name">Octarel</span>
+        <h1>Control Center</h1>
+      </div>
+    </div>
+
+    <!-- ENG-CP-03 (issue #165): the managed-project selector. Placed in the
+         always-visible sidebar (and mirrored as a compact topbar badge) so the
+         currently selected project is obvious globally rather than only on one
+         view. Changing it refreshes every project-dependent panel. -->
+    <section class="project-switcher" id="project-switcher" aria-label="Managed project">
+      <label class="project-switcher-label" for="project-select">Project</label>
+      <select id="project-select" class="project-select" aria-label="Selected managed project">
+        <option value="">Loading…</option>
+      </select>
+      <p class="project-identity" id="project-identity">
+        <span class="project-identity-remote" id="project-identity-remote">—</span>
+        <span class="project-identity-root" id="project-identity-root"></span>
+      </p>
+      <p class="project-problem" id="project-problem" hidden role="status"></p>
+      <button type="button" class="project-add-btn" id="project-add-open">+ Add Project</button>
+    </section>
+
+    <nav class="tabbar" id="tabbar" role="tablist" aria-label="Control Center sections">
+      <button role="tab" aria-selected="true" data-view="view-overview" class="tab active">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="3" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="3" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </span>
+        Overview
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-runs" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M8 5v14l11-7Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        </span>
+        Runs
+        <span id="nav-runs-badge" class="nav-badge" hidden>0</span>
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-flow" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="6" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="18" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 7.2 10.5 16M16 7.2 13.5 16" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </span>
+        Flow
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-tasks" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 12.5 10.5 15 16 9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        Tasks
+        <span id="nav-tasks-badge" class="nav-badge" hidden>0</span>
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-agents" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="9" cy="8" r="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="16" cy="9" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4.5 18c.7-3 2.6-4.5 4.5-4.5S13 15 13.6 18M14 18c.4-2.2 1.6-3.4 3-3.4 1.5 0 2.6 1.2 3 3.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        Agents
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-providers" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 7h10M18 7h2M4 12h2M10 12h10M4 17h10M18 17h2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="16" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </span>
+        Providers
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-steering" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 5v2.2M12 16.8V19M5 12h2.2M16.8 12H19M7.2 7.2l1.5 1.5M15.3 15.3l1.5 1.5M16.8 7.2l-1.5 1.5M8.7 15.3l-1.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        Steering
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-history" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="13" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 13V9.5M12 13l3 2M9 4.5h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        History
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-worktrees" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 8.5 12 4l8 4.5v9L12 22 4 17.5v-9Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 22v-9M4 8.5 12 13l8-4.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </span>
+        Worktrees
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-system" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="5" width="16" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 21h8M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        System
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-terminal" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m7 9 3 3-3 3m5 0h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        Terminal
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-settings" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 5.2V3.5M12 20.5v-1.7M18.8 12H20.5M3.5 12h1.7M16.8 7.2l1.2-1.2M6 18l1.2-1.2M16.8 16.8 18 18M6 6l1.2 1.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        Settings
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="task-pill" id="active-task-pill" aria-label="Active task">
+        <span class="task-pill-dot" aria-hidden="true"></span>
+        <span id="active-task-label">no active task</span>
+      </div>
+      <div class="identity-card" id="identity-card">
+        <span class="avatar" id="identity-avatar" aria-hidden="true">LD</span>
+        <div class="identity-copy">
+          <strong id="identity-name">Local Developer</strong>
+          <span id="identity-role">Developer</span>
+        </div>
+      </div>
+      <div class="remote-badge" id="remote-badge-sidebar" hidden role="status">
+        <span class="remote-badge-dot" aria-hidden="true"></span>
+        <span>REMOTE ACCESS</span>
+        <span id="remote-badge-email-sidebar" class="remote-badge-email"></span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main-column">
+    <header class="topbar">
+      <div class="mobile-header">
+        <div class="brand compact">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="28" height="28" focusable="false">
+              <circle cx="16" cy="16" r="16" fill="url(#brand-grad)" />
+              <circle cx="16" cy="12" r="4" fill="#fff" />
+              <path d="M8 24c1.6-4 4.4-6 8-6s6.4 2 8 6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" />
+            </svg>
+          </span>
+          <div class="brand-copy">
+            <span class="brand-name">Octarel</span>
+            <span class="brand-sub">Control Center</span>
+          </div>
+        </div>
+        <div class="mobile-header-actions">
+          <span class="remote-badge remote-badge-compact" id="remote-badge-mobile" hidden role="status">
+            <span class="remote-badge-dot" aria-hidden="true"></span>
+            REMOTE
+          </span>
+          <button id="notif-bell-mobile" class="icon-btn bell-btn" type="button" aria-label="Attention notifications" aria-haspopup="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 9a6 6 0 1 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 13 6 9Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 18a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <span class="bell-count" hidden>0</span>
+          </button>
+          <button id="menu-toggle" class="icon-btn" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="desktop-topbar">
+        <label class="search-field" for="global-search">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <input id="global-search" type="search" placeholder="Search tasks, agents, or commands…" autocomplete="off" />
+          <kbd id="search-hint" class="key-hint">⌘K</kbd>
+        </label>
+        <!-- ENG-CP-03: the same selected-project identity, always visible in
+             the desktop topbar ("OctaScene / ACGE248/octages"). -->
+        <span class="project-badge" id="project-badge" title="Selected managed project">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+          <span id="project-badge-label">—</span>
+        </span>
+        <span id="app-status" class="badge badge-unknown">OctaScene app: UNKNOWN</span>
+        <span class="remote-badge" id="remote-badge-topbar" hidden role="status" title="This session is authenticated through Cloudflare Access">
+          <span class="remote-badge-dot" aria-hidden="true"></span>
+          <span>REMOTE ACCESS</span>
+          <span id="remote-badge-email-topbar" class="remote-badge-email"></span>
+        </span>
+        <button id="notif-bell" class="icon-btn bell-btn" type="button" aria-label="Attention notifications" aria-haspopup="true" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 9a6 6 0 1 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 13 6 9Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 18a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <span class="bell-count" hidden>0</span>
+        </button>
+        <div class="menu-wrap">
+          <button id="system-menu-btn" class="icon-btn system-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="system-menu">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="4" y="5" width="16" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+            System
+            <span aria-hidden="true">▾</span>
+          </button>
+          <div class="dropdown" id="system-menu" hidden role="menu" aria-label="System menu">
+            <div class="dropdown-meta">
+              <div><span class="k">Session</span> <span id="session-elapsed">--:--:--</span></div>
+              <div><span class="k">Checkpoint age</span> <span id="checkpoint-age">UNKNOWN</span></div>
+            </div>
+            <div id="topbar-controls-slot"></div>
+            <button type="button" class="dropdown-item" data-view="view-system" role="menuitem">Open System</button>
+            <button type="button" class="dropdown-item" data-view="view-settings" role="menuitem">Open Settings</button>
+          </div>
+        </div>
+        <div class="clock" id="live-clock" aria-live="polite">
+          <span id="clock-date">—</span>
+          <strong id="clock-time">—</strong>
+        </div>
+      </div>
+    </header>
+
+    <div class="attention-popover" id="attention-popover" hidden role="dialog" aria-labelledby="attention-title">
+      <h3 id="attention-title">Needs attention</h3>
+      <div class="kv" id="attention-body">Loading…</div>
+      <ul id="attention-list" class="attention-list"></ul>
+    </div>
+
+    <div class="session-strip sr-counts" id="session-strip" aria-live="polite">
+      <span><span class="k">Queued</span> <span id="count-queued">0</span></span>
+      <span><span class="k">Paused</span> <span id="count-paused">0</span></span>
+      <span><span class="k">Running</span> <span id="count-running">0</span></span>
+      <span><span class="k">Blocked</span> <span id="count-blocked">0</span></span>
+      <span><span class="k">Completed</span> <span id="count-completed">0</span></span>
+    </div>
+
+    <main class="views" id="main">
+
+      <section class="view active" id="view-overview" role="tabpanel">
+        <div class="greeting">
+          <div class="greeting-copy">
+            <div class="greeting-avatar" id="greeting-avatar" aria-hidden="true">LD</div>
+            <div>
+              <h2 id="greeting-title">Good morning</h2>
+              <p class="subtitle" id="greeting-sub">Your local development orchestrator is ready.</p>
+            </div>
+          </div>
+          <button type="button" id="run-overnight-btn" class="btn-secondary">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 5v14l11-7Z" fill="currentColor"/></svg>
+            Run Overnight
+          </button>
+        </div>
+
+        <!-- ENG-AGENT-02-S7 follow-up: the primary "resume what I was doing"
+             workflow (Continue Video Editor -> Prepared Run -> Start
+             Development) lives right here on Overview, one click, zero
+             Runbook/task-ID/branch/worktree/provider knowledge required.
+             Run Overnight above stays available as the secondary/general
+             action. Populated by refreshOverviewContinue() in app.js from
+             the same /api/quickstart truth Runs/Quick Start already uses --
+             one source of truth, never a second resolver. -->
+        <section class="card wide continue-card" id="overview-continue-card" aria-labelledby="overview-continue-title">
+          <div class="continue-card-body">
+            <span class="continue-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="22" height="22"><path d="M8 5v14l11-7Z" fill="currentColor"/></svg>
+            </span>
+            <div class="continue-copy">
+              <h2 id="overview-continue-title">Continue Video Editor</h2>
+              <p class="hint" id="overview-continue-detail">Checking current progress…</p>
+            </div>
+          </div>
+          <button type="button" id="overview-continue-btn" class="btn-primary" disabled>Start Development</button>
+        </section>
+
+        <div class="status-grid" id="status-grid">
+          <article class="status-card" data-tone="running">
+            <div class="ring-wrap" id="ring-running"></div>
+            <div>
+              <strong class="status-count" id="status-running">0</strong>
+              <div class="status-label">Running</div>
+              <div class="status-caption">Active agents</div>
+            </div>
+          </article>
+          <article class="status-card" data-tone="queued">
+            <div class="ring-wrap" id="ring-queued"></div>
+            <div>
+              <strong class="status-count" id="status-queued">0</strong>
+              <div class="status-label">Queued</div>
+              <div class="status-caption">Waiting to start</div>
+            </div>
+          </article>
+          <article class="status-card" data-tone="completed">
+            <div class="ring-wrap" id="ring-completed"></div>
+            <div>
+              <strong class="status-count" id="status-completed">0</strong>
+              <div class="status-label">Completed</div>
+              <div class="status-caption">This session</div>
+            </div>
+          </article>
+          <article class="status-card" data-tone="blocked">
+            <div class="ring-wrap" id="ring-blocked"></div>
+            <div>
+              <strong class="status-count" id="status-blocked">0</strong>
+              <div class="status-label">Blocked</div>
+              <div class="status-caption">Needs attention</div>
+            </div>
+          </article>
+        </div>
+
+        <section class="card wide pipeline-card" aria-labelledby="live-workflow-title">
+          <div class="card-head">
+            <div>
+              <h2 id="live-workflow-title">Live Workflow</h2>
+              <p class="hint">Real-time view of your AI development pipeline</p>
+            </div>
+            <div class="card-head-actions">
+              <span class="live-pill"><span class="live-dot" aria-hidden="true"></span> Live</span>
+              <select id="workflow-range" aria-label="Workflow time range">
+                <option value="1">Last 1 hour</option>
+                <option value="24" selected>Past 24 hours</option>
+                <option value="168">Past 7 days</option>
+              </select>
+            </div>
+          </div>
+          <div id="overview-pipeline" class="pipeline" aria-label="Live workflow pipeline"></div>
+        </section>
+
+        <!-- Compact account/usage snapshot fed by the same /api/usage source
+             as the full "Usage & limits" panel under Providers -- one
+             resolver, two views (compact here, detailed there). Every value
+             is a real local CLI status query or an explicit "Not exposed by
+             provider"; nothing here is ever estimated or invented. -->
+        <section class="card wide usage-snapshot-card" aria-labelledby="usage-snapshot-title">
+          <div class="card-head tight">
+            <h2 id="usage-snapshot-title">Provider Usage</h2>
+            <span class="hint">Real local CLI status only — never a billable call</span>
+          </div>
+          <div id="overview-usage-snapshot" class="usage-snapshot-row"></div>
+        </section>
+
+        <div class="overview-bottom">
+          <section class="card" aria-labelledby="task-status-title">
+            <h2 id="task-status-title">Task Status</h2>
+            <div id="donut-chart" class="donut-wrap"></div>
+          </section>
+          <section class="card" aria-labelledby="activity-title">
+            <div class="card-head tight">
+              <h2 id="activity-title">Activity</h2>
+              <span class="muted" id="activity-range-label">Past 24 hours</span>
+            </div>
+            <div id="activity-chart" class="activity-wrap"></div>
+          </section>
+          <section class="card" aria-labelledby="recent-events-title">
+            <h2 id="recent-events-title">Recent Events</h2>
+            <ul id="recent-events" class="event-feed"></ul>
+          </section>
+        </div>
+
+        <form id="overview-command-form" class="command-bar" aria-label="Steering command">
+          <label class="sr-only" for="overview-command-input">Command</label>
+          <input id="overview-command-input" type="text" placeholder="Type a command… (e.g., /start, /status, /dry-run TASK-ID)" autocomplete="off" />
+          <button type="submit" class="send-btn">
+            Send
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </form>
+        <div id="overview-command-preview" class="steering-preview" hidden></div>
+      </section>
+
+      <section class="view" id="view-runs" role="tabpanel" hidden>
+        <div class="card wide" id="card-quickstart">
+          <div class="card-head">
+            <div>
+              <h2>Quick Start</h2>
+              <p class="hint">Resolved fresh from current repository truth every time — no branch name, worktree path, or task ID to type.</p>
+            </div>
+          </div>
+          <div id="quickstart-row" class="quickstart-row" aria-label="Quick Start options"></div>
+        </div>
+
+        <div class="card wide" id="card-prepared-run" hidden>
+          <div class="card-head">
+            <div>
+              <h2 id="prepared-run-title">Prepared Run</h2>
+              <p class="hint">Review before starting — nothing runs until you press Start Development.</p>
+            </div>
+          </div>
+          <div id="prepared-run-body" class="kv"></div>
+          <div class="prepared-run-actions">
+            <button type="button" id="prepared-run-start" class="btn-primary">Start Development</button>
+            <button type="button" id="prepared-run-cancel">Cancel Quick Start</button>
+          </div>
+          <span class="hint" id="prepared-run-feedback" role="status"></span>
+        </div>
+
+        <details class="card wide" id="card-runbook-create">
+          <summary><h2>Custom Run — independent manual configuration</h2></summary>
+          <p class="hint"><strong>Separate from Quick Start.</strong> Values in this panel do not edit or affect the prepared Quick Start above. Use Custom Run only when you intentionally want full manual control over source reference, branch, worktree, worker, permissions, and stop conditions.</p>
+          <form id="runbook-form" class="settings-grid">
+            <label class="setting">
+              <span>Preset</span>
+              <select id="rb-preset" aria-label="Preset"></select>
+            </label>
+            <label class="setting">
+              <span>Name</span>
+              <input id="rb-name" type="text" placeholder="e.g. Finish PR #92 overnight" />
+            </label>
+            <label class="setting wide-field">
+              <span>Objective / instructions</span>
+              <textarea id="rb-objective" rows="4" placeholder="Editable objective for this run" aria-label="Objective / instructions"></textarea>
+            </label>
+            <label class="setting">
+              <span>Source reference</span>
+              <input id="rb-source-ref" type="text" placeholder="e.g. PR #92 / ENG-AGENT-02-S5" />
+            </label>
+            <label class="setting">
+              <span>Branch</span>
+              <input id="rb-branch" type="text" placeholder="e.g. eng/ENG-AGENT-02-S5-runbooks" />
+            </label>
+            <label class="setting">
+              <span>Worktree</span>
+              <select id="rb-worktree" aria-label="Worktree"></select>
+            </label>
+            <label class="setting">
+              <span>Duration</span>
+              <select id="rb-duration" aria-label="Duration">
+                <option value="120">2 hours</option>
+                <option value="240">4 hours</option>
+                <option value="360">6 hours</option>
+                <option value="480" selected>8 hours</option>
+              </select>
+            </label>
+            <label class="setting">
+              <span>Parent worker</span>
+              <select id="rb-parent-worker" aria-label="Parent worker"></select>
+            </label>
+            <label class="setting">
+              <span>Permission profile</span>
+              <select id="rb-permission" aria-label="Permission profile">
+                <option value="standard">Standard (normal permission prompts)</option>
+                <option value="repo_configured_auto">Repo-configured auto — selected implementation worker's declared sandbox/policy</option>
+              </select>
+            </label>
+            <fieldset class="setting wide-field" id="rb-stop-conditions">
+              <legend>Stop conditions</legend>
+            </fieldset>
+            <div class="setting wide-field" id="rb-safety-summary">
+              <span>Mandatory safety profile (always on; this run can never relax it)</span>
+              <ul id="rb-safety-list" class="safety-list"></ul>
+            </div>
+            <div class="setting wide-field">
+              <button type="submit" class="btn-primary">Create runbook</button>
+              <span class="hint" id="runbook-form-feedback" role="status"></span>
+            </div>
+          </form>
+        </details>
+
+        <div class="card wide" id="card-runbooks-list">
+          <h2>Runbooks</h2>
+          <p class="hint">Every value below comes from the durable orchestrator state — nothing here is estimated.</p>
+          <div id="runbooks-cards" class="entity-list"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-flow" role="tabpanel" hidden>
+        <div class="card wide">
+          <h2>Development Pipeline</h2>
+          <p class="hint">Task → orchestrator → worker/provider/model → worktree → implementation → tests → review → checkpoint → PR → CI. Unreported stages stay explicitly unreported.</p>
+          <p class="hint">Cards for the same state render side by side, so simultaneous workers are visible at a glance. A connector line traces a real task dependency from /api/flow; click any card for its full detail.</p>
+          <div class="flow-graph-wrap">
+            <svg id="flow-edges-svg" class="flow-edges-svg" aria-hidden="true"></svg>
+            <div id="flow-graph" class="flow-graph"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-tasks" role="tabpanel" hidden>
+        <div class="card wide" id="card-tasks-table">
+          <h2>Active Tasks</h2>
+          <div id="tasks-cards" class="entity-list"></div>
+          <div class="table-scroll desktop-table">
+            <table id="tasks-table"><thead><tr>
+              <th>ID</th><th>Task</th><th>Role</th><th>Worker</th><th>Kind</th><th>State</th><th>Priority</th><th>Actions</th>
+            </tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-agents" role="tabpanel" hidden>
+        <div class="card wide" id="card-models">
+          <h2>Agents</h2>
+          <p class="hint">Worker registry data only — nothing invented. CLI availability is a local probe, not a live provider call.</p>
+          <div id="agents-cards" class="entity-list"></div>
+          <div class="table-scroll desktop-table">
+            <table id="models-table"><thead><tr>
+              <th>Worker</th><th>System</th><th>Model</th><th>Intensity</th><th>Capability</th><th>Enabled</th><th>CLI</th>
+            </tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-providers" role="tabpanel" hidden>
+        <div class="card wide" id="card-providers">
+          <h2>Providers</h2>
+          <div id="providers-cards" class="entity-list"></div>
+          <div class="table-scroll desktop-table">
+            <table id="providers-table"><thead><tr>
+              <th>Name</th><th>System</th><th>Provider</th><th>Cost class</th><th>Route</th><th>State</th><th>Configured</th><th>Actions</th>
+            </tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        <div class="card wide" id="card-telemetry">
+          <h2>Telemetry — tokens, cost, quota</h2>
+          <div class="table-scroll">
+            <table id="telemetry-table"><thead><tr>
+              <th>Provider</th><th>Route</th><th>State</th>
+            </tr></thead><tbody></tbody></table>
+          </div>
+          <div class="kv" id="quota-body"></div>
+        </div>
+        <div class="card wide" id="card-usage">
+          <div class="card-head tight">
+            <h2>Usage &amp; limits</h2>
+            <div><span class="hint" id="usage-last-refresh"></span> <button type="button" id="usage-refresh-btn" class="icon-btn">Refresh</button></div>
+          </div>
+          <p class="hint">Every value below is either a real local CLI status query (never a billable call) or explicitly reported as unavailable — nothing here is estimated or invented.</p>
+          <div id="usage-body" class="usage-list"></div>
+        </div>
+        <div class="card wide" id="card-usage-routing">
+          <h2>Usage &amp; Routing</h2>
+          <p class="hint">Role-first decisions and durable escalation history. Unattended runs conserve Codex unless explicitly eligible.</p>
+          <div id="usage-routing-body" class="entity-list">Loading…</div>
+        </div>
+      </section>
+
+      <section class="view" id="view-steering" role="tabpanel" hidden>
+        <div class="card wide" id="card-steering">
+          <h2>Steering</h2>
+          <p class="hint">Slash commands and recognized phrases run with zero AI. Anything else is shown as
+            unrecognized — it is never guessed or silently executed.</p>
+          <form id="steering-form" class="steering-form">
+            <label for="steering-input" class="sr-only">Steering command</label>
+            <input id="steering-input" type="text" placeholder="/pause T1  or  pause task T1" autocomplete="off" />
+            <button type="submit" class="send-btn">Send</button>
+          </form>
+          <details class="steering-help" id="steering-help">
+            <summary>Commands / Help</summary>
+            <div class="steering-help-panel">
+              <p class="hint">These slash commands are deterministic and make zero AI calls. Commands marked <strong>confirm</strong> require an explicit confirmation before execution.</p>
+              <div class="command-grid" role="list" aria-label="Supported steering commands">
+                <code role="listitem">/start [TASK_ID]</code>
+                <code role="listitem">/pause TASK_ID</code>
+                <code role="listitem">/resume TASK_ID</code>
+                <code role="listitem">/stop TASK_ID — confirm</code>
+                <code role="listitem">/stop-after-current — confirm</code>
+                <code role="listitem">/stop-all — confirm</code>
+                <code role="listitem">/enable PROVIDER</code>
+                <code role="listitem">/disable PROVIDER — confirm</code>
+                <code role="listitem">/drain PROVIDER — confirm</code>
+                <code role="listitem">/probe PROVIDER</code>
+                <code role="listitem">/cost-block PROVIDER [reason] — confirm</code>
+                <code role="listitem">/cost-clear PROVIDER</code>
+                <code role="listitem">/priority TASK_ID NUMBER</code>
+                <code role="listitem">/defer TASK_ID</code>
+                <code role="listitem">/set-max-writers NUMBER</code>
+                <code role="listitem">/dry-run TASK_ID</code>
+              </div>
+              <p class="hint">Examples: <code>/start</code>, <code>/probe claude-code</code>, <code>/resume ENG-AGENT-02</code>. Use the Providers and Tasks tabs to copy real provider names and task IDs.</p>
+            </div>
+          </details>
+          <div id="steering-preview" class="steering-preview" hidden></div>
+          <ul id="steering-feed" class="events-list chat-feed"></ul>
+        </div>
+      </section>
+
+      <section class="view" id="view-history" role="tabpanel" hidden>
+        <div class="card wide" id="card-events">
+          <h2>Development History</h2>
+          <div class="history-tools">
+            <input id="history-search" type="search" placeholder="Search task, branch, provider, result…" aria-label="Search development history" />
+            <select id="history-category" aria-label="History category"><option value="">All categories</option><option>implementation</option><option>testing</option><option>review</option><option>documentation</option><option>git</option><option>worktrees</option><option>terminal</option><option value="app_lifecycle">app lifecycle</option><option>provider</option><option>security</option></select>
+          </div>
+          <div id="run-evidence" class="entity-list"></div>
+          <ul id="events-list" class="events-list event-feed"></ul>
+        </div>
+      </section>
+
+      <section class="view" id="view-worktrees" role="tabpanel" hidden>
+        <div class="card wide" id="card-worktrees">
+          <div class="section-heading"><div><h2>Worktrees &amp; Git Operations</h2><p class="subtitle">Managed orchestration work and read-only Git discoveries.</p></div><div class="card-actions"><button id="worktrees-cleanup-preview" type="button">Preview cleanup</button><button id="worktrees-cleanup" type="button" class="danger">Clean eligible finished worktrees</button><button id="worktrees-refresh" type="button">Refresh status</button></div></div>
+          <div id="worktrees-cleanup-result" class="hint" aria-live="polite"></div>
+          <h3>Managed</h3><div id="worktrees-managed" class="entity-list"></div>
+          <h3>Discovered <span class="derived-note">read-only until safely adopted</span></h3><div id="worktrees-discovered" class="entity-list"></div>
+          <div class="card operation-feed"><h3>Operation progress</h3><div id="git-operations" class="entity-list"></div></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-system" role="tabpanel" hidden>
+        <div class="grid">
+          <div class="card" id="card-overview">
+            <h2>Overview</h2>
+            <div class="kv" id="overview-body">Loading…</div>
+          </div>
+          <div class="card" id="card-app-lifecycle">
+            <h2>OctaScene development app</h2>
+            <div class="kv" id="app-lifecycle-body">Loading…</div>
+            <div class="card-actions"><button id="app-start" type="button">Start</button><button id="app-restart" type="button">Restart</button><button id="app-stop" class="danger" type="button">Stop</button></div>
+            <p class="hint">Only the canonical local <code>make run</code> process started by this Control Center can be stopped.</p>
+          </div>
+          <div class="card" id="card-repository-health"><h2>Repository health</h2><div id="repository-health-body" class="kv">Loading…</div><div id="recent-merges" class="entity-list"></div></div>
+          <div class="card" id="card-workers">
+            <h2>Parallel Workers</h2>
+            <div class="kv" id="workers-body">Loading…</div>
+          </div>
+          <div class="card" id="card-resources">
+            <h2>Resources</h2>
+            <div class="kv" id="resources-body">Loading…</div>
+          </div>
+          <div class="card" id="card-tests">
+            <h2>Local Gate</h2>
+            <div class="kv" id="tests-body">Loading…</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-terminal" role="tabpanel" hidden>
+        <div class="section-heading">
+          <div><h2>Terminal</h2><p class="subtitle">A secured PTY for this OctaScene development worktree.</p></div>
+          <span id="terminal-state" class="status-pill st-paused" role="status">Disconnected</span>
+        </div>
+        <article class="panel terminal-panel">
+          <header class="terminal-header">
+            <div>
+              <h3>OctaScene Control Center Terminal</h3>
+              <dl class="terminal-meta" id="terminal-meta">
+                <div><dt>Repository</dt><dd>Loading…</dd></div>
+                <div><dt>Branch</dt><dd>Loading…</dd></div>
+                <div><dt>Virtual environment</dt><dd>Loading…</dd></div>
+                <div><dt>Shell</dt><dd>zsh</dd></div>
+              </dl>
+            </div>
+            <div class="terminal-actions" role="toolbar" aria-label="Terminal controls">
+              <button type="button" id="terminal-reconnect">Reconnect</button>
+              <button type="button" id="terminal-clear">Clear</button>
+              <button type="button" id="terminal-copy">Copy</button>
+            </div>
+          </header>
+          <div id="terminal" class="terminal-host" aria-label="Interactive OctaScene development terminal"></div>
+          <p class="hint">Commands stay inside the allowlisted repository worktree. Only sanitized Control Center terminal command metadata is recorded; shell history is never imported.</p>
+        </article>
+        <article class="panel"><div class="section-heading"><h3>Terminal History</h3><div><select id="terminal-history-limit" aria-label="Terminal history limit"><option>20</option><option selected>50</option><option>100</option></select><button id="terminal-history-clear" class="danger" type="button">Clear metadata</button></div></div><input id="terminal-history-search" type="search" placeholder="Search safe command metadata" aria-label="Search terminal history"/><div id="terminal-history" class="entity-list"></div></article>
+      </section>
+
+      <section class="view" id="view-settings" role="tabpanel" hidden>
+        <div class="card wide">
+          <h2>Settings</h2>
+          <p class="hint">Only controls the dashboard actually supports. Theme and notifications are local to this browser; write-worker cap posts to the existing command layer.</p>
+          <div class="settings-grid">
+            <label class="setting">
+              <span>Theme</span>
+              <select id="theme-select" aria-label="Theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
+              </select>
+            </label>
+            <div class="setting">
+              <span>Desktop notifications</span>
+              <button id="notif-toggle" class="icon-btn" type="button" aria-pressed="false">Enable notifications</button>
+            </div>
+            <label class="setting">
+              <span>Max write workers</span>
+              <span class="inline-field">
+                <input id="max-writers-input" type="number" min="1" max="8" step="1" aria-label="Max write workers" />
+                <button id="max-writers-save" type="button">Save</button>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div class="card wide" id="card-roadmap">
+          <h2>Roadmap progress <span class="derived-note">status labels from repository docs — any computed % is labelled DERIVED</span></h2>
+          <div id="roadmap-summary" class="roadmap-summary" aria-label="Derived tracked completion"></div>
+          <div id="roadmap-cards" class="entity-list"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-roadmap" role="tabpanel" hidden>
+        <div class="card wide">
+          <h2>Roadmap progress <span class="derived-note">same table as Settings — status labels only</span></h2>
+          <p class="hint">This view is kept so existing navigation still has a dedicated roadmap panel. The table is filled from <code>/api/roadmap</code>.</p>
+          <div id="roadmap-alias" class="hint">See Settings for the live table.</div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<div class="sticky-controls" id="sticky-controls" role="toolbar" aria-label="Session controls">
+  <button id="ctl-start" class="ctl" type="button">Start</button>
+  <button id="ctl-pause" class="ctl" type="button">Pause</button>
+  <button id="ctl-resume" class="ctl" type="button">Resume</button>
+  <button id="ctl-stop" class="ctl ctl-danger" type="button">Stop</button>
+</div>
+
+<div class="sheet-backdrop" id="report-backdrop" hidden></div>
+<div class="sheet sheet-wide" id="report-sheet" role="dialog" aria-modal="true" aria-labelledby="report-title" hidden>
+  <h3 id="report-title">Morning report</h3>
+  <pre id="report-body" class="report-body"></pre>
+  <div class="sheet-actions">
+    <button id="report-close" type="button">Close</button>
+  </div>
+</div>
+
+<div class="sheet-backdrop" id="workflow-detail-backdrop" hidden></div>
+<div class="sheet sheet-wide" id="workflow-detail-sheet" role="dialog" aria-modal="true" aria-labelledby="workflow-detail-title" hidden>
+  <h3 id="workflow-detail-title">Workflow stage</h3>
+  <div id="workflow-detail-body"></div>
+  <div class="sheet-actions">
+    <button id="workflow-detail-close" type="button">Close</button>
+  </div>
+</div>
+
+<div class="sheet-backdrop" id="confirm-backdrop" hidden></div>
+<div class="sheet" id="confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
+  <h3 id="confirm-title">Confirm action</h3>
+  <p id="confirm-body"></p>
+  <div class="sheet-actions">
+    <button id="confirm-cancel" type="button">Cancel</button>
+    <button id="confirm-ok" type="button" class="ctl-danger">Confirm</button>
+  </div>
+</div>
+
+<!-- ENG-CP-03 (issue #165): Add Project. Two explicit steps -- Detect, then
+     Save -- so detected values (Git remote, default branch, policy/roadmap/
+     task-source candidates, validation command) are always shown for review
+     before anything is written to the registry. Nothing is assumed about the
+     repository: a plain Git checkout with no recognized files detects fine and
+     saves with empty declarations. -->
+<div class="sheet-backdrop" id="project-add-backdrop" hidden></div>
+<div class="sheet project-sheet" id="project-add-sheet" role="dialog" aria-modal="true" aria-labelledby="project-add-title" hidden>
+  <h3 id="project-add-title">Add project</h3>
+  <p class="project-add-hint">
+    Point the Control Plane at a local Git checkout. The repository supplies its own policy, roadmap and
+    validation contract — nothing is copied into the Control Plane.
+  </p>
+  <label class="project-field" for="project-add-path">Local repository folder</label>
+  <div class="project-detect-row">
+    <input id="project-add-path" type="text" spellcheck="false" autocomplete="off"
+           placeholder="/path/to/repository" />
+    <button id="project-add-detect" type="button">Detect</button>
+  </div>
+
+  <div id="project-add-detected" hidden>
+    <h4 class="project-detected-title">Detected</h4>
+    <dl class="project-detected" id="project-detected-list"></dl>
+
+    <label class="project-field" for="project-add-id">Project ID</label>
+    <input id="project-add-id" type="text" spellcheck="false" autocomplete="off" />
+
+    <label class="project-field" for="project-add-name">Display name</label>
+    <input id="project-add-name" type="text" spellcheck="false" autocomplete="off" />
+
+    <label class="project-field" for="project-add-remote">GitHub remote (owner/repo)</label>
+    <input id="project-add-remote" type="text" spellcheck="false" autocomplete="off" placeholder="optional" />
+
+    <label class="project-field" for="project-add-branch">Default branch</label>
+    <input id="project-add-branch" type="text" spellcheck="false" autocomplete="off" />
+  </div>
+
+  <p class="project-error" id="project-add-error" hidden role="alert"></p>
+  <div class="sheet-actions">
+    <button id="project-add-cancel" type="button">Cancel</button>
+    <button id="project-add-save" type="button" class="primary" disabled>Save project</button>
+  </div>
+</div>
+
+<nav class="bottom-nav" id="bottom-nav" aria-label="Sections">
+  <button data-view="view-overview" class="bn active" aria-label="Home">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5V20h-5.5v-5h-5v5H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    Home
+  </button>
+  <button data-view="view-tasks" class="bn" aria-label="Tasks">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 12.5 10.5 15 16 9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    Tasks
+  </button>
+  <button data-view="view-agents" class="bn" aria-label="Agents">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="8" r="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 18c.8-3.2 2.8-5 6-5s5.2 1.8 6 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    Agents
+  </button>
+  <button data-view="view-history" class="bn" aria-label="History">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="13" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 13V9.5M12 13l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    History
+  </button>
+  <button id="more-tab" class="bn" aria-label="More sections" aria-haspopup="true" aria-expanded="false">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg>
+    More
+  </button>
+</nav>
+
+<div class="sheet-backdrop" id="more-backdrop" hidden></div>
+<div class="sheet" id="more-sheet" role="dialog" aria-modal="true" aria-labelledby="more-title" hidden>
+  <h3 id="more-title">More sections</h3>
+  <div class="more-list">
+    <button data-view="view-runs" class="more-item">Runs</button>
+    <button data-view="view-flow" class="more-item">Flow</button>
+    <button data-view="view-providers" class="more-item">Providers</button>
+    <button data-view="view-steering" class="more-item">Steering</button>
+    <button data-view="view-worktrees" class="more-item">Worktrees</button>
+    <button data-view="view-system" class="more-item">System</button>
+    <button data-view="view-terminal" class="more-item">Terminal</button>
+    <button data-view="view-settings" class="more-item">Settings</button>
+    <button data-view="view-roadmap" class="more-item">Roadmap</button>
+  </div>
+  <div class="sheet-actions">
+    <button id="more-close" type="button">Close</button>
+  </div>
+</div>
+
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

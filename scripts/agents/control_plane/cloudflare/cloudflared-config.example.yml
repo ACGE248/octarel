@@ -1,0 +1,23 @@
+# ENG-AGENT-02-S6: cloudflared tunnel config template. Zero secrets.
+#
+# Copy to `cloudflared-config.yml` (gitignored) next to this file, or to your
+# usual `~/.cloudflared/` location, and replace every ALL_CAPS placeholder.
+#
+# TUNNEL_UUID and the credentials file are produced by `cloudflared tunnel
+# create` (see the setup doc) — they identify and authenticate the tunnel to
+# your Cloudflare account and must never be committed to this repository.
+
+tunnel: TUNNEL_UUID
+credentials-file: /Users/YOUR_MACOS_USERNAME/.cloudflared/TUNNEL_UUID.json
+
+# Cloudflare Tunnel forwards the original Host header to the origin, and
+# Cloudflare Access injects a signed Cf-Access-Jwt-Assertion header on every
+# request that already passed Access authentication at the edge -- neither
+# requires any configuration here. This ingress rule only says "requests for
+# dev.octascene.com go to the local Control Center"; Access is configured
+# separately in the Cloudflare dashboard (Zero Trust -> Access -> Applications).
+ingress:
+  - hostname: dev.octascene.com
+    service: http://127.0.0.1:8877
+  # Catch-all: cloudflared requires a final rule with no hostname.
+  - service: http_status:404

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ENG-AGENT-02-S6: macOS launchd user-agent template so the Control Center
+  dashboard itself (not just the tunnel) starts automatically at login/
+  reboot, restarts automatically after a crash (KeepAlive), and stays
+  running without any terminal window open. Zero secrets: this plist only
+  ever names paths/ports, never a credential.
+
+  This still binds to 127.0.0.1 only, on the existing default port 8877 —
+  launchd changes *how the process is supervised*, never *what it exposes*.
+  Never add "0.0.0.0" or a LAN IP to --host here.
+
+  The command line optionally sources
+  scripts/agents/control_plane/cloudflare/remote-access.env if that file
+  exists (it is gitignored; see remote-access.env.example) to enable the
+  application-level Cloudflare Access JWT verification defense-in-depth on
+  top of Cloudflare Access itself. If that file does not exist, the
+  dashboard simply starts in its ordinary local-only mode — remote requests
+  are still gated by Cloudflare Access at the edge either way; the env file
+  only adds the application's own independent verification layer.
+
+  Uses `/bin/zsh -c` (a plain, non-login shell), not `-lc`: under launchd
+  (no controlling terminal) a *login* shell's own startup directory
+  resolution can fail with "getcwd: cannot access parent directories" on
+  some machines/volumes (observed on an externally-mounted repo checkout),
+  even though the actual `WorkingDirectory` key below still applies
+  correctly either way. A plain non-login shell skips that failing
+  login-init step entirely; nothing here needs `.zprofile`/`.zshrc`.
+
+  EnvironmentVariables/PATH below is required: launchd's own default PATH
+  (/usr/bin:/bin:/usr/sbin:/sbin) does not include Homebrew, pipx/uv's
+  ~/.local/bin, or a CLI vendor's own install dir (e.g. ~/.grok/bin), so
+  without it every CLI-backed worker probe
+  (`shutil.which("claude"/"codex"/"grok"/"agy")` in
+  scripts/agents/registry.py) falsely reports NOT_CONFIGURED/CLI_MISSING
+  under this launchd service even when the same CLI is installed and
+  works fine in an interactive shell. Run `which claude codex grok agy`
+  in the shell you normally use them from and adjust REPLACE_WITH_YOUR_PATH
+  below to match every directory those resolve to (plus the standard
+  system dirs) — do not just copy the example verbatim.
+
+  Copy to ~/Library/LaunchAgents/com.octascene.orchestrator-dashboard.plist,
+  replace every ALL_CAPS placeholder, then:
+
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.octascene.orchestrator-dashboard.plist
+
+  To stop/disable (rollback):
+
+    launchctl bootout gui/$(id -u)/com.octascene.orchestrator-dashboard
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.octascene.orchestrator-dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>[ -f PATH_TO_REPO_ROOT/scripts/agents/control_plane/cloudflare/remote-access.env ] &amp;&amp; source PATH_TO_REPO_ROOT/scripts/agents/control_plane/cloudflare/remote-access.env; exec PATH_TO_REPO_ROOT/.venv/bin/python -m scripts.agents.orchestrator dashboard --host 127.0.0.1 --port 8877</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>PATH_TO_REPO_ROOT</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_YOUR_PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/octascene-orchestrator-dashboard.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/octascene-orchestrator-dashboard.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,14 @@
+{
+  "name": "octarel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:dashboard": "playwright test --config scripts/agents/control_plane/playwright.config.js"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "1.62.1",
+    "@xterm/xterm": "^6.0.0",
+    "simple-icons": "^16.5.0"
+  }
+}

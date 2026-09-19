@@ -1,0 +1,21 @@
+Octarel
+Copyright 2026 Octarel contributors
+
+This repository is a standalone orchestration control plane extracted from
+the Octages/OctaScene development tooling. It is not a second source of
+OctaScene product, roadmap, or ledger truth.
+
+Third-party notices
+-------------------
+
+- scripts/agents/control_plane/dashboard/vendor/xterm — @xterm/xterm 6.0.0, MIT.
+  License file: scripts/agents/control_plane/dashboard/vendor/xterm/LICENSE
+- scripts/agents/control_plane/dashboard/assets/icons — Simple Icons 16.5.0, CC0-1.0.
+  License file: scripts/agents/control_plane/dashboard/assets/icons/LICENSE-simple-icons.md
+  Provider marks remain subject to the respective providers' trademark rules.
+
+See scripts/agents/control_plane/dashboard/ASSET_LICENSES.md and THIRD_PARTY.md.
+
+Development-only Node packages used by Control Center tests include
+@playwright/test (Apache-2.0) and @axe-core/playwright (MPL-2.0). They are not
+runtime dashboard assets.

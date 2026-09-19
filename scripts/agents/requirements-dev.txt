@@ -1,0 +1,6 @@
+# ENG-CP-02 (issue #165): dependencies to develop/test the Control Plane
+# itself, independent of the repository root's requirements-dev.txt (which
+# pulls in the full OctaScene application stack via `-r requirements.txt`).
+-r requirements.txt
+pytest>=8.0,<10.0
+ruff>=0.9,<1.0

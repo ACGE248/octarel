@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  CPX-06: macOS launchd user-agent for the standalone Octarel dashboard.
+  Zero secrets: this template only names placeholders. Copy to
+  ~/Library/LaunchAgents/com.octascene.orchestrator-dashboard.plist (same
+  label as the previous embedded service so KeepAlive cannot start both),
+  replace every ALL_CAPS placeholder, never git-add the filled copy.
+
+  Still binds 127.0.0.1:8877 only. Cloudflare Tunnel keeps forwarding
+  dev.octascene.com to that loopback port. Cloudflare Access is unchanged.
+
+  ProgramArguments run a wrapper copied to
+  ~/Library/Application Support/Octarel/octarel-dashboard-service.sh so
+  launchd can start at login before an external checkout volume is mounted.
+  OCTAREL_CODE_ROOT still points at the Octarel checkout, not Octages.
+
+  Keep the existing OCTAGES_ORCH_REMOTE_* identifiers (Access AUD, team
+  domain, allowlisted email) — they are application-side JWT verification,
+  not a rename of Cloudflare Access.
+
+  Rollback: restore the pre-cutover plist and set
+  OCTAGES_EMBEDDED_ORCHESTRATOR_FALLBACK=1. See docs/engineering/CUTOVER.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.octascene.orchestrator-dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>PATH_TO_HOME/Library/Application Support/Octarel/octarel-dashboard-service.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_YOUR_PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>OCTAREL_CODE_ROOT</key>
+    <string>PATH_TO_OCTAREL_ROOT</string>
+    <key>OCTAREL_STATE_DIR</key>
+    <string>PATH_TO_OCTAREL_ROOT/.orchestrator-state</string>
+    <key>OCTAREL_OCTASCENE_ROOT</key>
+    <string>PATH_TO_OCTAGES_CHECKOUT</string>
+    <key>OCTAGES_ORCH_CANONICAL_REPO_ROOT</key>
+    <string>PATH_TO_OCTAGES_CHECKOUT</string>
+    <key>OCTAGES_ORCH_REMOTE_ENABLED</key>
+    <string>1</string>
+    <key>OCTAGES_ORCH_REMOTE_HOSTNAME</key>
+    <string>dev.octascene.com</string>
+    <key>OCTAGES_ORCH_REMOTE_TEAM_DOMAIN</key>
+    <string>YOUR_TEAM.cloudflareaccess.com</string>
+    <key>OCTAGES_ORCH_REMOTE_AUD</key>
+    <string>YOUR_ACCESS_APPLICATION_AUD_TAG</string>
+    <key>OCTAGES_ORCH_REMOTE_ALLOWED_EMAILS</key>
+    <string>you@example.com</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/octarel-orchestrator-dashboard.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/octarel-orchestrator-dashboard.err.log</string>
+</dict>
+</plist>

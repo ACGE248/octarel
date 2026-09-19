@@ -1,0 +1,11 @@
+# Example Octarel operator configuration. Copy locally; do not commit real paths.
+
+[state]
+# directory = "/path/to/octarel-state"
+
+[projects.octascene]
+project_id = "octascene"
+display_name = "OctaScene"
+github_remote = "ACGE248/octages"
+# local_repo_root = "/path/to/octages-checkout"
+default_branch = "main"

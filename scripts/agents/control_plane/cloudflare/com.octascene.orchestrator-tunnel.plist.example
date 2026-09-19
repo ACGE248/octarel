@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ENG-AGENT-02-S6: macOS launchd user-agent template so `cloudflared` starts
+  automatically at login/reboot, restarts automatically after a crash
+  (KeepAlive), and stays running without any terminal window open. Zero
+  secrets: the tunnel's real credentials live in the credentials-file that
+  `~/.cloudflared/config.yml` (produced by `cloudflared tunnel create` +
+  `cloudflared tunnel route dns`) points at, never in this plist. This
+  invokes the tunnel by name and relies on cloudflared's own default
+  discovery of `~/.cloudflared/config.yml` (the same invocation
+  `cloudflared tunnel run <name>` uses interactively) rather than an
+  explicit --config path, so the same config works for both.
+
+  Copy to ~/Library/LaunchAgents/com.octascene.orchestrator-tunnel.plist,
+  replace every ALL_CAPS placeholder, then:
+
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.octascene.orchestrator-tunnel.plist
+
+  (`launchctl load` still works but is the deprecated pre-macOS-10.11 form;
+  `bootstrap`/`bootout` is the modern equivalent used throughout this doc.)
+
+  To stop/disable (rollback):
+
+    launchctl bootout gui/$(id -u)/com.octascene.orchestrator-tunnel
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.octascene.orchestrator-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>PATH_TO_CLOUDFLARED_BINARY</string>
+    <string>tunnel</string>
+    <string>run</string>
+    <string>YOUR_TUNNEL_NAME</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/octascene-orchestrator-tunnel.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/octascene-orchestrator-tunnel.err.log</string>
+</dict>
+</plist>
