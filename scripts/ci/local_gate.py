@@ -266,9 +266,9 @@ def phase_plan(
         phases.append(
             GatePhase(
                 "control-center-ui-audit",
-                ("env", f"OCTAGES_CONTROL_CENTER_TEST_PORT={ports.get('control_center_ui', 0)}",
-                 f"OCTAGES_PYTHON_BIN={python}", "npx", "--no-install", "playwright", "test", "--config",
-                 "scripts/agents/control_plane/playwright.config.js"),
+                # OCTAREL-TEST-01: the full responsive matrix runs through the isolated
+                # bounded-parallel runner (own ports/fixtures/results per viewport lane).
+                (python, "scripts/ci/playwright_matrix.py", "--python", python),
                 ("tree-whitespace",), "heavy",
             )
         )
@@ -483,7 +483,8 @@ def _phase_inputs(root: Path, phase: GatePhase, changed_paths: list[str]) -> lis
     if phase.name == "ui-audit":
         return [p for p in tracked if p.startswith(("frontend/v2/", "ui-audit/")) or p in {"package.json", "package-lock.json"}]
     if phase.name == "control-center-ui-audit":
-        return [p for p in tracked if p.startswith("scripts/agents/control_plane/") or p in {"package.json", "package-lock.json"}]
+        return [p for p in tracked if p.startswith("scripts/agents/control_plane/")
+                or p in {"package.json", "package-lock.json", "scripts/ci/playwright_matrix.py", "scripts/ci/ports.py"}]
     return tracked
 
 
@@ -688,8 +689,6 @@ def run_gate(*, root: Path, base: str, docs_reviewed: bool, review_provider: str
         allocations: dict[str, int] = {}
         if impact.product_ui and risk.run_ui_audit:
             allocations["product_ui"] = leases.allocate("product-ui-audit")
-        if impact.control_center_ui:
-            allocations["control_center_ui"] = leases.allocate("control-center-ui-audit")
         phases = phase_plan(risk, impact, python, ports=allocations, root=root)
         phases[0] = GatePhase("tree-whitespace", ("git", "diff", "--check", merge_base, tree))
         preflight_result = preflight(

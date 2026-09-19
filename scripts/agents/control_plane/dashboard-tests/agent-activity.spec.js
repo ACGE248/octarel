@@ -32,7 +32,7 @@ async function repoRoot(request, baseURL) {
   return body.root;
 }
 
-function writeAttempt(root, { worker, runId, result, exitStatus, finishedAt, logText, notes }) {
+function writeAttempt(root, { worker, runId, result, exitStatus, finishedAt, logText, notes, startedAt = '2026-09-18T10:00:00+00:00' }) {
   const runDir = path.join(root, '.agent-output', TASK_REF, worker, runId);
   fs.mkdirSync(runDir, { recursive: true });
   const manifest = {
@@ -49,7 +49,7 @@ function writeAttempt(root, { worker, runId, result, exitStatus, finishedAt, log
     result: result ?? null,
     exit_status: exitStatus ?? null,
     duration_seconds: 5,
-    started_at: '2026-09-18T10:00:00+00:00',
+    started_at: startedAt,
     finished_at: finishedAt === undefined ? '2026-09-18T10:00:05+00:00' : finishedAt,
     files_changed: [],
     tests_or_checks: [],
@@ -90,6 +90,16 @@ async function openWorkerCard(page, stageId) {
 }
 
 test.describe('OCTAREL-UI-01 Agent Activity viewer', () => {
+  // OCTAREL-TEST-01: every test writes its own real evidence tree, so start and end
+  // each test with none. Without this a later test (and the History view seen by
+  // coverage-manifest.spec.js) observes attempts left behind by earlier tests in the
+  // same fixture, making results depend on test order.
+  async function clearEvidence(request, baseURL) {
+    fs.rmSync(path.join(await repoRoot(request, baseURL), '.agent-output', TASK_REF), { recursive: true, force: true });
+  }
+  test.beforeEach(async ({ request, baseURL }) => clearEvidence(request, baseURL));
+  test.afterEach(async ({ request, baseURL }) => clearEvidence(request, baseURL));
+
   test('opening a running worker card shows live output and closes cleanly', async ({ page, request, baseURL }) => {
     const root = await repoRoot(request, baseURL);
     writeAttempt(root, {
@@ -147,8 +157,8 @@ test.describe('OCTAREL-UI-01 Agent Activity viewer', () => {
 
   test('multiple attempts are distinguishable and switching preserves the correct output', async ({ page, request, baseURL }) => {
     const root = await repoRoot(request, baseURL);
-    writeAttempt(root, { worker: DONE_WORKER, runId: 'run-multi-a', result: 'FAIL', logText: 'first attempt failed\n' });
-    writeAttempt(root, { worker: DONE_WORKER, runId: 'run-multi-b', result: 'PASS', logText: 'second attempt passed\n' });
+    writeAttempt(root, { worker: DONE_WORKER, runId: 'run-multi-a', result: 'FAIL', logText: 'first attempt failed\n', startedAt: '2026-09-18T10:00:00+00:00' });
+    writeAttempt(root, { worker: DONE_WORKER, runId: 'run-multi-b', result: 'PASS', logText: 'second attempt passed\n', startedAt: '2026-09-18T10:05:00+00:00' });
 
     await openWorkerCard(page, DONE_STAGE_ID);
     const pills = page.locator('.agent-activity-attempt-pill');

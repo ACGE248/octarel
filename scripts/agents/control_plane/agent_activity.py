@@ -139,6 +139,9 @@ def read_attempt(repo_root: Path, task_id: str, worker: str, run_id: str) -> dic
     Invents no new execution or logging architecture.
     """
 
+    # Resolve once so relpaths computed from resolved run/log paths stay relative to it
+    # even when the checkout sits behind a symlink (macOS /var -> /private/var temp roots).
+    repo_root = Path(repo_root).resolve()
     run_dir = _run_dir(repo_root, task_id, worker, run_id)
     if not run_dir.is_dir():
         return {

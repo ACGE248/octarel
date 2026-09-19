@@ -1492,8 +1492,10 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 }
 .bn.active { color: var(--accent); font-weight: 600; }
 
+/* Modal sheets stack above the sidebar (z-index 45): at 768px the centered dialog
+   overlaps the visible sidebar, which otherwise intercepts clicks on the dialog. */
 .sheet-backdrop {
-  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 30;
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 50;
 }
 .sheet {
   position: fixed;
@@ -1502,7 +1504,7 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
   border-top: 1px solid var(--border);
   border-radius: 16px 16px 0 0;
   padding: 16px max(16px, var(--safe-right)) calc(16px + var(--safe-bottom)) max(16px, var(--safe-left));
-  z-index: 31;
+  z-index: 51;
 }
 .sheet h3 { margin: 0 0 8px; }
 .sheet-actions { display: flex; gap: 10px; margin-top: 12px; }

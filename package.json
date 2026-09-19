@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:dashboard": "playwright test --config scripts/agents/control_plane/playwright.config.js"
+    "test:dashboard": "playwright test --config scripts/agents/control_plane/playwright.config.js",
+    "test:dashboard:matrix": "python3 scripts/ci/playwright_matrix.py"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

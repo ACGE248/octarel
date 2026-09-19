@@ -10,6 +10,7 @@ All notable changes to Octarel are documented in this file.
 - `octarel project`, `octarel providers`, `octarel public-safety`, and `octarel service canonicalize-state`
 - Maintained install, architecture, provider, release, state, and publication docs
 - OCTAREL-OPS-02: after an accepted run, Octarel re-reads the managed project's current repository truth and records the next eligible task (or the exact reason advancement stopped: blocked, no eligible task, owner decision required). Shown on the Runs view; `auto_advance=true` project capability opts in to starting it automatically; `POST /api/runbooks/{id}/advance` re-evaluates.
+- OCTAREL-TEST-01: `npm run test:dashboard:matrix` (`scripts/ci/playwright_matrix.py`) runs the seven Control Center viewport projects as isolated bounded-parallel lanes (default concurrency 3, `OCTAREL_PLAYWRIGHT_MATRIX_CONCURRENCY`); the local gate's Control Center phase uses it. Fixed the Agent Activity viewer for symlinked repo roots, made its specs order-independent, and raised modal sheets above the sidebar so they are clickable at 768px.
 
 ### Changed
 

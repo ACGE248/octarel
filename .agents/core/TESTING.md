@@ -26,6 +26,25 @@ UI audit scope is path/risk based: none for backend/prose; focused product or Co
 ordinary scoped UI change; full relevant matrix for shared shell/design-system/navigation/accessibility or
 release/high-risk UI. Do not run smoke plus full when full already supplies the evidence.
 
+### Control Center responsive matrix
+
+Focused Control Center iteration runs one viewport project with the ordinary Playwright command. When the full
+seven-viewport matrix is required (the local gate's Control Center phase, or `npm run test:dashboard:matrix`), it
+runs only through `scripts/ci/playwright_matrix.py`; never raise Playwright `workers` against the shared fixture.
+
+Invariants:
+- Concurrency is bounded (default 3, `OCTAREL_PLAYWRIGHT_MATRIX_CONCURRENCY`, 1–7) and never derived from CPU count.
+  A value above the default needs measured benefit with no instability.
+- Each concurrent lane has exactly one worker, one viewport project, one unique loopback port, one fixture-server
+  process, its own Git/SQLite fixture state, results directory, and stdout/stderr. Lanes share no mutable state.
+- Any lane that does not positively PASS (failed, timed out, cancelled, could not launch, no report) fails the
+  aggregate. Interruption or failure terminates every fixture/browser child the lane spawned.
+- Failed lanes keep their fixture state, traces, and screenshots; the aggregate `summary.json` records project,
+  port, duration, counts, and artifact path per lane.
+- Lanes receive an allowlisted environment: no secrets, no provider/API credentials, no live daemon state.
+
+Test-scope selection stays with `scripts/ci/test_impact.py`; the runner only executes the matrix.
+
 ## Owner waiver
 
 The repository owner may explicitly waive any Octarel test, browser run, UI audit, independent review, or

@@ -11,7 +11,12 @@ import path from 'node:path';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 // Anchored at the repo root (not this config's own directory) so results
 // land under the already-gitignored top-level /test-results/ tree.
-const resultsRoot = path.join(repoRoot, 'test-results', 'control-center');
+// OCTAREL-TEST-01: the matrix runner (scripts/ci/playwright_matrix.py) gives every
+// concurrent viewport lane its own results directory and fixture root through
+// these variables. Unset, behavior is exactly the serial single-fixture default.
+const laneResults = process.env.OCTAREL_PLAYWRIGHT_RESULTS_DIR;
+const laneFixtureRoot = process.env.OCTAREL_CONTROL_CENTER_FIXTURE_ROOT;
+const resultsRoot = laneResults || path.join(repoRoot, 'test-results', 'control-center');
 const port = process.env.OCTAGES_CONTROL_CENTER_TEST_PORT || '8899';
 const origin = `http://127.0.0.1:${port}`;
 const pythonBin = process.env.OCTAGES_PYTHON_BIN || process.env.OCTAREL_PYTHON_BIN || 'python3';
@@ -25,7 +30,11 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  reporter: [['line'], ['html', { outputFolder: `${resultsRoot}/html`, open: 'never' }]],
+  reporter: [
+    ['line'],
+    ['html', { outputFolder: `${resultsRoot}/html`, open: 'never' }],
+    ...(laneResults ? [['json', { outputFile: `${resultsRoot}/report.json` }]] : []),
+  ],
   use: {
     baseURL: origin,
     actionTimeout: 5_000,
@@ -34,8 +43,10 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: [pythonBin, ...pythonArgs, 'scripts/agents/control_plane/dashboard-tests/serve_fixture.py', '--port', port]
-      .join(' '),
+    command: [
+      pythonBin, ...pythonArgs, 'scripts/agents/control_plane/dashboard-tests/serve_fixture.py', '--port', port,
+      ...(laneFixtureRoot ? ['--root', JSON.stringify(laneFixtureRoot)] : []),
+    ].join(' '),
     cwd: repoRoot,
     url: `${origin}/api/overview`,
     reuseExistingServer: false,

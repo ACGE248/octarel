@@ -172,6 +172,20 @@ def test_read_attempt_completed_output_available(tmp_path: Path) -> None:
     assert attempt["details"]["result"] == "PASS"
 
 
+def test_read_attempt_output_is_available_when_the_repo_root_is_behind_a_symlink(tmp_path: Path) -> None:
+    """macOS temp roots (/var -> /private/var) must not turn a real log into a 'missing' output."""
+
+    real = tmp_path / "real-root"
+    real.mkdir()
+    link = tmp_path / "link-root"
+    link.symlink_to(real, target_is_directory=True)
+    _write_attempt(link, run_id="run-a", log_text="through the symlink\n")
+    attempt = read_attempt(link, TASK_ID, WORKER, "run-a")
+    assert attempt["output"]["status"] == "available"
+    assert "through the symlink" in attempt["output"]["content"]
+    assert attempt["evidence"]["log_relpath"] == f".agent-output/{TASK_ID}/{WORKER}/run-a/logs/run.log"
+
+
 def test_read_attempt_failed_output_still_inspectable(tmp_path: Path) -> None:
     _write_attempt(tmp_path, run_id="run-a", result="FAIL", exit_status=1, log_text="boom: traceback\n")
     attempt = read_attempt(tmp_path, TASK_ID, WORKER, "run-a")
