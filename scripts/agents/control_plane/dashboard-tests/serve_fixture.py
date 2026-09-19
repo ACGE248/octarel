@@ -665,6 +665,22 @@ def _mount_test_token_route(app, private_key) -> None:
         return {"token": token}
 
 
+def _mount_test_repo_root_route(app, ctx) -> None:
+    """Test-only route: expose this fixture process's isolated repo_root so a
+    Playwright spec running in the same host process's filesystem (see the
+    existing ``realWorktreePath`` comment in control-center.spec.js -- "the
+    fixture server and this test process share one host") can write a real
+    ``.agent-output/<task_ref>/<worker>/<run_id>/`` fixture tree for
+    OCTAREL-UI-01's Agent Activity viewer before opening it, the same way
+    other fixtures here seed real on-disk state rather than mocking the API.
+    Never mounted on the real product dashboard's ``create_app``.
+    """
+
+    @app.get("/test/repo-root")
+    def repo_root_probe() -> dict[str, str]:
+        return {"root": str(ctx.repo_root)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
@@ -678,6 +694,7 @@ def main() -> int:
     remote_state, private_key = _build_remote_state(f"{args.host}:{args.port}")
     app = create_app(ctx, roadmap_path=root / "docs" / "PRODUCT_ROADMAP.md", remote=remote_state)
     _mount_test_token_route(app, private_key)
+    _mount_test_repo_root_route(app, ctx)
 
     @app.post("/__fixture__/reset")
     def reset_fixture() -> dict[str, bool]:

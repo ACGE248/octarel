@@ -83,6 +83,14 @@
     });
   }
 
+  let agentActivityPollId = null;
+  function stopAgentActivityPoll() {
+    if (agentActivityPollId) {
+      clearInterval(agentActivityPollId);
+      agentActivityPollId = null;
+    }
+  }
+
   async function getJSON(path) {
     const res = await fetch(path, { cache: "no-store" });
     if (!res.ok) throw new Error(`${path} -> ${res.status}`);
@@ -1063,10 +1071,239 @@
       if (known) track.appendChild(el("i", { style: `width:${Math.max(0, Math.min(100, item.progress))}%` }));
       return el("div", { class: "workflow-progress-row" }, [track, el("span", { text: known ? `${item.progress}%` : "—" })]);
     }
-    function openDetail(item) {
+    function elapsedFrom(startedIso, endedIso) {
+      if (!startedIso) return null;
+      const start = new Date(startedIso).getTime();
+      const end = endedIso ? new Date(endedIso).getTime() : Date.now();
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+      const secs = Math.round((end - start) / 1000);
+      if (secs < 60) return `${secs}s`;
+      const mins = Math.floor(secs / 60);
+      if (mins < 60) return `${mins}m ${secs % 60}s`;
+      const hrs = Math.floor(mins / 60);
+      return `${hrs}h ${mins % 60}m`;
+    }
+
+    function agentActivityHeaderRow(label, value) {
+      return el("div", { class: "agent-activity-fact" }, [
+        el("span", { class: "agent-activity-fact-label", text: label }),
+        el("span", { class: "agent-activity-fact-value", text: String(value) }),
+      ]);
+    }
+
+    // OCTAREL-UI-01 Agent Activity viewer: read-only, reuses the existing
+    // .agent-output/<task>/<worker>/<run_id>/ evidence tree via the new
+    // /api/agent-activity endpoints (see agent_activity.py). Never a shell;
+    // never invents output. Two attempts of the same role are distinguished
+    // by run_id, per the acceptance criteria.
+    async function renderAgentActivity(item, taskId) {
+      const body = document.getElementById("workflow-detail-body");
+      body.innerHTML = "";
+      const worker = item.worker || item.id;
+      const role = item.role || (item.id === "orchestrator" ? "Orchestrator" : displayName(worker));
+
+      const factsHost = el("div", { class: "agent-activity-facts" });
+      const attemptBar = el("div", { class: "agent-activity-attempts" });
+      const tabBar = el("div", { class: "agent-activity-tabs", role: "tablist" });
+      const panels = el("div", { class: "agent-activity-panels" });
+      body.append(factsHost, attemptBar, tabBar, panels);
+
+      let attempts = [];
+      try {
+        const resp = await getJSON(`/api/agent-activity/${encodeURIComponent(taskId)}/${encodeURIComponent(worker)}`);
+        attempts = resp.attempts || [];
+      } catch (err) {
+        factsHost.appendChild(el("p", { class: "hint", text: "Could not load attempt history for this worker." }));
+        return;
+      }
+
+      const headerRows = [
+        ["Task/run", taskId], ["Stage", item.label || role], ["Role", role],
+        ["Provider", item.provider], ["Model", item.model], ["State", statusText(item.state)],
+        ["Elapsed", elapsedFrom(item.started_at, item.finished_at)], ["Worktree", item.worktree],
+        ["Attempts", attempts.length ? `${attempts.length} recorded` : null],
+      ].filter((row) => row[1]);
+      headerRows.forEach(([k, v]) => factsHost.appendChild(agentActivityHeaderRow(k, v)));
+
+      if (!attempts.length) {
+        panels.appendChild(el("p", { class: "hint", text: "No recorded runs yet for this worker on this task." }));
+        return;
+      }
+
+      let activeRunId = attempts[0].run_id;
+      let activeTab = "live";
+      let followTail = true;
+      let currentPayload = null;
+
+      function attemptLabel(attempt, index) {
+        const n = attempts.length - index;
+        const when = attempt.started_at ? relativeTime(attempt.started_at) : attempt.run_id;
+        return `Attempt ${n} · ${attempt.result || "UNKNOWN"} · ${when}`;
+      }
+
+      function renderAttemptBar() {
+        attemptBar.innerHTML = "";
+        if (attempts.length < 2) return;
+        attempts.forEach((attempt, index) => {
+          const btn = el("button", {
+            type: "button",
+            class: `agent-activity-attempt-pill ${attempt.run_id === activeRunId ? "active" : ""}`,
+            text: attemptLabel(attempt, index),
+          });
+          btn.addEventListener("click", () => { activeRunId = attempt.run_id; loadAttempt(); });
+          attemptBar.appendChild(btn);
+        });
+      }
+
+      function renderTabs() {
+        tabBar.innerHTML = "";
+        [["live", "Live Output"], ["details", "Details"], ["evidence", "Evidence"]].forEach(([key, label]) => {
+          const btn = el("button", {
+            type: "button", role: "tab", "aria-selected": String(activeTab === key),
+            class: `agent-activity-tab ${activeTab === key ? "active" : ""}`, text: label,
+          });
+          btn.addEventListener("click", () => { activeTab = key; renderTabs(); renderPanel(); });
+          tabBar.appendChild(btn);
+        });
+      }
+
+      function renderLivePanel(payload) {
+        const controls = el("div", { class: "agent-activity-output-controls" });
+        const searchInput = el("input", { type: "search", placeholder: "Search output…", class: "agent-activity-search" });
+        const wrapLabel = el("label", { class: "agent-activity-toggle" });
+        const wrapInput = el("input", { type: "checkbox" });
+        wrapLabel.append(wrapInput, " Wrap");
+        const followBtn = el("button", { type: "button", class: "agent-activity-btn", text: followTail ? "Pause follow" : "Follow tail" });
+        const jumpBtn = el("button", { type: "button", class: "agent-activity-btn", text: "Jump to bottom" });
+        const copyBtn = el("button", { type: "button", class: "agent-activity-btn", text: "Copy output" });
+        controls.append(searchInput, wrapLabel, followBtn, jumpBtn, copyBtn);
+
+        const pre = el("pre", { class: "agent-activity-log" });
+        const output = payload.output || {};
+        const fullText = output.content || "";
+        if (output.status === "missing") {
+          pre.appendChild(el("code", { text: "No output recorded for this attempt (missing or pruned)." }));
+        } else if (output.status === "empty") {
+          pre.appendChild(el("code", { text: "No output yet." }));
+        } else {
+          pre.appendChild(el("code", { text: fullText }));
+        }
+        if (output.truncated) controls.appendChild(el("span", { class: "hint", text: "Showing the most recent portion of a longer log." }));
+
+        const codeEl = pre.querySelector("code");
+        searchInput.addEventListener("input", () => {
+          if (!codeEl) return;
+          const q = searchInput.value;
+          if (!q) { codeEl.textContent = fullText; return; }
+          const matched = fullText.split("\n").filter((line) => line.toLowerCase().includes(q.toLowerCase()));
+          codeEl.textContent = matched.length ? matched.join("\n") : "(no matching lines)";
+        });
+        wrapInput.addEventListener("change", (e) => pre.classList.toggle("wrap", e.target.checked));
+        followBtn.addEventListener("click", () => {
+          followTail = !followTail;
+          followBtn.textContent = followTail ? "Pause follow" : "Follow tail";
+          if (followTail) pre.scrollTop = pre.scrollHeight;
+        });
+        jumpBtn.addEventListener("click", () => { pre.scrollTop = pre.scrollHeight; });
+        copyBtn.addEventListener("click", () => { navigator.clipboard?.writeText(fullText).catch(() => {}); });
+
+        const panel = el("div", { class: "agent-activity-panel" }, [controls, pre]);
+        if (followTail) requestAnimationFrame(() => { pre.scrollTop = pre.scrollHeight; });
+        return panel;
+      }
+
+      function renderDetailsPanel(payload) {
+        const d = payload.details;
+        if (!d) return el("p", { class: "hint", text: "No details recorded for this attempt." });
+        const attemptIndex = attempts.findIndex((a) => a.run_id === payload.run_id);
+        const rows = [
+          ["Run/session ID", payload.run_id], ["Result", d.result],
+          ["Exit/failure status", d.exit_status !== null && d.exit_status !== undefined ? d.exit_status : null],
+          ["Started", d.started_at ? relativeTime(d.started_at) : null],
+          ["Finished", d.finished_at ? relativeTime(d.finished_at) : null],
+          ["Duration", elapsedFrom(d.started_at, d.finished_at)],
+          ["Planned system / provider / model", [d.planned && d.planned.execution_system, d.planned && d.planned.provider, d.planned && d.planned.model].filter(Boolean).join(" / ") || null],
+          ["Actual system / provider / model", [d.actual && d.actual.execution_system, d.actual && d.actual.provider, d.actual && d.actual.model].filter(Boolean).join(" / ") || null],
+          ["Attempt", attemptIndex === -1 ? null : `${attempts.length - attemptIndex} of ${attempts.length}`],
+        ].filter((r) => r[1] !== null && r[1] !== undefined && r[1] !== "");
+        const dl = el("dl", { class: "workflow-detail-list" });
+        rows.forEach(([k, v]) => dl.append(el("dt", { text: k }), el("dd", { text: String(v) })));
+        return el("div", { class: "agent-activity-panel" }, [dl]);
+      }
+
+      function renderEvidencePanel(payload) {
+        const evd = payload.evidence;
+        if (!evd) return el("p", { class: "hint", text: "No evidence recorded for this attempt." });
+        const panel = el("div", { class: "agent-activity-panel" });
+        if (evd.candidate_tree_sha) panel.appendChild(el("p", {}, [el("strong", { text: "Candidate tree: " }), el("code", { text: evd.candidate_tree_sha })]));
+        if (evd.files_changed && evd.files_changed.length) {
+          panel.appendChild(el("h4", { text: `Files changed (${evd.files_changed.length})` }));
+          panel.appendChild(el("ul", {}, evd.files_changed.map((f) => el("li", { text: f }))));
+        }
+        if (evd.tests_or_checks && evd.tests_or_checks.length) {
+          panel.appendChild(el("h4", { text: "Tests/checks" }));
+          panel.appendChild(el("ul", {}, evd.tests_or_checks.map((t) => el("li", { text: t }))));
+        }
+        if (evd.summary) {
+          panel.appendChild(el("h4", { text: "Summary" }));
+          panel.appendChild(el("pre", { class: "agent-activity-summary" }, [el("code", { text: evd.summary })]));
+        }
+        panel.appendChild(el("p", { class: "hint", text: `Manifest: ${evd.manifest_relpath || "n/a"}${evd.log_relpath ? " · Log: " + evd.log_relpath : ""}` }));
+        return panel;
+      }
+
+      function renderPanel() {
+        panels.innerHTML = "";
+        if (!currentPayload) return;
+        if (activeTab === "live") panels.appendChild(renderLivePanel(currentPayload));
+        else if (activeTab === "details") panels.appendChild(renderDetailsPanel(currentPayload));
+        else panels.appendChild(renderEvidencePanel(currentPayload));
+      }
+
+      async function loadAttempt() {
+        renderAttemptBar();
+        try {
+          currentPayload = await getJSON(`/api/agent-activity/${encodeURIComponent(taskId)}/${encodeURIComponent(worker)}/${encodeURIComponent(activeRunId)}`);
+        } catch (err) {
+          currentPayload = { run_id: activeRunId, output: { status: "missing" }, details: null, evidence: null };
+        }
+        renderPanel();
+      }
+
+      renderTabs();
+      await loadAttempt();
+
+      stopAgentActivityPoll();
+      const latestResult = attempts[0].result;
+      const isRunning = (!latestResult || latestResult === "RUNNING" || item.state === "RUNNING") && activeRunId === attempts[0].run_id;
+      if (isRunning) {
+        agentActivityPollId = setInterval(async () => {
+          if (activeTab !== "live") return;
+          try {
+            currentPayload = await getJSON(`/api/agent-activity/${encodeURIComponent(taskId)}/${encodeURIComponent(worker)}/${encodeURIComponent(activeRunId)}`);
+            renderPanel();
+          } catch (err) {
+            // Transient fetch failure while the dialog is open: keep the last
+            // known output rather than clearing it or fabricating new content.
+          }
+        }, 3000);
+      }
+    }
+
+    function openDetail(item, opts) {
       const sheet = document.getElementById("workflow-detail-sheet");
       const backdrop = document.getElementById("workflow-detail-backdrop");
       document.getElementById("workflow-detail-title").textContent = item.label || item.title || item.id;
+      sheet.hidden = false;
+      backdrop.hidden = false;
+      document.getElementById("workflow-detail-close").focus();
+
+      if (opts && opts.workerCard) {
+        stopAgentActivityPoll();
+        renderAgentActivity(item, opts.taskId);
+        return;
+      }
+
       const facts = [
         ["Status", statusText(item.state)], ["Worker", item.worker ? displayName(item.worker) : null],
         ["Execution system", item.execution_system], ["Provider", item.provider], ["Model", item.model],
@@ -1086,9 +1323,6 @@
         body.appendChild(el("h4", { text: `Sub-agents (${item.subagents.length})` }));
         item.subagents.forEach((agent) => body.appendChild(el("p", { text: agent.label || agent.id })));
       }
-      sheet.hidden = false;
-      backdrop.hidden = false;
-      document.getElementById("workflow-detail-close").focus();
     }
     function stageCard(item, extraClass) {
       const icon = item.provider ? providerBadge(item.provider, { size: 44 }) : el("span", { class: "workflow-glyph", text: "AI" });
@@ -1103,7 +1337,7 @@
         progressBar(item),
         el("div", { class: "workflow-card-foot" }, [statusPill(item.state), item.subagents && item.subagents.length ? el("span", { text: `${item.subagents.length} sub-agent${item.subagents.length === 1 ? "" : "s"}` }) : null]),
       ]);
-      card.addEventListener("click", () => openDetail(item));
+      card.addEventListener("click", () => openDetail(item, { workerCard: true, taskId: task.id }));
       return card;
     }
 
@@ -3027,9 +3261,16 @@
     const close = () => {
       sheet.hidden = true;
       backdrop.hidden = true;
+      stopAgentActivityPoll();
     };
     document.getElementById("workflow-detail-close").addEventListener("click", close);
     backdrop.addEventListener("click", close);
+    // OCTAREL-UI-01: keyboard accessible -- Escape closes the Agent Activity
+    // viewer (and any other content this shared sheet is showing) exactly
+    // like the Close button, only while the sheet is actually open.
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !sheet.hidden) close();
+    });
   }
 
   function initOperationsControls() {

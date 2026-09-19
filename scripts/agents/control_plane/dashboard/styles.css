@@ -1589,3 +1589,169 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
     scroll-behavior: auto !important;
   }
 }
+
+/* ------------------------------------------------------- OCTAREL-UI-01 */
+/* Agent Activity viewer: read-only live output / details / evidence for a
+   worker card's most recent (or selected) run. Reuses .sheet/.sheet-wide
+   dialog chrome; adds only what is specific to this content. */
+
+.agent-activity-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+.agent-activity-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.agent-activity-fact-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.agent-activity-fact-value {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-activity-attempts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.agent-activity-attempt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface);
+  cursor: pointer;
+}
+.agent-activity-attempt-pill:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.agent-activity-attempt-pill.active {
+  color: var(--accent-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.agent-activity-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.agent-activity-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.agent-activity-tab:hover { color: var(--text); }
+.agent-activity-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.agent-activity-panels { min-width: 0; }
+.agent-activity-panel { min-width: 0; }
+.agent-activity-panel[hidden] { display: none; }
+
+.agent-activity-output-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.agent-activity-search {
+  flex: 1 1 160px;
+  min-width: 120px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+.agent-activity-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  min-height: var(--touch);
+}
+.agent-activity-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.agent-activity-btn.active {
+  color: var(--accent-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.agent-activity-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.agent-activity-log,
+.agent-activity-summary {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre;
+}
+.agent-activity-log.wrap,
+.agent-activity-summary.wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent-activity-log mark,
+.agent-activity-summary mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: inherit;
+  border-radius: 3px;
+}
+
+.agent-activity-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 12px 0;
+}
+
+@media (max-width: 767px) {
+  .agent-activity-facts { grid-template-columns: 1fr 1fr; }
+  .agent-activity-log,
+  .agent-activity-summary { max-height: 260px; font-size: 11px; }
+}

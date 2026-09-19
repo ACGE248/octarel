@@ -34,6 +34,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..redaction import redact_text
 from .commands import CommandContext, CommandError, apply_command
+from .agent_activity import list_attempts, read_attempt
 from .operations import (
     AppLifecycleManager,
     OperationError,
@@ -1479,6 +1480,54 @@ def create_app(
     @app.get("/api/run-evidence")
     def run_evidence(limit: int = 100) -> list[dict[str, Any]]:
         return delegation_evidence(ctx.repo_root, limit=max(1, min(limit, 100)))
+
+    def _authorized_task_id(task_id: str) -> None:
+        # project/run/worker-scoped authorization only (OCTAREL-UI-01): the
+        # requested task must be one THIS PROJECT's own state actually knows
+        # about. An id that resolves to no task -- foreign, stale, or made up
+        # -- is rejected before any .agent-output path is touched.
+        #
+        # ".agent-output/<x>/<worker>/<run_id>" is keyed by task_ref (see
+        # scripts/agents/orchestrate.py / control_plane/supervisor.py, which
+        # pass task.task_ref -- not task.id -- into run_delegation), and the
+        # dashboard card that opens this viewer sends that same task_ref as
+        # its "taskId" (the workflow API's "task.id" field is task_ref; see
+        # workflow() above). So authorization must scope by task_ref here
+        # too -- checking ctx.state.get_task(task_id) would look up the
+        # wrong field and either 404 every legitimate request or (if a
+        # task_ref ever collided with another task's internal id) authorize
+        # the wrong task's evidence.
+        if not any(item.task_ref == task_id for item in scoped_tasks()):
+            raise HTTPException(status_code=404, detail=f"unknown task {task_id!r}")
+
+    @app.get("/api/agent-activity/{task_id}/{worker}")
+    def agent_activity_attempts(task_id: str, worker: str) -> dict[str, Any]:
+        """Every recorded attempt (run_id) for one worker card, most recent first.
+
+        Read-only; reuses the existing .agent-output evidence tree (see
+        scripts/agents/control_plane/agent_activity.py). Never a live shell.
+        """
+
+        _authorized_task_id(task_id)
+        try:
+            attempts = list_attempts(ctx.repo_root, task_id, worker)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return {"task": task_id, "worker": worker, "attempts": attempts}
+
+    @app.get("/api/agent-activity/{task_id}/{worker}/{run_id}")
+    def agent_activity_attempt(task_id: str, worker: str, run_id: str) -> dict[str, Any]:
+        """Details + evidence + bounded output for one attempt (Agent Activity viewer).
+
+        Read-only, project/run/worker-scoped, redacted-on-read, bounded history --
+        see agent_activity.read_attempt for the security properties this enforces.
+        """
+
+        _authorized_task_id(task_id)
+        try:
+            return read_attempt(ctx.repo_root, task_id, worker, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     @app.get("/api/attention")
     def attention() -> dict[str, Any]:
