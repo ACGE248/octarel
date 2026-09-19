@@ -352,6 +352,15 @@ select, input[type="number"], input[type="search"], input[type="text"] {
   overflow-y: auto;
   flex: 1;
 }
+.nav-group-label {
+  padding: 14px 12px 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.nav-group-label:first-child { padding-top: 4px; }
 .tab {
   display: flex;
   align-items: center;
@@ -726,7 +735,7 @@ select, input[type="number"], input[type="search"], input[type="text"] {
 .status-card[data-tone="running"] { color: var(--ok); }
 .status-card[data-tone="queued"] { color: var(--info); }
 .status-card[data-tone="completed"] { color: var(--purple); }
-.status-card[data-tone="blocked"] { color: var(--err); }
+.status-card[data-tone="blocked"] { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
 .status-card .status-label, .status-card .status-count { color: var(--text); }
 .status-card .status-caption { color: var(--muted); }
 
@@ -927,6 +936,7 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .workflow-stage-card,
 .workflow-result-card {
   appearance: none;
+  position: relative;
   width: 100%;
   min-width: 0;
   margin: 0;
@@ -995,6 +1005,27 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .workflow-tablet { overflow-x: auto; padding-bottom: 10px; }
 .workflow-tablet .workflow-layout { grid-auto-flow: column; grid-auto-columns: 220px; min-width: max-content; }
 .workflow-tablet .workflow-side { width: 190px; }
+
+/* Connector chevrons between pipeline stages (Overview redesign): purely
+   visual, additive-only -- makes the sequence read as one pipeline rather
+   than a row of unrelated cards. Skipped on mobile, where stages stack
+   vertically and a rightward arrow would be misleading. */
+.workflow-desktop .workflow-layout > .workflow-summary::after,
+.workflow-desktop .workflow-layout > .workflow-stage-card::after,
+.workflow-tablet .workflow-layout > .workflow-summary::after,
+.workflow-tablet .workflow-layout > .workflow-stage-card::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -13px;
+  width: 14px;
+  height: 14px;
+  transform: translateY(-50%) rotate(45deg);
+  border-top: 2px solid var(--border-strong);
+  border-right: 2px solid var(--border-strong);
+  background: var(--bg);
+  z-index: 1;
+}
 .workflow-mobile { padding: 4px 0; }
 .workflow-mobile .workflow-layout { grid-template-columns: 1fr; gap: 14px; padding-left: 25px; }
 .workflow-mobile .workflow-layout::before { content: ""; position: absolute; left: 10px; top: 74px; bottom: 48px; width: 2px; background: linear-gradient(var(--accent), #20c997, #98a2b3); }
@@ -1036,6 +1067,19 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .usage-pill-copy { min-width: 0; }
 .usage-pill-copy strong { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-pill-copy span { display: block; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.usage-pill-more {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+.usage-pill-more:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--text); }
 
 .overview-bottom {
   display: grid;
@@ -1083,6 +1127,7 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .events-list li.level-error { color: var(--err); }
 .events-list li.level-warning { color: var(--warn); }
 
+.command-bar-icon { display: flex; align-items: center; color: var(--muted); flex-shrink: 0; margin-left: 4px; }
 .command-bar {
   display: flex;
   gap: 8px;

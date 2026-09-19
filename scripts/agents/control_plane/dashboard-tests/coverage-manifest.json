@@ -1,5 +1,6 @@
 {
   "view-overview": [
+    "+ # more · not exposed by provider",
     "Open Orchestrator details, #",
     "Open Review details, #",
     "Open Testing & QA details, #",

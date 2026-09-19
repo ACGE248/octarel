@@ -1824,19 +1824,43 @@
     facts.forEach((f) => {
       (byWorker[f.worker] = byWorker[f.worker] || []).push(f);
     });
+    // Overview redesign: one dead "Not exposed by provider" tile per worker
+    // was the single biggest source of visual noise on this card (commonly
+    // 10+ tiles saying the same thing). Reported workers still get their own
+    // pill; everything else collapses into one summary chip with the same
+    // underlying /api/usage facts, one click away on the Providers view.
+    const reportedPills = [];
+    let unreportedCount = 0;
     Object.entries(byWorker).forEach(([worker, workerFacts]) => {
       const worker0 = state.models.find((m) => m.worker === worker);
       const reported = workerFacts.find((f) => f.source !== "NOT_EXPOSED" && f.label === "subscription_type");
-      const summary = reported ? String(reported.value) : "Not exposed by provider";
-      const pill = el("div", { class: "usage-pill" }, [
-        identityBadges(worker0 ? worker0.execution_system : worker, worker0 ? worker0.provider : null, { size: 20 }),
-        el("div", { class: "usage-pill-copy" }, [
-          el("strong", { text: displayName(worker) }),
-          el("span", { class: reported ? "" : "muted", text: summary }),
-        ]),
-      ]);
-      root.appendChild(pill);
+      if (!reported) {
+        unreportedCount += 1;
+        return;
+      }
+      reportedPills.push(
+        el("div", { class: "usage-pill" }, [
+          identityBadges(worker0 ? worker0.execution_system : worker, worker0 ? worker0.provider : null, { size: 20 }),
+          el("div", { class: "usage-pill-copy" }, [
+            el("strong", { text: displayName(worker) }),
+            el("span", { text: String(reported.value) }),
+          ]),
+        ])
+      );
     });
+    reportedPills.forEach((pill) => root.appendChild(pill));
+    if (unreportedCount > 0) {
+      const more = el("button", {
+        type: "button",
+        class: "usage-pill-more",
+        // Fixed wording (no singular/plural branch) so this control's
+        // accessible name is a single stable string for coverage-manifest
+        // tracking regardless of how many providers are collapsed into it.
+        text: `+ ${unreportedCount} more · not exposed by provider`,
+      });
+      more.addEventListener("click", () => showView("view-providers"));
+      root.appendChild(more);
+    }
     if (!facts.length) root.appendChild(el("p", { class: "hint", text: "No workers registered." }));
   }
 

@@ -10,6 +10,10 @@ All notable changes to Octarel are documented in this file.
 - `octarel project`, `octarel providers`, `octarel public-safety`, and `octarel service canonicalize-state`
 - Maintained install, architecture, provider, release, state, and publication docs
 
+### Changed
+
+- Control Center Overview: grouped the sidebar's 12 flat nav items into Monitor/Work/Configure/System sections, added connector chevrons between Live Workflow pipeline stages on desktop/tablet, collapsed the Provider Usage row's not-exposed tiles into one summary chip, added a blocked-status border accent to the status cards, and added a leading icon to the steering command bar. No API, data, or route changes.
+
 ### Fixed
 
 - Write the launchd dashboard pid file under `~/Library/Application Support/Octarel/` (boot volume). launchd cannot write onto an external-volume state directory; loopback health remains the listener authority.
