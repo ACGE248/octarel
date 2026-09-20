@@ -532,7 +532,70 @@ def _routable_worker(state: State, registry: Registry, role: str, fallback: str)
     return "(no routable worker)"
 
 
-def _apply_run_truth(option: QuickStartOption, *, project: Any | None, state: State | None, registry: Registry | None) -> QuickStartOption:
+def _default_branch_ref(repo_root: Path, project: Any | None) -> str | None:
+    """The ref a task branch must contain to be current (``origin/<default>``, else the local default)."""
+
+    default = getattr(project, "default_branch", None) or "main"
+    for ref in (f"origin/{default}", default):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", ref], cwd=str(repo_root), capture_output=True, text=True, check=False
+        )
+        if result.returncode == 0:
+            return ref
+    return None
+
+
+def _stale_unowned_draft(option: QuickStartOption, *, repo_root: Path, project: Any | None, state: State) -> bool:
+    """True when the task's existing worktree is a draft nobody at Octarel owns, on obsolete ancestry.
+
+    Adopting it would silently continue stale work (for example a stacked branch forked from a
+    pre-reconciliation head, hundreds of commits behind). A branch that some Octarel run created
+    or worked on is a continuation, not a stale draft, and is never treated this way.
+    """
+
+    if not (option.continues_existing_worktree and option.branch and option.worktree):
+        return False
+    project_id = getattr(project, "project_id", None)
+    for run in state.list_runbooks(project_id=project_id):
+        if run.branch == option.branch or run.worktree == option.worktree:
+            return False
+    ref = _default_branch_ref(repo_root, project)
+    if ref is None:
+        return False
+    contains = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ref, "HEAD"], cwd=option.worktree, capture_output=True, text=True, check=False
+    )
+    return contains.returncode == 1  # 0 = current, 1 = does not contain the default branch tip, other = unknown
+
+
+def _existing_reconciled(option: QuickStartOption, repo_root: Path) -> tuple[str, str] | None:
+    """A ``<branch>-reconciled*`` worktree a previous Quick Start already provisioned for this task."""
+
+    prefix = f"{option.branch}-reconciled"
+    for record in discover_git_worktrees(repo_root):
+        branch = (record.branch or "").removeprefix("refs/heads/")
+        if branch == prefix or branch.startswith(f"{prefix}-"):
+            return branch, record.path
+    return None
+
+
+def _fresh_reconciled_names(option: QuickStartOption, repo_root: Path) -> tuple[str, str]:
+    """A new branch/worktree pair for the task (repository precedent: ``<name>-reconciled``)."""
+
+    taken = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"], cwd=str(repo_root), capture_output=True, text=True, check=False
+    ).stdout.split()
+    for index in range(1, 10):
+        suffix = "-reconciled" if index == 1 else f"-reconciled-{index}"
+        branch, worktree = f"{option.branch}{suffix}", f"{option.worktree}{suffix}"
+        if branch not in taken and not Path(worktree).exists():
+            return branch, worktree
+    return f"{option.branch}-reconciled-x", f"{option.worktree}-reconciled-x"
+
+
+def _apply_run_truth(
+    option: QuickStartOption, *, repo_root: Path, project: Any | None, state: State | None, registry: Registry | None
+) -> QuickStartOption:
     """Overlay what Octarel itself knows about this project's runs and routes.
 
     Two truths the task source cannot supply: (1) the task may already have an
@@ -560,6 +623,21 @@ def _apply_run_truth(option: QuickStartOption, *, project: Any | None, state: St
                 why_next=f"{option.task_id} is first in the ledger but already has accepted run {accepted.id}.",
                 checkpoint_pr_behavior="No new run is started for an accepted task; finish its existing PR instead.",
             )
+    if option.action == "prepare" and "unavailable_reason" not in changes and _stale_unowned_draft(
+        option, repo_root=repo_root, project=project, state=state
+    ):
+        adopted = _existing_reconciled(option, repo_root)
+        branch, worktree = adopted or _fresh_reconciled_names(option, repo_root)
+        changes.update(
+            branch=branch,
+            worktree=worktree,
+            continues_existing_worktree=adopted is not None,
+            checkpoint_pr_behavior=(
+                f"An earlier draft branch {option.branch} exists on stale ancestry (it does not contain the current "
+                f"default branch) and is left untouched. This run starts a fresh branch from current main; reconcile "
+                f"the draft's commits explicitly. " + option.checkpoint_pr_behavior
+            ),
+        )
     if registry is not None and option.action == "prepare":
         changes["proposed_tester"] = _routable_worker(state, registry, "focused-tests", option.proposed_tester)
         changes["proposed_reviewer"] = _routable_worker(state, registry, "diff-review", option.proposed_reviewer)
@@ -570,7 +648,7 @@ def resolve_quickstart_option(
     repo_root: Path, key: str, project: Any | None = None, *, state: State | None = None, registry: Registry | None = None
 ) -> QuickStartOption:
     option = _resolve_quickstart_option_base(repo_root, key, project)
-    return _apply_run_truth(option, project=project, state=state, registry=registry)
+    return _apply_run_truth(option, repo_root=repo_root, project=project, state=state, registry=registry)
 
 
 def _resolve_quickstart_option_base(repo_root: Path, key: str, project: Any | None = None) -> QuickStartOption:
