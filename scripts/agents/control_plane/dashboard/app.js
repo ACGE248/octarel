@@ -59,6 +59,53 @@
     return node;
   }
 
+  // OCTAREL-UI-03: <details> disclosures inside lists that re-render every poll
+  // must not collapse under the operator; open state is remembered by key.
+  const disclosureOpen = new Set();
+  function rememberDisclosure(details, key) {
+    details.open = disclosureOpen.has(key);
+    details.addEventListener("toggle", () => {
+      if (details.open) disclosureOpen.add(key);
+      else disclosureOpen.delete(key);
+    });
+    return details;
+  }
+
+  function elapsedBetween(startIso, endIso) {
+    if (!startIso) return null;
+    const start = new Date(startIso).getTime();
+    const end = endIso ? new Date(endIso).getTime() : Date.now();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+    const secs = Math.round((end - start) / 1000);
+    if (secs < 60) return `${secs}s`;
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins}m ${secs % 60}s`;
+    const hrs = Math.floor(mins / 60);
+    return hrs < 48 ? `${hrs}h ${mins % 60}m` : `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
+  }
+
+  // Set once the Overview pipeline renders; opens the Agent Activity viewer for a worker.
+  let openWorkerActivity = null;
+
+  // A status chip whose meaning is carried by text (and a glyph), never colour alone.
+  const STATUS_GLYPHS = { running: "●", queued: "◷", blocked: "⏸", failed: "✕", complete: "✓", paused: "❚❚", other: "○" };
+  function statusGlyphFor(stateName) {
+    const s = String(stateName || "").toUpperCase();
+    if (s === "RUNNING") return STATUS_GLYPHS.running;
+    if (["QUEUED", "PENDING", "DRAFT"].includes(s)) return STATUS_GLYPHS.queued;
+    if (["BLOCKED", "OWNER_ACTION_REQUIRED"].includes(s)) return STATUS_GLYPHS.blocked;
+    if (["FAILED", "CANCELLED", "DEADLINE_REACHED"].includes(s)) return STATUS_GLYPHS.failed;
+    if (["SUCCEEDED", "READY_LOCAL", "READY_BUT_UNMERGED"].includes(s)) return STATUS_GLYPHS.complete;
+    if (["PAUSED", "STOPPING"].includes(s)) return STATUS_GLYPHS.paused;
+    return STATUS_GLYPHS.other;
+  }
+
+  // Append only real nodes: Node.append(null) would insert the text "null".
+  function appendAll(node, children) {
+    children.filter(Boolean).forEach((child) => node.appendChild(child));
+    return node;
+  }
+
   function svgEl(tag, attrs) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
     Object.entries(attrs || {}).forEach(([key, value]) => node.setAttribute(key, String(value)));
@@ -366,9 +413,13 @@
     const container = document.getElementById(containerId);
     if (!container) return;
     container.innerHTML = "";
-    pairs.forEach(([label, value]) => {
+    pairs.forEach(([label, value, tone]) => {
       container.appendChild(el("div", { class: "k", text: label }));
-      container.appendChild(el("div", { text: String(value) }));
+      // A problem value carries a glyph and stays plain text; colour is only reinforcement.
+      container.appendChild(el("div", { class: tone ? `kv-${tone}` : "" }, [
+        tone ? el("span", { class: "kv-glyph", "aria-hidden": "true", text: tone === "err" ? "✕ " : "⚠ " }) : null,
+        document.createTextNode(String(value)),
+      ]));
     });
   }
 
@@ -397,10 +448,12 @@
     if (select) {
       select.addEventListener("change", () => {
         applyTheme(select.value);
+        const fb = document.getElementById("theme-feedback");
         try {
           localStorage.setItem(THEME_KEY, select.value);
+          if (fb) fb.textContent = "Saved";
         } catch (err) {
-          /* ignore */
+          if (fb) fb.textContent = "Applied (could not be saved in this browser)";
         }
       });
     }
@@ -421,6 +474,7 @@
     document.querySelectorAll(".bn[data-view]").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.view === viewId);
     });
+    if (viewId !== "view-runs") state.focusRunbookId = null;
     closeSidebar();
     closeSystemMenu();
     closeAttention();
@@ -473,6 +527,33 @@
     document.getElementById("sidebar").classList.remove("open");
     document.getElementById("sidebar-backdrop").hidden = true;
     document.getElementById("menu-toggle").setAttribute("aria-expanded", "false");
+  }
+
+  // OCTAREL-UI-03: on phones the bottom nav and the session bar are fixed. Publish
+  // their *measured* heights (safe-area included) as CSS variables so page padding,
+  // the terminal viewport and dialogs always clear them; nothing sits underneath.
+  function syncChromeInsets() {
+    const root = document.documentElement;
+    const nav = document.getElementById("bottom-nav");
+    const bar = document.getElementById("sticky-controls");
+    const mobile = !window.matchMedia(DESKTOP_MQ).matches;
+    const navH = mobile && nav ? Math.ceil(nav.getBoundingClientRect().height) : 0;
+    const barShown = bar && !bar.classList.contains("desktop-inline") && getComputedStyle(bar).display !== "none";
+    const barH = mobile && barShown ? Math.ceil(bar.getBoundingClientRect().height) : 0;
+    root.style.setProperty("--bottom-nav-h", `${navH}px`);
+    root.style.setProperty("--sticky-h", `${barH}px`);
+  }
+
+  function initChromeInsets() {
+    syncChromeInsets();
+    window.addEventListener("resize", syncChromeInsets);
+    window.addEventListener("orientationchange", syncChromeInsets);
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(syncChromeInsets);
+      ["bottom-nav", "sticky-controls"].forEach((id) => { const n = document.getElementById(id); if (n) ro.observe(n); });
+    }
+    const mq = window.matchMedia(DESKTOP_MQ);
+    mq.addEventListener("change", syncChromeInsets);
   }
 
   function initMobileChrome() {
@@ -593,6 +674,12 @@
       const on = notifEnabled() && typeof Notification !== "undefined" && Notification.permission === "granted";
       btn.setAttribute("aria-pressed", on ? "true" : "false");
       btn.textContent = on ? "Notifications on" : "Enable notifications";
+      const fb = document.getElementById("notif-feedback");
+      if (fb) {
+        fb.textContent = typeof Notification === "undefined" ? "Not supported by this browser"
+          : Notification.permission === "denied" ? "Blocked in browser settings"
+          : on ? "On" : "Off";
+      }
     }
     reflect();
     btn.addEventListener("click", async () => {
@@ -1037,11 +1124,16 @@
   function renderOverviewPipeline(workflow) {
     const root = document.getElementById("overview-pipeline");
     if (!root) return;
+    openWorkerActivity = (item, taskRef) => openDetail(item, { workerCard: true, taskId: taskRef });
     const task = workflow && workflow.task;
     const stages = (workflow && workflow.stages) || [];
     const mobile = window.matchMedia("(max-width: 640px)").matches;
-    const desktop = window.matchMedia("(min-width: 1100px)").matches;
-    root.className = `pipeline workflow-runtime ${mobile ? "workflow-mobile" : desktop ? "workflow-desktop" : "workflow-tablet"}`;
+    // OCTAREL-UI-03: the one-row layout needs ~176px per column; otherwise reflow
+    // into a wrapping grid (readable cards) instead of compressing or scrolling sideways.
+    const available = root.clientWidth || Math.max(0, window.innerWidth - 320);
+    const columns = 3 + Math.max(1, stages.length);
+    const desktop = available >= columns * 176;
+    root.className = `pipeline workflow-runtime ${mobile ? "workflow-mobile" : desktop ? "workflow-desktop" : "workflow-medium"}`;
     root.style.setProperty("--workflow-stage-count", String(Math.max(1, stages.length)));
     root.innerHTML = "";
     if (!task) {
@@ -1194,66 +1286,109 @@
         });
       }
 
-      // Classify a log line so stderr/warnings/status are distinguishable without colour.
+      // The recorded log (logs/run.log) is the worker's stdout and stderr concatenated
+      // and redacted; no per-line stream is stored. So nothing below claims a stream:
+      //  - "system" lines are only the wrapper's own pointer block (TASK:/STATUS:/... keys);
+      //  - "error"/"warning" flags are keyword matches, labelled as such;
+      //  - the raw text is never altered (copy always returns the exact recorded content).
+      const SYSTEM_LINE = /^\s*(TASK|ROLE|STATUS|SYSTEM|PROVIDER|MODEL|EXIT|SUMMARY|MANIFEST|LOG):\s|^\s*\[(status|octarel|system)\]/i;
       function classifyLine(line) {
-        if (/^\s*(\[stderr\]|stderr:)/i.test(line) || /\b(error|exception|traceback|fatal|assertionerror)\b/i.test(line)) return "err";
-        if (/\bwarn(ing)?\b/i.test(line)) return "warn";
-        if (/^\s*(\[status\]|\$ |==+|--+ |>>>)/.test(line)) return "sys";
-        return "out";
+        const flag = /\b(error|exception|traceback|fatal|assertionerror)\b/i.test(line) ? "error"
+          : /\bwarn(ing)?\b/i.test(line) ? "warn" : null;
+        return { kind: SYSTEM_LINE.test(line) ? "sys" : "out", flag };
       }
-      const STREAM_TAGS = { err: "ERR", warn: "WARN", sys: "SYS", out: "" };
       let logScrollTop = null;
+      let logView = { highlights: true, flaggedOnly: false, wrap: false };
 
-      function fillLog(codeEl, lines) {
+      function fillLog(codeEl, entries) {
         codeEl.textContent = "";
         const frag = document.createDocumentFragment();
-        lines.forEach((line) => {
-          const kind = classifyLine(line);
-          frag.appendChild(el("span", { class: `log-line log-${kind}`, "data-stream": STREAM_TAGS[kind] }, [document.createTextNode(`${line}\n`)]));
+        entries.forEach(({ line, n, info }) => {
+          const classes = ["log-line", `log-${info.kind}`];
+          const attrs = { "data-n": String(n) };
+          if (info.flag) {
+            classes.push(`log-flag-${info.flag}`);
+            attrs["data-flag"] = info.flag === "error" ? "error keyword" : "warning keyword";
+            attrs.title = "Matches an error/warning keyword. The log does not record which stream produced this line.";
+          }
+          if (info.kind === "sys") attrs["data-flag"] = attrs["data-flag"] || "wrapper";
+          frag.appendChild(el("span", { class: classes.join(" "), ...attrs }, [document.createTextNode(`${line}\n`)]));
         });
         codeEl.appendChild(frag);
+      }
+
+      function formatBytes(n) {
+        if (!Number.isFinite(n)) return "";
+        return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
       }
 
       function renderLivePanel(payload) {
         const controls = el("div", { class: "agent-activity-output-controls" });
         const searchInput = el("input", { type: "search", placeholder: "Search output…", class: "agent-activity-search", "aria-label": "Search output" });
-        const wrapLabel = el("label", { class: "agent-activity-toggle" });
-        const wrapInput = el("input", { type: "checkbox" });
-        wrapLabel.append(wrapInput, " Wrap");
+        const toggle = (label, checked) => {
+          const wrap = el("label", { class: "agent-activity-toggle" });
+          const box = el("input", { type: "checkbox" });
+          box.checked = checked;
+          wrap.append(box, ` ${label}`);
+          return { wrap, box };
+        };
+        const wrapT = toggle("Wrap", logView.wrap);
+        const hiT = toggle("Highlights", logView.highlights);
+        const flagT = toggle("Flagged only", logView.flaggedOnly);
         const followBtn = el("button", { type: "button", class: `agent-activity-btn${followTail ? " active" : ""}`, "aria-pressed": String(followTail), text: followTail ? "Pause follow" : "Follow tail" });
         const jumpBtn = el("button", { type: "button", class: "agent-activity-btn", text: "Jump to bottom" });
         const copyBtn = el("button", { type: "button", class: "agent-activity-btn", text: "Copy output" });
         const meta = el("span", { class: "agent-activity-meta", role: "status", "aria-live": "polite" });
-        controls.append(searchInput, wrapLabel, followBtn, jumpBtn, copyBtn, meta);
+        controls.append(searchInput, wrapT.wrap, hiT.wrap, flagT.wrap, followBtn, jumpBtn, copyBtn, meta);
 
-        const pre = el("pre", { class: "agent-activity-log", tabindex: "0", "aria-label": "Worker output log" });
         const output = payload.output || {};
+        const details = payload.details || {};
         const fullText = output.content || "";
         const allLines = fullText.replace(/\n$/, "").split("\n");
+        const entries = allLines.map((line, i) => ({ line, n: i + 1, info: classifyLine(line) }));
+        const flaggedCount = entries.filter((e) => e.info.flag).length;
+
+        const note = el("p", { class: "agent-activity-note" }, [
+          el("strong", { text: "Combined output. " }),
+          document.createTextNode("stdout and stderr are recorded together, not separately. Line labels are keyword matches, not stream markers; the text is shown exactly as recorded."),
+        ]);
+        const pre = el("pre", { class: "agent-activity-log", tabindex: "0", "aria-label": "Worker output log" });
         const codeEl = el("code", {});
         pre.appendChild(codeEl);
-        if (output.status === "missing" || output.status === "empty") {
+        const hasLog = output.status !== "missing" && output.status !== "empty";
+        if (!hasLog) {
           pre.classList.add("is-empty");
           codeEl.textContent = output.status === "missing"
             ? "No output recorded for this attempt (missing or pruned)."
             : "No output yet.";
-        } else {
-          fillLog(codeEl, allLines);
-          meta.textContent = `${allLines.length} line${allLines.length === 1 ? "" : "s"}${output.truncated ? " · most recent portion" : ""}`;
         }
         if (output.truncated) controls.appendChild(el("span", { class: "hint", text: "Showing the most recent portion of a longer log." }));
 
-        const hasLog = !pre.classList.contains("is-empty");
-        [searchInput, wrapInput, copyBtn, jumpBtn].forEach((node) => { if (!hasLog) node.disabled = true; });
-        searchInput.addEventListener("input", () => {
+        const facts = [
+          `${allLines.length} line${allLines.length === 1 ? "" : "s"}`,
+          output.size ? formatBytes(output.size) : null,
+          flaggedCount ? `${flaggedCount} flagged` : null,
+          details.exit_status !== null && details.exit_status !== undefined ? `exit ${details.exit_status}` : null,
+          output.truncated ? "most recent portion" : null,
+        ].filter(Boolean).join(" · ");
+
+        function refill() {
           if (!hasLog) return;
-          const q = searchInput.value;
-          if (!q) { fillLog(codeEl, allLines); meta.textContent = `${allLines.length} lines`; return; }
-          const matched = allLines.filter((line) => line.toLowerCase().includes(q.toLowerCase()));
-          if (matched.length) { fillLog(codeEl, matched); meta.textContent = `${matched.length} of ${allLines.length} lines match`; }
-          else { codeEl.textContent = "(no matching lines)"; meta.textContent = "no matches"; }
-        });
-        wrapInput.addEventListener("change", (e) => pre.classList.toggle("wrap", e.target.checked));
+          const q = searchInput.value.toLowerCase();
+          const shown = entries.filter((e) => (!q || e.line.toLowerCase().includes(q)) && (!flagT.box.checked || e.info.flag));
+          logView = { ...logView, highlights: hiT.box.checked, flaggedOnly: flagT.box.checked };
+          pre.classList.toggle("plain", !hiT.box.checked);
+          if (shown.length) fillLog(codeEl, shown);
+          else codeEl.textContent = "(no matching lines)";
+          meta.textContent = q || flagT.box.checked ? `${shown.length} of ${allLines.length} lines match` : facts;
+        }
+        refill();
+        [searchInput, wrapT.box, hiT.box, flagT.box, jumpBtn, copyBtn].forEach((node) => { if (!hasLog) node.disabled = true; });
+        searchInput.addEventListener("input", refill);
+        hiT.box.addEventListener("change", refill);
+        flagT.box.addEventListener("change", refill);
+        wrapT.box.addEventListener("change", (e) => { logView.wrap = e.target.checked; pre.classList.toggle("wrap", e.target.checked); });
+        pre.classList.toggle("wrap", logView.wrap);
         const syncFollow = () => {
           followBtn.textContent = followTail ? "Pause follow" : "Follow tail";
           followBtn.classList.toggle("active", followTail);
@@ -1273,12 +1408,12 @@
         });
         jumpBtn.addEventListener("click", () => { pre.scrollTop = pre.scrollHeight; });
         copyBtn.addEventListener("click", () => {
-          const done = () => { meta.textContent = "Copied to clipboard"; setTimeout(() => { meta.textContent = `${allLines.length} lines`; }, 1800); };
+          const done = () => { meta.textContent = "Copied to clipboard"; setTimeout(() => { meta.textContent = facts; }, 1800); };
           if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(fullText).then(done, () => { meta.textContent = "Copy unavailable"; });
           else meta.textContent = "Copy unavailable";
         });
 
-        const panel = el("div", { class: "agent-activity-panel" }, [controls, pre]);
+        const panel = el("div", { class: "agent-activity-panel" }, [controls, note, pre]);
         requestAnimationFrame(() => {
           if (followTail || logScrollTop === null) pre.scrollTop = pre.scrollHeight;
           else pre.scrollTop = logScrollTop;
@@ -1989,16 +2124,19 @@
 
   async function refreshResources() {
     const data = await getJSON("/api/resources");
+    state.resources = data;
     if (!data.available) {
       renderKV("resources-body", [["psutil", data.note || "unavailable"]]);
       return;
     }
+    const level = (value, warnAt) => (value != null && value >= warnAt ? "warn" : undefined);
     renderKV("resources-body", [
-      ["CPU", data.cpu_percent == null ? "—" : `${data.cpu_percent}%`],
-      ["Memory", data.memory_percent == null ? "—" : `${data.memory_percent}%`],
-      ["Disk", data.disk_percent == null ? "—" : `${data.disk_percent}%`],
+      ["CPU", data.cpu_percent == null ? "—" : `${data.cpu_percent}%`, level(data.cpu_percent, 90)],
+      ["Memory", data.memory_percent == null ? "—" : `${data.memory_percent}%`, level(data.memory_percent, 85)],
+      ["Disk", data.disk_percent == null ? "—" : `${data.disk_percent}%`, level(data.disk_percent, 90)],
       ["Load (1m)", data.load_average && data.load_average["1m"] != null ? data.load_average["1m"].toFixed(2) : "unavailable"],
     ]);
+    renderSystemHealth();
   }
 
   function taskActions(task) {
@@ -2023,6 +2161,12 @@
     return actions;
   }
 
+  function taskAgentLabel(task) {
+    const model = (state.models || []).find((m) => m.worker === task.worker);
+    return model ? `${displayName(task.worker)} · ${model.provider}` : displayName(task.worker);
+  }
+
+  // Scannable: ID, title, state, stage, agent, elapsed. Scheduling internals sit behind one disclosure.
   function renderTaskCards(tasks) {
     const root = document.getElementById("tasks-cards");
     root.innerHTML = "";
@@ -2032,29 +2176,47 @@
     }
     tasks.forEach((task) => {
       const card = el("article", {
-        class: "entity-card",
+        class: "entity-card task-card",
         "data-searchable": "true",
         "data-search": `${task.id} ${task.task_ref} ${task.role} ${task.worker} ${task.state}`,
+        "data-task-state": task.state,
       });
-      card.append(
+      const elapsed = task.state === "RUNNING" ? elapsedBetween(task.started_at || task.created_at) : null;
+      const primary = el("ul", { class: "entity-facts", "aria-label": `Summary for ${task.id}` });
+      [
+        ["Stage", displayName(task.role)],
+        ["Agent", taskAgentLabel(task)],
+        [elapsed ? "Elapsed" : "Updated", elapsed || relativeTime(task.updated_at || task.created_at)],
+      ].forEach(([k, v]) => primary.appendChild(el("li", {}, [el("span", { class: "entity-fact-k", text: k }), el("span", { text: v })])));
+
+      const reason = ["BLOCKED", "FAILED"].includes(task.state)
+        ? (task.failure_reason_sanitized || task.last_error || task.admission_reason
+          || ((task.dependencies || []).length ? `Waiting on ${task.dependencies.join(", ")}` : null))
+        : null;
+
+      const details = rememberDisclosure(el("details", { class: "entity-more" }, [
+        el("summary", { text: "Scheduling details" }),
+        el("div", { class: "entity-meta", text: `Wave ${task.dependency_wave ?? "—"} · ${task.admission_state || "PENDING"}${task.admission_reason ? ` · ${task.admission_reason}` : ""}` }),
+        el("div", { class: "entity-meta", text: `Alternatives: ${task.selection_alternatives?.length ? task.selection_alternatives.map(displayName).join(", ") : "none eligible/reported"}` }),
+        el("div", { class: "entity-meta", text: `${task.kind} · priority ${task.priority ?? 0} · ${task.worker}${task.worktree ? ` · ${task.worktree}` : ""}` }),
+      ]), `task:${task.id}`);
+
+      appendAll(card, [
         el("header", {}, [
           el("div", {}, [
             el("h3", { text: task.task_ref || task.id }),
-            el("div", { class: "entity-meta", text: `${task.id} · ${task.role} · ${displayName(task.worker)} (${task.worker})` }),
+            el("div", { class: "entity-id", text: task.id }),
           ]),
           el("span", { class: `status-pill ${statusClass(task.state)}`, text: task.state }),
         ]),
-        el("div", { class: "entity-meta", text: relativeTime(task.updated_at || task.created_at) }),
-        el("div", {
-          class: "entity-meta",
-          text: `Wave ${task.dependency_wave ?? "—"} · ${task.admission_state || "PENDING"}${task.admission_reason ? ` · ${task.admission_reason}` : ""}`,
-        }),
-        el("div", {
-          class: "entity-meta",
-          text: `Alternatives: ${task.selection_alternatives?.length ? task.selection_alternatives.map(displayName).join(", ") : "none eligible/reported"}`,
-        }),
-        taskActions(task)
-      );
+        primary,
+        reason ? el("p", { class: "entity-reason", role: "status" }, [
+          el("span", { class: "entity-reason-glyph", "aria-hidden": "true", text: statusGlyphFor(task.state) }),
+          el("span", { text: reason }),
+        ]) : null,
+        taskActions(task),
+        details,
+      ]);
       root.appendChild(card);
     });
   }
@@ -2527,19 +2689,56 @@
     renderAgentCards(models);
   }
 
+  // Condition: one plain-language word for "what state is this checkout in".
+  function worktreeCondition(w) {
+    const cls = w.classification || "UNKNOWN";
+    if (w.stale_lock || cls === "STALE_RECOVERABLE") return { label: "Stale", kind: "stale", attention: true, glyph: "↻" };
+    if (cls === "ACTIVE") return { label: "Active", kind: "active", attention: false, glyph: "●" };
+    if (cls === "QUEUED" || cls === "PAUSED") return { label: cls === "PAUSED" ? "Paused" : "Queued", kind: "idle", attention: false, glyph: "◷" };
+    if (cls === "FINISHED_DIRTY") return { label: "Finished, uncommitted changes", kind: "stale", attention: true, glyph: "!" };
+    if (cls === "FINISHED_CLEAN") return { label: "Finished", kind: "done", attention: false, glyph: "✓" };
+    if (cls === "UNRELATED_MANUAL") return { label: "Not managed", kind: "idle", attention: false, glyph: "○" };
+    return { label: "Unknown", kind: "unknown", attention: false, glyph: "?" };
+  }
+
   function renderWorktreeCards(worktrees, checkpoints) {
     const managedRoot = document.getElementById("worktrees-managed");
     const discoveredRoot = document.getElementById("worktrees-discovered");
     if (!managedRoot || !discoveredRoot) return;
     managedRoot.innerHTML = "";
     discoveredRoot.innerHTML = "";
-    worktrees.forEach((w) => {
-      const card = el("article", { class: "entity-card worktree-card", "data-searchable": "true", "data-search": `${w.path} ${w.branch || ""} ${w.worker || ""} ${w.provider || ""}` });
-      card.append(
-        el("header", {}, [
-          el("div", { class: "truncate-wrap" }, [el("h3", { text: w.display_name || w.branch || "UNKNOWN", title: w.branch || w.path }), el("div", { class: "entity-meta truncate", text: w.path, title: w.path })]),
-          el("span", { class: `status-pill ${statusClass(w.classification)}`, text: w.classification || "UNKNOWN" }),
-        ]),
+    const flagged = (w) => {
+      const c = worktreeCondition(w);
+      return c.attention || w.dirty || (w.ahead > 0 && w.behind > 0) ? 0 : 1;
+    };
+    [...worktrees].sort((x, y) => flagged(x) - flagged(y)).forEach((w) => {
+      const cond = worktreeCondition(w);
+      const diverged = w.ahead > 0 && w.behind > 0;
+      const card = el("article", {
+        class: `entity-card worktree-card${cond.attention || w.dirty || diverged ? " needs-attention" : ""}`,
+        "data-searchable": "true",
+        "data-search": `${w.path} ${w.branch || ""} ${w.worker || ""} ${w.provider || ""}`,
+        "data-condition": cond.kind,
+      });
+      // Scan line: branch, condition, owner. Everything else is one disclosure away.
+      const flags = el("ul", { class: "chip-row", "aria-label": "Worktree conditions" });
+      [
+        [`${cond.glyph} ${cond.label}`, cond.attention ? "warn" : ""],
+        [w.dirty ? "● Uncommitted changes" : "✓ Clean", w.dirty ? "warn" : ""],
+        diverged ? [`⇅ Diverged (ahead ${w.ahead}, behind ${w.behind})`, "warn"]
+          : w.ahead > 0 ? [`↑ Ahead ${w.ahead}`, ""] : w.behind > 0 ? [`↓ Behind ${w.behind}`, ""] : null,
+        w.stale_lock ? [`Stale lock (${w.stale_lock_holder || "unknown"})`, "warn"] : w.locked ? [`Locked by ${w.lock_holder || "writer"}`, ""] : null,
+      ].filter(Boolean).forEach(([text, tone]) => flags.appendChild(el("li", { class: `chip${tone ? ` chip-${tone}` : ""}`, text })));
+
+      const owner = w.worker ? `${displayName(w.worker)} · ${w.task || w.task_id}` : "No assigned agent";
+      const primary = el("ul", { class: "entity-facts", "aria-label": "Worktree summary" }, [
+        el("li", {}, [el("span", { class: "entity-fact-k", text: "Owner" }), el("span", { text: owner })]),
+        el("li", {}, [el("span", { class: "entity-fact-k", text: "Writer" }), el("span", { text: w.locked ? w.lock_holder || "locked" : "free" })]),
+        w.protected_reason && !w.cleanup_eligible ? el("li", {}, [el("span", { class: "entity-fact-k", text: "Protected" }), el("span", { text: w.protected_reason })]) : null,
+      ].filter(Boolean));
+
+      const details = rememberDisclosure(el("details", { class: "entity-more" }, [
+        el("summary", { text: "Git details" }),
         el("div", { class: "worktree-facts" }, [
           el("span", { text: `${w.head_short || "UNKNOWN"} · ${w.commit_subject || "No commit subject"}` }),
           el("span", { text: `${w.dirty ? "Dirty" : "Clean"} · ahead ${w.ahead ?? "?"} / behind ${w.behind ?? "?"}` }),
@@ -2559,8 +2758,9 @@
               (w.review_head_sha || "").slice(0, 8) || "unknown"
             }${w.review_head_matches_current === false ? " (checkout has moved off the reviewed commit)" : ""}`,
           }),
-        ])
-      );
+        ].filter(Boolean)),
+      ]), `wt:${w.path}`);
+
       const actions = el("div", { class: "card-actions worktree-actions" });
       if (w.management === "DISCOVERED") {
         const adopt = el("button", { type: "button", text: "Adopt / Register", title: `Adopt ${w.path}` });
@@ -2578,7 +2778,17 @@
         });
         actions.appendChild(button);
       });
-      card.appendChild(actions);
+
+      appendAll(card, [
+        el("header", {}, [
+          el("div", { class: "truncate-wrap" }, [el("h3", { text: w.display_name || w.branch || "UNKNOWN", title: w.branch || w.path }), el("div", { class: "entity-id truncate", text: w.path, title: w.path })]),
+          el("span", { class: `status-pill ${statusClass(w.classification)}`, text: w.classification || "UNKNOWN" }),
+        ]),
+        flags,
+        primary,
+        actions,
+        details,
+      ]);
       (w.management === "MANAGED" ? managedRoot : discoveredRoot).appendChild(card);
     });
     if (!worktrees.some((w) => w.management === "MANAGED")) managedRoot.appendChild(el("p", { class: "hint", text: "No orchestrator-managed worktrees." }));
@@ -2792,16 +3002,27 @@
     btn.disabled = !target.ready;
   }
 
+  // Go straight to a run: open Runs, select it, expand its details, scroll and focus it.
+  function focusRunbook(runbookId) {
+    state.focusRunbookId = runbookId;
+    disclosureOpen.add(`run:${runbookId}`);
+    showView("view-runs");
+    state.focusRunbookId = runbookId; // showView clears focus when leaving Runs; re-assert for this navigation
+    renderRunbookCards(state.runbooks);
+    const card = document.querySelector(`[data-runbook-id="${runbookId}"]`);
+    if (!card) return;
+    card.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    card.focus({ preventScroll: true });
+    const live = document.getElementById("runs-focus-status");
+    if (live) live.textContent = `Showing run ${card.querySelector("h3")?.textContent || runbookId}`;
+  }
+
   function initOverviewContinueAction() {
     const btn = document.getElementById("overview-continue-btn");
     if (!btn) return;
     btn.addEventListener("click", () => {
       if (overviewActiveRun) {
-        showView("view-runs");
-        document.querySelector(`[data-runbook-id="${overviewActiveRun.id}"]`)?.scrollIntoView({
-          behavior: "smooth",
-          block: "center",
-        });
+        focusRunbook(overviewActiveRun.id);
         return;
       }
       if (!overviewContinueOption) return;
@@ -3003,29 +3224,36 @@
     root.innerHTML = "";
     runbooks.forEach((r) => {
       const card = el("article", {
-        class: "entity-card",
+        class: "entity-card run-card",
+        tabindex: "-1",
         "data-runbook-id": r.id,
         "data-searchable": "true",
         "data-search": `${r.name} ${r.preset} ${r.branch} ${r.status}`,
       });
-      card.append(
+      // Scannable primary row: ID, title, state, current stage, agent, elapsed/progress.
+      const linkedTask = (state.tasks || []).find((t) => t.id === r.task_id) || null;
+      const agentModel = (state.models || []).find((m) => m.worker === r.parent_worker);
+      const stageText = ({
+        DRAFT: "Not started", QUEUED: "Queued", RUNNING: "Implementing",
+        PAUSED: "Paused", STOPPING: "Stopping", SUCCEEDED: "Accepted", CANCELLED: "Cancelled",
+        FAILED: "Failed", DEADLINE_REACHED: "Deadline reached",
+      })[r.status] || (r.acceptance_stage && !["PENDING", "DONE"].includes(r.acceptance_stage)
+        ? `Acceptance: ${String(r.acceptance_stage).replace(/_/g, " ")}` : String(r.status).replace(/_/g, " ").toLowerCase());
+      const runElapsed = r.started_at ? elapsedBetween(r.started_at, ["RUNNING", "PAUSED", "STOPPING"].includes(r.status) ? null : r.ended_at) : null;
+      const primary = el("ul", { class: "entity-facts", "aria-label": `Summary for ${r.name}` });
+      [
+        ["Stage", stageText],
+        ["Agent", agentModel ? `${displayName(r.parent_worker)} · ${agentModel.provider}` : displayName(r.parent_worker)],
+        runElapsed ? [r.status === "RUNNING" ? "Elapsed" : "Duration", runElapsed] : null,
+        r.status === "RUNNING" && r.remaining_seconds != null ? ["Remaining", formatRemaining(r.remaining_seconds)] : null,
+      ].filter(Boolean).forEach(([k, v]) => primary.appendChild(el("li", {}, [el("span", { class: "entity-fact-k", text: k }), el("span", { text: v })])));
+      appendAll(card, [
         el("header", {}, [
-          el("div", {}, [el("h3", { text: r.name }), el("div", { class: "entity-meta", text: `${r.preset} · ${r.branch}` })]),
+          el("div", {}, [el("h3", { text: r.name }), el("div", { class: "entity-id", text: `${r.id} · ${r.branch}` })]),
           el("span", { class: `status-pill ${statusClass(r.status)}`, text: r.status }),
         ]),
-        el("div", { class: "entity-meta", text: r.objective }),
-        el("div", {
-          class: "entity-meta",
-          text: `worker ${displayName(r.parent_worker)} (${r.parent_worker}) · permission ${r.permission_profile} · ${
-            r.status === "RUNNING" ? formatRemaining(r.remaining_seconds) : `budget ${r.max_duration_minutes}m`
-          }`,
-        })
-      );
-      if (r.phases && r.phases.length) {
-        const phaseWrap = el("div", { class: "runbook-phases" });
-        r.phases.forEach((phase) => phaseWrap.appendChild(el("span", { class: "phase-chip", text: phase })));
-        card.appendChild(phaseWrap);
-      }
+        primary,
+      ]);
       // ENG-AGENT-13 (issue #138): surface truthful per-stage acceptance
       // evidence -- PASS/FAIL/NOT_APPLICABLE/NOT_REPORTED, never silently
       // collapsed into the overall status pill above.
@@ -3168,7 +3396,33 @@
         reportBtn.addEventListener("click", () => openRunbookReport(r.id));
         actions.appendChild(reportBtn);
       }
+      if (linkedTask) {
+        const liveBtn = el("button", { type: "button", text: "Live output", "aria-label": `Open live output for ${r.name}` });
+        liveBtn.addEventListener("click", () => openWorkerActivity && openWorkerActivity({
+          id: linkedTask.id, worker: linkedTask.worker, label: r.name, state: linkedTask.state,
+          provider: agentModel && agentModel.provider, model: agentModel && agentModel.default_model,
+          started_at: r.started_at,
+        }, linkedTask.task_ref));
+        actions.appendChild(liveBtn);
+      }
       card.appendChild(actions);
+      // Secondary implementation detail, one disclosure away (kept open across polls).
+      card.appendChild(rememberDisclosure(el("details", { class: "entity-more" }, [
+        el("summary", { text: "Run details" }),
+        el("div", { class: "entity-meta", text: r.objective }),
+        el("div", {
+          class: "entity-meta",
+          text: `${r.preset} · worker ${displayName(r.parent_worker)} (${r.parent_worker}) · permission ${r.permission_profile} · budget ${r.max_duration_minutes}m`,
+        }),
+        el("div", { class: "entity-meta", text: `Branch ${r.branch}${r.worktree ? ` · ${r.worktree}` : ""}` }),
+        (r.phases && r.phases.length)
+          ? el("div", { class: "runbook-phases" }, r.phases.map((phase) => el("span", { class: "phase-chip", text: phase })))
+          : null,
+      ]), `run:${r.id}`));
+      if (state.focusRunbookId === r.id) {
+        card.classList.add("is-focused");
+        card.setAttribute("aria-current", "true");
+      }
       root.appendChild(card);
     });
     if (!runbooks.length) root.appendChild(el("p", { class: "hint", text: "No runbooks yet. Create one above or use Run Overnight." }));
@@ -3274,10 +3528,11 @@
     const impact = current.test_impact || {};
     const throughput = current.throughput || {};
     const reuse = current.evidence_reuse || {};
+    state.gate = gate;
     renderKV("tests-body", [
-      ["Authority", data.authority],
-      ["Status", gate.status === "IDLE" ? "IDLE" : gate.ready ? "PASS" : "NOT READY"],
+      ["Status", gate.status === "IDLE" ? "IDLE" : gate.ready ? "PASS" : "NOT READY", gate.status === "IDLE" || gate.ready ? undefined : "warn"],
       ["Reason", gate.reason || "-"],
+      ["Authority", data.authority],
       ["Exact commit", evidence.current_head_sha || evidence.head_sha || "-"],
       ["Exact tree", evidence.tree_sha || "-"],
       ["Risk", evidence.classification || "-"],
@@ -3302,6 +3557,61 @@
       ["Evidence", evidence.evidence_path || "-"],
       ["Logs", (evidence.checks || []).map((c) => c.log).join(", ") || "-"],
     ]);
+    // Status, reason and authority stay up front; the rest is evidence detail.
+    collapseKV("tests-body", 3, "Gate evidence and history");
+    renderSystemHealth();
+  }
+
+  // Keep the first `keep` label/value pairs visible; move the rest into one disclosure.
+  function collapseKV(containerId, keep, label) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const nodes = [...container.children];
+    if (nodes.length <= keep * 2) return;
+    const rest = el("div", { class: "kv kv-rest" });
+    nodes.slice(keep * 2).forEach((node) => rest.appendChild(node));
+    container.appendChild(rememberDisclosure(el("details", { class: "kv-more" }, [el("summary", { text: label }), rest]), `kv:${containerId}`));
+  }
+
+  // Warnings only: healthy values stay quiet, problems are named with a glyph and words.
+  function renderSystemHealth() {
+    const box = document.getElementById("system-summary");
+    if (!box) return;
+    const problems = [];
+    const r = state.resources || {};
+    if (r.available) {
+      if (r.cpu_percent >= 90) problems.push(["Runtime", `CPU is at ${r.cpu_percent}%`]);
+      if (r.memory_percent >= 85) problems.push(["Runtime", `Memory is at ${r.memory_percent}%`]);
+      if (r.disk_percent >= 90) problems.push(["Runtime", `Disk is at ${r.disk_percent}%`]);
+    }
+    const repo = state.repoHealth || {};
+    const dirty = (repo.main || {}).dirty_worktree_count;
+    if (dirty > 0) problems.push(["Repository", `${dirty} worktree${dirty === 1 ? " has" : "s have"} uncommitted changes`]);
+    if (repo.unpushed_worktrees > 0) problems.push(["Repository", `${repo.unpushed_worktrees} worktree${repo.unpushed_worktrees === 1 ? " has" : "s have"} unpushed commits`]);
+    const app = state.appStatus || {};
+    if (app.last_exit_code != null && app.last_exit_code !== 0) problems.push(["Services", `Development app last exited with code ${app.last_exit_code}`]);
+    const gate = state.gate;
+    if (gate && !gate.ready && gate.status !== "IDLE") problems.push(["Diagnostics", `Local gate not ready: ${gate.reason || "no reason recorded"}`]);
+    const errors = (state.events || []).filter((e) => e.level === "error");
+    if (errors.length) problems.push(["Diagnostics", `${errors.length} recent error event${errors.length === 1 ? "" : "s"}`]);
+
+    box.innerHTML = "";
+    box.dataset.problems = String(problems.length);
+    if (!problems.length) {
+      box.appendChild(el("p", { class: "system-ok" }, [el("span", { "aria-hidden": "true", text: "✓ " }), document.createTextNode("No warnings — resources, repository, services and diagnostics look healthy.")]));
+    } else {
+      box.appendChild(el("p", { class: "system-problems-title" }, [el("span", { "aria-hidden": "true", text: "⚠ " }), document.createTextNode(`${problems.length} warning${problems.length === 1 ? "" : "s"}`)]));
+      const list = el("ul", { class: "system-problem-list" });
+      problems.forEach(([group, text]) => list.appendChild(el("li", {}, [el("span", { class: "chip chip-warn", text: group }), el("span", { text })])));
+      box.appendChild(list);
+    }
+    const recent = document.getElementById("system-problems");
+    if (recent) {
+      recent.innerHTML = "";
+      const items = (state.events || []).filter((e) => ["error", "warning"].includes(e.level)).slice(0, 6);
+      renderEventItems(recent, items);
+      if (!items.length) recent.appendChild(el("li", { class: "attn-clear" }, [el("span", { class: "attn-icon ok", "aria-hidden": "true", text: "✓" }), el("span", { text: "No recent errors or warnings." })]));
+    }
   }
 
   // OCTAREL-UI-02: one visual language for everything that needs an operator.
@@ -3464,6 +3774,7 @@
     const recent = document.getElementById("recent-events");
     renderEventItems(recent, events.slice(0, 8));
     renderActivity(events, state.activityHours);
+    renderSystemHealth();
   }
 
   async function refreshRunEvidence() {
@@ -3511,6 +3822,8 @@
   async function refreshAppLifecycle() {
     const data = await getJSON("/api/app-status");
     renderKV("app-lifecycle-body", [["State", data.status], ["PID", data.pid || "—"], ["Port", data.port], ["Uptime", data.uptime_seconds == null ? "—" : `${data.uptime_seconds}s`], ["Started", data.started_at || "—"], ["Launch", data.launch_source], ["Last exit", data.last_exit_code ?? "—"], ["Observation", data.note || data.port_probe]]);
+    state.appStatus = data;
+    renderSystemHealth();
     document.getElementById("app-start").disabled = data.status === "RUNNING" || data.status === "UNKNOWN";
     document.getElementById("app-stop").disabled = data.status !== "RUNNING";
     document.getElementById("app-restart").disabled = data.status !== "RUNNING";
@@ -3519,7 +3832,9 @@
   async function refreshRepositoryHealth() {
     const data = await getJSON("/api/repository-health");
     const main = data.main || {};
-    renderKV("repository-health-body", [["Main", main.remote_head_sha ? main.remote_head_sha.slice(0, 8) : "UNKNOWN"], [main.remote_time_label || "Remote head", main.remote_head_commit_at || "Unavailable"], ["Last observed", data.observed_at || "—"], ["Open task branches", data.open_task_branches ?? "—"], ["Unpushed worktrees", data.unpushed_worktrees ?? "—"], ["Dirty worktrees", main.dirty_worktree_count ?? "—"], ["Active workers", main.active_worker_count ?? "—"]]);
+    state.repoHealth = data;
+    renderKV("repository-health-body", [["Main", main.remote_head_sha ? main.remote_head_sha.slice(0, 8) : "UNKNOWN"], [main.remote_time_label || "Remote head", main.remote_head_commit_at || "Unavailable"], ["Last observed", data.observed_at || "—"], ["Open task branches", data.open_task_branches ?? "—"], ["Unpushed worktrees", data.unpushed_worktrees ?? "—", data.unpushed_worktrees > 0 ? "warn" : undefined], ["Dirty worktrees", main.dirty_worktree_count ?? "—", main.dirty_worktree_count > 0 ? "warn" : undefined], ["Active workers", main.active_worker_count ?? "—"]]);
+    renderSystemHealth();
     const root = document.getElementById("recent-merges");
     if (!root) return;
     root.innerHTML = "";
@@ -3544,7 +3859,11 @@
     tbody.innerHTML = "";
     data.providers.forEach((p) => {
       tbody.appendChild(
-        el("tr", {}, [el("td", { text: p.display_name || displayName(p.name) }), el("td", { text: p.execution_route }), el("td", { text: p.display_state || p.state })])
+        el("tr", { role: "row" }, [
+          el("td", { role: "cell", "data-label": "Provider", text: p.display_name || displayName(p.name) }),
+          el("td", { role: "cell", "data-label": "Route", text: p.execution_route }),
+          el("td", { role: "cell", "data-label": "State", text: p.display_state || p.state }),
+        ])
       );
     });
     const windows = data.quota_windows || [];
@@ -3678,6 +3997,7 @@
     pauseBtn.hidden = !hasRunning;
     resumeBtn.hidden = !hasPaused;
     stopBtn.hidden = !(hasRunning || hasPaused);
+    syncChromeInsets();
   }
 
   function initStickyControls() {
@@ -3705,10 +4025,23 @@
   }
 
   function initMaxWriters() {
-    document.getElementById("max-writers-save").addEventListener("click", () => {
-      const n = Number(document.getElementById("max-writers-input").value);
-      if (!Number.isFinite(n)) return;
-      postCommand("set_max_writers", { count: n }).then(refreshAll);
+    const input = document.getElementById("max-writers-input");
+    const feedback = document.getElementById("max-writers-feedback");
+    document.getElementById("max-writers-save").addEventListener("click", async () => {
+      const n = Number(input.value);
+      const min = Number(input.min || 1);
+      const max = Number(input.max || 8);
+      if (!Number.isInteger(n) || n < min || n > max) {
+        feedback.textContent = `Enter a whole number from ${min} to ${max}.`;
+        input.setAttribute("aria-invalid", "true");
+        return;
+      }
+      input.removeAttribute("aria-invalid");
+      feedback.textContent = "Applying…";
+      const result = await postCommand("set_max_writers", { count: n });
+      const ok = result && result.ok && (!result.body || result.body.ok !== false);
+      feedback.textContent = ok ? `Applied — up to ${n} write worker${n === 1 ? "" : "s"}` : `Not applied${result && result.body && result.body.detail ? `: ${result.body.detail}` : ""}`;
+      refreshAll();
     });
   }
 
@@ -3871,9 +4204,21 @@
     });
     terminal.open(host);
     let socket = null;
+    const frame = document.getElementById("terminal-frame");
+    const overlayTitle = document.getElementById("terminal-overlay-title");
+    const overlayText = document.getElementById("terminal-overlay-text");
+    const stateDetail = document.getElementById("terminal-state-detail");
+    const reconnectBtn = document.getElementById("terminal-reconnect");
     function setState(label, css) {
       statePill.textContent = label;
       statePill.className = `status-pill ${css}`;
+      const kind = label === "Connected" ? "connected" : label === "Connecting" ? "connecting" : label === "Connection error" ? "error" : "disconnected";
+      if (frame) frame.dataset.connection = kind;
+      if (overlayTitle) overlayTitle.textContent = { connecting: "Connecting…", error: "Connection error", disconnected: "Terminal disconnected" }[kind] || "";
+      if (overlayText) overlayText.textContent = { connecting: "Opening a shell in the project worktree.", error: "The terminal could not be reached. Check that the Control Center is running, then reconnect.", disconnected: "Reconnect to open a new shell session." }[kind] || "";
+      if (stateDetail) stateDetail.textContent = kind === "connected" ? `since ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "";
+      // The primary action is the one that fixes the current problem.
+      if (reconnectBtn) reconnectBtn.classList.toggle("btn-primary", kind !== "connected");
     }
     function resize() {
       const cols = Math.max(20, Math.floor(host.clientWidth / 8.2));
@@ -3885,9 +4230,13 @@
       if (socket) socket.close();
       setState("Connecting", "st-running");
       const scheme = location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(`${scheme}://${location.host}/api/terminal/ws`);
-      socket.addEventListener("open", resize);
-      socket.addEventListener("message", (event) => {
+      const sock = new WebSocket(`${scheme}://${location.host}/api/terminal/ws`);
+      socket = sock;
+      // A replaced socket must never overwrite the state of the current one.
+      const current = () => sock === socket;
+      sock.addEventListener("open", () => { if (current()) resize(); });
+      sock.addEventListener("message", (event) => {
+        if (!current()) return;
         const message = JSON.parse(event.data);
         if (message.type === "output") terminal.write(message.data);
         if (message.type === "ready") {
@@ -3900,8 +4249,8 @@
           terminal.focus();
         }
       });
-      socket.addEventListener("close", () => setState("Disconnected", "st-paused"));
-      socket.addEventListener("error", () => setState("Connection error", "st-blocked"));
+      sock.addEventListener("close", () => { if (current()) setState("Disconnected", "st-paused"); });
+      sock.addEventListener("error", () => { if (current()) setState("Connection error", "st-blocked"); });
     }
     terminal.onData((data) => {
       if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", data }));
@@ -3946,6 +4295,7 @@
   initSystemMenu();
   initAttentionBell();
   initStickyControlsPlacement();
+  initChromeInsets();
   initStickyControls();
   updateStickyControlsState();
   initNotifications();

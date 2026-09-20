@@ -402,6 +402,7 @@
       </section>
 
       <section class="view" id="view-runs" role="tabpanel" hidden>
+        <p id="runs-focus-status" class="sr-only" role="status" aria-live="polite"></p>
         <div class="card wide" id="card-quickstart">
           <div class="card-head">
             <div>
@@ -546,8 +547,8 @@
         <div class="card wide" id="card-telemetry">
           <h2>Telemetry — tokens, cost, quota</h2>
           <div class="table-scroll">
-            <table id="telemetry-table"><thead><tr>
-              <th>Provider</th><th>Route</th><th>State</th>
+            <table id="telemetry-table" class="responsive-table" role="table"><thead><tr role="row">
+              <th role="columnheader">Provider</th><th role="columnheader">Route</th><th role="columnheader">State</th>
             </tr></thead><tbody></tbody></table>
           </div>
           <div class="kv" id="quota-body"></div>
@@ -630,42 +631,81 @@
       </section>
 
       <section class="view" id="view-system" role="tabpanel" hidden>
-        <div class="grid">
-          <div class="card" id="card-overview">
-            <h2>Overview</h2>
-            <div class="kv" id="overview-body">Loading…</div>
+        <!-- OCTAREL-UI-03: grouped by what the operator is asking. The problems
+             strip lists only real warnings (populated by renderSystemHealth());
+             healthy values stay quiet. -->
+        <div class="system-summary card wide" id="system-summary" role="status" aria-live="polite" aria-label="System health summary"></div>
+
+        <section class="system-group" aria-labelledby="sys-runtime-title">
+          <div class="system-group-head"><h2 id="sys-runtime-title">Runtime health</h2><p class="hint">Capacity and load on this machine.</p></div>
+          <div class="grid">
+            <div class="card" id="card-resources">
+              <h3>Resources</h3>
+              <div class="kv" id="resources-body">Loading…</div>
+            </div>
+            <div class="card" id="card-workers">
+              <h3>Parallel workers</h3>
+              <div class="kv" id="workers-body">Loading…</div>
+            </div>
           </div>
-          <div class="card" id="card-app-lifecycle">
-            <h2>OctaScene development app</h2>
-            <div class="kv" id="app-lifecycle-body">Loading…</div>
-            <div class="card-actions"><button id="app-start" type="button">Start</button><button id="app-restart" type="button">Restart</button><button id="app-stop" class="danger" type="button">Stop</button></div>
-            <p class="hint">Only the canonical local <code>make run</code> process started by this Control Center can be stopped.</p>
+        </section>
+
+        <section class="system-group" aria-labelledby="sys-repo-title">
+          <div class="system-group-head"><h2 id="sys-repo-title">Repository state</h2><p class="hint">The selected project's checkout and its worktrees.</p></div>
+          <div class="grid">
+            <div class="card wide" id="card-repository-health"><h3>Repository health</h3><div id="repository-health-body" class="kv">Loading…</div><div id="recent-merges" class="entity-list"></div></div>
           </div>
-          <div class="card" id="card-repository-health"><h2>Repository health</h2><div id="repository-health-body" class="kv">Loading…</div><div id="recent-merges" class="entity-list"></div></div>
-          <div class="card" id="card-workers">
-            <h2>Parallel Workers</h2>
-            <div class="kv" id="workers-body">Loading…</div>
+        </section>
+
+        <section class="system-group" aria-labelledby="sys-env-title">
+          <div class="system-group-head"><h2 id="sys-env-title">Environment</h2><p class="hint">What the orchestrator is configured to use.</p></div>
+          <div class="grid">
+            <div class="card" id="card-overview">
+              <h3>Orchestrator</h3>
+              <div class="kv" id="overview-body">Loading…</div>
+            </div>
           </div>
-          <div class="card" id="card-resources">
-            <h2>Resources</h2>
-            <div class="kv" id="resources-body">Loading…</div>
+        </section>
+
+        <section class="system-group" aria-labelledby="sys-services-title">
+          <div class="system-group-head"><h2 id="sys-services-title">Services &amp; processes</h2><p class="hint">Processes this Control Center starts and can stop.</p></div>
+          <div class="grid">
+            <div class="card" id="card-app-lifecycle">
+              <h3>OctaScene development app</h3>
+              <div class="kv" id="app-lifecycle-body">Loading…</div>
+              <div class="card-actions"><button id="app-start" type="button">Start</button><button id="app-restart" type="button">Restart</button><button id="app-stop" class="danger" type="button">Stop</button></div>
+              <p class="hint">Only the canonical local <code>make run</code> process started by this Control Center can be stopped.</p>
+            </div>
           </div>
-          <div class="card" id="card-tests">
-            <h2>Local Gate</h2>
-            <div class="kv" id="tests-body">Loading…</div>
+        </section>
+
+        <section class="system-group" aria-labelledby="sys-diag-title">
+          <div class="system-group-head"><h2 id="sys-diag-title">Diagnostics</h2><p class="hint">Gate evidence and recent problems.</p></div>
+          <div class="grid">
+            <div class="card" id="card-tests">
+              <h3>Local Gate</h3>
+              <div class="kv" id="tests-body">Loading…</div>
+            </div>
+            <div class="card" id="card-problems">
+              <h3>Recent problems</h3>
+              <ul id="system-problems" class="event-feed"></ul>
+            </div>
           </div>
-        </div>
+        </section>
       </section>
 
       <section class="view" id="view-terminal" role="tabpanel" hidden>
         <div class="section-heading">
-          <div><h2>Terminal</h2><p class="subtitle">A secured PTY for this OctaScene development worktree.</p></div>
-          <span id="terminal-state" class="status-pill st-paused" role="status">Disconnected</span>
+          <div><h2>Terminal</h2><p class="subtitle">A secured shell inside this project's allowlisted worktree.</p></div>
         </div>
         <article class="panel terminal-panel">
           <header class="terminal-header">
-            <div>
-              <h3>OctaScene Control Center Terminal</h3>
+            <div class="terminal-title">
+              <div class="terminal-title-row">
+                <h3>Control Center terminal</h3>
+                <span id="terminal-state" class="status-pill st-paused" role="status">Disconnected</span>
+                <span id="terminal-state-detail" class="terminal-state-detail"></span>
+              </div>
               <dl class="terminal-meta" id="terminal-meta">
                 <div><dt>Repository</dt><dd>Loading…</dd></div>
                 <div><dt>Branch</dt><dd>Loading…</dd></div>
@@ -674,42 +714,73 @@
               </dl>
             </div>
             <div class="terminal-actions" role="toolbar" aria-label="Terminal controls">
-              <button type="button" id="terminal-reconnect">Reconnect</button>
+              <button type="button" id="terminal-reconnect" class="btn-primary">Reconnect</button>
               <button type="button" id="terminal-clear">Clear</button>
               <button type="button" id="terminal-copy">Copy</button>
             </div>
           </header>
-          <div id="terminal" class="terminal-host" aria-label="Interactive OctaScene development terminal"></div>
+          <div class="terminal-frame" id="terminal-frame" data-connection="disconnected">
+            <div id="terminal" class="terminal-host" aria-label="Interactive development terminal"></div>
+            <div class="terminal-overlay" id="terminal-overlay">
+              <strong id="terminal-overlay-title">Terminal disconnected</strong>
+              <span id="terminal-overlay-text">Reconnect to open a new shell session.</span>
+            </div>
+          </div>
           <p class="hint">Commands stay inside the allowlisted repository worktree. Only sanitized Control Center terminal command metadata is recorded; shell history is never imported.</p>
         </article>
         <article class="panel"><div class="section-heading"><h3>Terminal History</h3><div><select id="terminal-history-limit" aria-label="Terminal history limit"><option>20</option><option selected>50</option><option>100</option></select><button id="terminal-history-clear" class="danger" type="button">Clear metadata</button></div></div><input id="terminal-history-search" type="search" placeholder="Search safe command metadata" aria-label="Search terminal history"/><div id="terminal-history" class="entity-list"></div></article>
       </section>
 
       <section class="view" id="view-settings" role="tabpanel" hidden>
-        <div class="card wide">
+        <div class="card wide settings-card">
           <h2>Settings</h2>
-          <p class="hint">Only controls the dashboard actually supports. Theme and notifications are local to this browser; write-worker cap posts to the existing command layer.</p>
-          <div class="settings-grid">
-            <label class="setting">
-              <span>Theme</span>
-              <select id="theme-select" aria-label="Theme">
-                <option value="dark">Dark</option>
-                <option value="light">Light</option>
-                <option value="system">System</option>
-              </select>
-            </label>
-            <div class="setting">
-              <span>Desktop notifications</span>
-              <button id="notif-toggle" class="icon-btn" type="button" aria-pressed="false">Enable notifications</button>
+          <p class="hint">Only what this dashboard supports. Appearance and notifications are stored in this browser; the worker cap is applied through the orchestrator command layer.</p>
+
+          <section class="settings-section" aria-labelledby="set-appearance-title">
+            <div class="settings-section-head"><h3 id="set-appearance-title">Appearance</h3><p class="hint">Stored in this browser only.</p></div>
+            <div class="settings-rows">
+              <div class="setting-row">
+                <div class="setting-copy"><label for="theme-select">Theme</label><p class="hint">Dark is the default; System follows your operating system.</p></div>
+                <div class="setting-control">
+                  <select id="theme-select" aria-label="Theme">
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                    <option value="system">System</option>
+                  </select>
+                  <span class="setting-feedback" id="theme-feedback" role="status" aria-live="polite"></span>
+                </div>
+              </div>
             </div>
-            <label class="setting">
-              <span>Max write workers</span>
-              <span class="inline-field">
-                <input id="max-writers-input" type="number" min="1" max="8" step="1" aria-label="Max write workers" />
-                <button id="max-writers-save" type="button">Save</button>
-              </span>
-            </label>
-          </div>
+          </section>
+
+          <section class="settings-section" aria-labelledby="set-notify-title">
+            <div class="settings-section-head"><h3 id="set-notify-title">Notifications</h3><p class="hint">Local browser notifications only; nothing is sent to an external service.</p></div>
+            <div class="settings-rows">
+              <div class="setting-row">
+                <div class="setting-copy"><span class="setting-label" id="notif-label">Desktop notifications</span><p class="hint">Alerts for failed, blocked and completed tasks and new attention items.</p></div>
+                <div class="setting-control">
+                  <button id="notif-toggle" class="icon-btn" type="button" aria-pressed="false" aria-describedby="notif-label">Enable notifications</button>
+                  <span class="setting-feedback" id="notif-feedback" role="status" aria-live="polite"></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section" aria-labelledby="set-orch-title">
+            <div class="settings-section-head"><h3 id="set-orch-title">Orchestration</h3><p class="hint">Applied to the running orchestrator.</p></div>
+            <div class="settings-rows">
+              <div class="setting-row">
+                <div class="setting-copy"><label for="max-writers-input">Max write workers</label><p class="hint">How many workers may write to a worktree at once (1–8). Each worktree still has exactly one writer.</p></div>
+                <div class="setting-control">
+                  <span class="inline-field">
+                    <input id="max-writers-input" type="number" min="1" max="8" step="1" aria-label="Max write workers" />
+                    <button id="max-writers-save" type="button">Apply</button>
+                  </span>
+                  <span class="setting-feedback" id="max-writers-feedback" role="status" aria-live="polite"></span>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
         <div class="card wide" id="card-roadmap">
           <h2>Roadmap progress <span class="derived-note">status labels from repository docs — any computed % is labelled DERIVED</span></h2>

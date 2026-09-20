@@ -113,7 +113,7 @@ test('providers list keeps an open disclosure open across polls', async ({ page 
   await expect(card.locator('.provider-more')).toHaveAttribute('open', '');
 });
 
-test('Agent Activity log console classifies stderr/warnings, numbers lines and follows the tail', async ({ page, request, baseURL }) => {
+test('Agent Activity log console flags keyword matches, numbers lines and follows the tail', async ({ page, request, baseURL }) => {
   const root = (await (await request.get(`${baseURL}/test/repo-root`)).json()).root;
   const runDir = path.join(root, '.agent-output', TASK_REF, WORKER, 'run-console-1');
   fs.mkdirSync(path.join(runDir, 'logs'), { recursive: true });
@@ -132,11 +132,11 @@ test('Agent Activity log console classifies stderr/warnings, numbers lines and f
     await stage.click();
     const log = page.locator('.agent-activity-log');
     await expect(log).toContainText('collected 3 items');
-    await expect(log.locator('.log-err').first()).toContainText(/Traceback|AssertionError/);
-    await expect(log.locator('.log-warn').first()).toContainText('WARNING');
+    await expect(log.locator('.log-flag-error').first()).toContainText(/Traceback|AssertionError/);
+    await expect(log.locator('.log-flag-warn').first()).toContainText('WARNING');
     await expect(log.locator('.log-sys').first()).toContainText('starting');
-    // Non-colour stream marker exists for error lines.
-    await expect(log.locator('.log-err').first()).toHaveAttribute('data-stream', 'ERR');
+    // Flags are labelled as keyword matches: the recorded log has no per-line stream.
+    await expect(log.locator('.log-flag-error').first()).toHaveAttribute('data-flag', 'error keyword');
     await expect(page.locator('.agent-activity-banner')).toHaveAttribute('data-run-state', 'running');
     await expect(page.locator('.agent-activity-meta')).toContainText('85 lines');
     // Follow-tail starts on and lands at the bottom; the toggle reports its state.

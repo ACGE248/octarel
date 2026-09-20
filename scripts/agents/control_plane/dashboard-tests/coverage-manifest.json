@@ -33,6 +33,10 @@
     "LOCALLY_REVIEW_READY",
     "OWNER_DECISION_REQUIRED",
     "Objective / instructions",
+    "Open live output for Fixture automatic fallback run",
+    "Open live output for Fixture blocked V#-# run",
+    "Open live output for Fixture completed runbook",
+    "Open live output for Fixture overnight run",
     "PROVIDER_QUOTA_EXHAUSTED",
     "Parent worker",
     "Pause",
@@ -42,6 +46,7 @@
     "Retry with selected worker",
     "Retry worker for Fixture blocked V#-# run",
     "Review Current DiffCurrent OctaScene branch · fixture-mainRe…",
+    "Run details",
     "Start",
     "Start Development",
     "Stop",
@@ -66,6 +71,7 @@
     "Pause fx-rb-fallback-session",
     "Pause fx-rb-running-session",
     "Pause fx-running-#",
+    "Scheduling details",
     "Stop fx-rb-fallback-session",
     "Stop fx-rb-running-session",
     "Stop fx-running-#"
@@ -165,6 +171,7 @@
   "view-worktrees": [
     "Adopt / Register",
     "Clean eligible finished worktrees",
+    "Git details",
     "Preview cleanup",
     "Refresh status",
     "fetch",
@@ -173,6 +180,7 @@
     "push"
   ],
   "view-system": [
+    "Gate evidence and history",
     "Restart",
     "Start",
     "Stop"
@@ -186,9 +194,9 @@
     "Terminal history limit"
   ],
   "view-settings": [
+    "Apply",
     "Enable notifications",
     "Max write workers",
-    "Save",
     "Theme"
   ]
 }

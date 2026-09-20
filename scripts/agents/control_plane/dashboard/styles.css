@@ -1002,18 +1002,13 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .workflow-desktop { overflow: hidden; }
 .workflow-desktop .workflow-layout { grid-template-columns: minmax(0, .95fr) minmax(0, .95fr) repeat(var(--workflow-stage-count, 1), minmax(0, 1fr)) minmax(0, .85fr); }
 .workflow-desktop .workflow-summary { min-height: 228px; align-content: center; }
-.workflow-tablet { overflow-x: auto; padding-bottom: 10px; }
-.workflow-tablet .workflow-layout { grid-auto-flow: column; grid-auto-columns: 220px; min-width: max-content; }
-.workflow-tablet .workflow-side { width: 190px; }
 
 /* Connector chevrons between pipeline stages (Overview redesign): purely
    visual, additive-only -- makes the sequence read as one pipeline rather
    than a row of unrelated cards. Skipped on mobile, where stages stack
    vertically and a rightward arrow would be misleading. */
 .workflow-desktop .workflow-layout > .workflow-summary::after,
-.workflow-desktop .workflow-layout > .workflow-stage-card::after,
-.workflow-tablet .workflow-layout > .workflow-summary::after,
-.workflow-tablet .workflow-layout > .workflow-stage-card::after {
+.workflow-desktop .workflow-layout > .workflow-stage-card::after {
   content: "";
   position: absolute;
   top: 50%;
@@ -2118,3 +2113,176 @@ html[data-theme="dark"] { --ok: #32d583; --ok-rgb: 50, 213, 131; --err: #f97066;
 }
 .workflow-status.running, .phase-step.running .phase-glyph { color: var(--info); }
 .st-queued, .st-pending, .st-paused { color: var(--info); }
+
+/* ======================================================================
+   OCTAREL-UI-03: polish phase 2. Scannable task/run cards, a wrapping
+   workflow layout, truthful log console, measured mobile chrome insets,
+   deliberate Terminal / Settings / Worktrees / System hierarchy, and a
+   stacked responsive table.
+   ====================================================================== */
+
+/* -- scannable entity cards ---------------------------------------------- */
+.entity-id { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.entity-facts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 13px; }
+.entity-facts li { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; }
+.entity-fact-k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.entity-reason { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 8px 10px; font-size: 13px; border-radius: var(--radius-sm); border: 1px solid color-mix(in srgb, var(--warn) 50%, var(--border)); background: color-mix(in srgb, var(--warn) 8%, transparent); overflow-wrap: anywhere; }
+.entity-more > summary { cursor: pointer; list-style: none; min-height: 32px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.entity-more > summary::-webkit-details-marker { display: none; }
+.entity-more > summary::before { content: "▸"; }
+.entity-more[open] > summary::before { content: "▾"; }
+.entity-more > .entity-meta { margin-top: 4px; }
+.entity-more > .runbook-phases { margin-top: 6px; }
+.chip-row { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border-strong); color: var(--text); background: transparent; }
+.chip-warn { border-color: color-mix(in srgb, var(--warn) 60%, var(--border)); color: var(--warn); }
+.run-card.is-focused { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+.run-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.worktree-card.needs-attention { border-left: 3px solid var(--warn); }
+.entity-card .runbook-actions, .entity-card .card-actions, .entity-card .entity-actions { margin-top: 0; }
+
+/* -- workflow: reflow into a wrapping grid between phone and wide desktop */
+.workflow-medium .workflow-layout { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+.workflow-medium .workflow-summary { grid-column: 1 / -1; grid-template-columns: 44px minmax(0, 1fr) auto minmax(140px, 260px); grid-template-areas: "icon title status progress"; align-items: center; min-height: 0; }
+.workflow-medium .workflow-summary > .workflow-status { justify-self: end; }
+.workflow-medium .workflow-side { grid-column: 1 / -1; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.workflow-medium .workflow-stage-card { min-height: 0; }
+.workflow-medium .workflow-stage-title span, .workflow-medium .workflow-stage-agent, .workflow-medium .workflow-current { font-size: 12px; }
+@media (max-width: 900px) {
+  .workflow-medium .workflow-summary { grid-template-columns: 44px minmax(0, 1fr); grid-template-areas: "icon title" "status status" "progress progress"; align-items: start; }
+  .workflow-medium .workflow-summary > .workflow-status { justify-self: start; }
+}
+
+/* -- agent activity log: truthful about what the evidence records -------- */
+.agent-activity-note { margin: 0 0 8px; padding: 6px 10px; font-size: 12px; color: var(--muted); border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
+.agent-activity-note strong { color: var(--text); }
+.log-line { counter-increment: none; }
+.log-line::before { content: attr(data-n); }
+.log-line::after { content: none; }
+.log-line[data-flag]::after { content: attr(data-flag); float: right; margin-left: 12px; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; color: var(--console-muted); }
+.log-err, .log-warn { border-left-color: transparent; background: none; color: inherit; }
+.log-flag-error { border-left-color: #f87171; background: rgba(248, 113, 113, 0.09); }
+.log-flag-error::after { color: #fca5a5; }
+.log-flag-warn { border-left-color: #fbbf24; background: rgba(251, 191, 36, 0.07); }
+.log-flag-warn::after { color: #fcd34d; }
+.log-sys { color: #93c5fd; font-style: normal; }
+.log-sys::after { color: #93c5fd; }
+.agent-activity-log.plain .log-line { border-left-color: transparent; background: none; color: inherit; font-style: normal; }
+.agent-activity-log.plain .log-line::before, .agent-activity-log.plain .log-line::after { content: none; }
+.agent-activity-log.plain .log-line { padding-left: 12px; }
+
+/* -- mobile chrome: page padding follows the measured bars --------------- */
+html { scroll-padding-bottom: calc(var(--bottom-nav-h) + var(--sticky-h) + 16px); }
+body { padding-bottom: calc(var(--bottom-nav-h) + var(--sticky-h) + 16px); }
+.sticky-controls { bottom: var(--bottom-nav-h); padding-block: 6px; }
+@media (min-width: 768px) {
+  html { scroll-padding-bottom: 24px; }
+  body { padding-bottom: 24px; }
+}
+
+/* -- terminal: deliberate operator layout -------------------------------- */
+.terminal-title { min-width: 0; flex: 1; }
+.terminal-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
+.terminal-title-row h3 { margin: 0; font-size: 16px; }
+.terminal-state-detail { font-size: 12px; color: #8f9bb3; }
+.terminal-meta { gap: 6px; }
+.terminal-meta > div { display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 10px; border: 1px solid #293248; border-radius: 999px; max-width: 100%; }
+.terminal-meta dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
+.terminal-actions { align-items: flex-start; flex: none; }
+.terminal-frame { position: relative; }
+.terminal-host { height: clamp(320px, calc(100dvh - 400px), 720px); min-height: 240px; }
+.terminal-overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; padding: 24px; text-align: center; background: rgba(9, 13, 24, 0.88); color: #cbd5e1; z-index: 2; }
+.terminal-overlay strong { color: #f1f5f9; font-size: 15px; }
+.terminal-overlay span { font-size: 13px; max-width: 42ch; }
+.terminal-frame[data-connection="connected"] .terminal-overlay { display: none; }
+.terminal-frame[data-connection="connecting"] .terminal-overlay { pointer-events: none; }
+@media (max-width: 767px) {
+  .terminal-header { flex-direction: column; padding: 12px; }
+  .terminal-meta > div { border-radius: 10px; flex-wrap: wrap; }
+  .terminal-meta dd { white-space: normal; overflow-wrap: anywhere; max-width: none; }
+  .terminal-actions { width: 100%; }
+  .terminal-actions button { flex: 1; }
+  .terminal-host { height: clamp(220px, calc(100dvh - var(--bottom-nav-h) - var(--sticky-h) - 260px), 520px); min-height: 220px; }
+}
+
+/* -- settings: grouped, aligned, with feedback --------------------------- */
+.settings-section { padding: 16px 0; border-top: 1px solid var(--border); }
+.settings-card > .hint + .settings-section { margin-top: 12px; }
+.settings-section-head { margin-bottom: 8px; }
+.settings-section-head h3 { margin: 0; font-size: 14px; }
+.settings-section-head .hint { margin: 2px 0 0; }
+.settings-rows { display: grid; gap: 14px; }
+.setting-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 340px); gap: 8px 24px; align-items: start; }
+.setting-copy label, .setting-label { display: block; font-size: 13px; font-weight: 600; color: var(--text); }
+.setting-copy .hint { margin: 2px 0 0; }
+.setting-control { display: grid; gap: 6px; justify-items: start; }
+.setting-control select { min-height: var(--control-h); min-width: 180px; padding: 0 10px; }
+.setting-feedback { font-size: 12px; color: var(--muted); min-height: 1.3em; }
+.setting-feedback:not(:empty)::before { content: "✓ "; color: var(--ok); }
+.setting-control input[aria-invalid="true"] { border-color: var(--err); }
+@media (max-width: 767px) { .setting-row { grid-template-columns: 1fr; } .setting-control { width: 100%; } .setting-control select { width: 100%; } }
+
+/* -- system: grouped by question ---------------------------------------- */
+.system-group { display: grid; gap: 10px; }
+.system-group-head h2 { margin: 0; font-size: 15px; }
+.system-group-head .hint { margin: 2px 0 0; }
+.system-group .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.system-group .card h3 { margin: 0 0 8px; font-size: 14px; }
+.system-summary { border-left: 3px solid var(--ok); }
+.system-summary[data-problems]:not([data-problems="0"]) { border-left-color: var(--warn); }
+.system-ok, .system-problems-title { margin: 0; font-weight: 600; }
+.system-ok { color: var(--ok); }
+.system-problems-title { color: var(--warn); margin-bottom: 8px; }
+.system-problem-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.system-problem-list li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; }
+.kv-warn, .kv-err { font-weight: 650; }
+.kv-warn { color: var(--warn); }
+.kv-err { color: var(--err); }
+.kv-more { grid-column: 1 / -1; margin-top: 6px; }
+.kv-more > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); min-height: 32px; display: flex; align-items: center; }
+.kv-rest { margin-top: 6px; }
+@media (max-width: 767px) { .system-group .grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* -- responsive table: rows become labelled stacks on narrow screens ---- */
+@media (max-width: 767px) {
+  .card .responsive-table, .responsive-table { display: table; overflow: visible; width: 100%; }
+  .responsive-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .responsive-table, .responsive-table tbody, .responsive-table tr, .responsive-table td { display: block; width: 100%; }
+  .responsive-table tr { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 8px; background: var(--surface-2); }
+  .responsive-table td { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border: 0; text-align: right; overflow-wrap: anywhere; }
+  .responsive-table td::before { content: attr(data-label); color: var(--muted); font-size: 12px; text-align: left; flex: none; }
+}
+
+/* -- 800px-tall desktops: keep the whole nav reachable ------------------- */
+@media (min-width: 768px) and (max-height: 860px) {
+  .project-switcher-label, .project-identity { display: none; }
+  .tab { min-height: 32px; padding-block: 3px; }
+  .nav-group-label { padding: 8px 12px 2px; }
+  .brand { padding-bottom: 6px; }
+  .sidebar-footer { gap: 6px; padding-top: 6px; }
+}
+
+/* -- focus mode visibility for the overview run action ------------------ */
+.continue-card .btn-primary:focus-visible { outline-offset: 3px; }
+@media (min-width: 768px) and (max-height: 860px) {
+  .project-switcher { flex-direction: row; align-items: center; gap: 6px; }
+  .project-switcher .project-select { flex: 1; min-width: 0; }
+  .project-add-btn { align-self: center; min-width: 0; min-height: 32px; padding: 4px 8px; white-space: nowrap; }
+  .tab { min-height: 30px; }
+  .identity-card { padding: 4px 6px; }
+  .task-pill { padding: 6px 10px; }
+  .sidebar-footer { padding-bottom: 6px; }
+}
+.entity-card header > .truncate-wrap { flex: 1 1 0; min-width: 0; }
+.entity-card header > .status-pill { flex: none; }
+.entity-id.truncate { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting-feedback:not(:empty)::before { content: none; }
+#recent-merges:empty::before { content: none; }
+.entity-card > * { min-width: 0; }
+.workflow-stage-title span, .workflow-stage-agent, .workflow-current { font-size: 12px; }
+/* log line labels sit on their own line (a float after the trailing newline drifted to the next row) */
+.log-line { position: relative; }
+.log-line[data-flag]::after { float: none; position: absolute; right: 12px; top: 0; margin: 0; background: var(--console-bg); padding-left: 8px; }
+.log-flag-error[data-flag]::after { background: color-mix(in srgb, var(--console-bg) 88%, #f87171); }
+.log-flag-warn[data-flag]::after { background: color-mix(in srgb, var(--console-bg) 90%, #fbbf24); }
+.agent-activity-log.wrap .log-line[data-flag]::after { display: none; }
