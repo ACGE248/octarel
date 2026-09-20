@@ -1605,11 +1605,17 @@
       const t = wf && wf.task;
       const queued = (state.tasks || []).filter((x) => x.state === "QUEUED");
       const nextQueued = queued[0];
-      if (!t) {
+      // Active Work is only for work that is live. A finished task is history: say so
+      // instead of presenting it as the current task.
+      const LIVE = ["RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED"];
+      const isLive = !!t && (LIVE.includes(t.state) || (wf.stages || []).some((x) => LIVE.includes(x.state)));
+      if (!t || !isLive) {
         if (stateEl) stateEl.textContent = "Idle";
+        const last = t ? `Last activity: ${t.title || t.id} — ${statusText(t.state).toLowerCase()}${t.updated_at ? ` ${relativeTime(t.updated_at)}` : ""}.` : null;
         body.appendChild(el("div", { class: "active-work-idle" }, [
           el("strong", { text: "Nothing is running" }),
           el("span", { text: nextQueued ? `Up next: ${nextQueued.task_ref} · ${displayName(nextQueued.role)} (${displayName(nextQueued.worker)})` : "Start a run from Quick Start to see live work here." }),
+          last ? el("span", { class: "hint", text: last }) : null,
         ]));
         const open = el("button", { type: "button", class: "btn-secondary", text: "Open Runs" });
         open.addEventListener("click", () => showView("view-runs"));

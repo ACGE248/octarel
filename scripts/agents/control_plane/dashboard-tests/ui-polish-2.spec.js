@@ -333,3 +333,19 @@ test('Quick Start shows why an already-accepted task cannot be started again', a
   await expect(page.locator('#prepared-run-start')).toBeDisabled();
   await expect(page.locator('#prepared-run-feedback')).toContainText('will not start it again');
 });
+
+test('Active Work does not present a finished task as the current one', async ({ page }) => {
+  await page.route('**/api/workflow', async (route) => {
+    const wf = await (await route.fetch()).json();
+    wf.task = { ...wf.task, state: 'SUCCEEDED' };
+    wf.stages = wf.stages.map((stage) => ({ ...stage, state: 'SUCCEEDED' }));
+    wf.orchestrator = { ...wf.orchestrator, state: 'SUCCEEDED' };
+    await route.fulfill({ json: wf });
+  });
+  await page.goto('/');
+  const active = page.locator('#overview-active-work');
+  await expect(active).toContainText('Nothing is running', { timeout: 15000 });
+  await expect(active).toContainText('Last activity:');
+  await expect(active.locator('.active-work-facts')).toHaveCount(0);
+  await expect(page.locator('#active-work-state')).toHaveText('Idle');
+});
