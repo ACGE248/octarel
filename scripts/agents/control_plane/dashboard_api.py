@@ -845,9 +845,9 @@ def create_app(
     def superseded() -> tuple[set[str], set[str]]:
         """Run/task ids that are history (already accepted, or taken over by a later accepted run)."""
 
-        from .advancement import superseded_ids
+        from .advancement import completed_work_refs, superseded_ids
 
-        return superseded_ids(scoped_runbooks(), scoped_tasks())
+        return superseded_ids(scoped_runbooks(), scoped_tasks(), completed_work_refs(ctx.selected_project))
 
     def current_tasks() -> list[Any]:
         _runs, old_tasks = superseded()

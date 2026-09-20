@@ -186,12 +186,35 @@ def _work_ref(runbook: Runbook) -> str:
     return head[0].rstrip(":;,.()") if head else runbook.id
 
 
-def superseded_ids(runbooks: list[Runbook], tasks: list[Any]) -> tuple[set[str], set[str]]:
+def completed_work_refs(project: Any) -> frozenset[str]:
+    """Work items the project's own file-based task source records as complete right now.
+
+    Read fresh from the project's checkout each call (never cached as truth). Network
+    adapters (GitHub issues) are deliberately not consulted here: this runs on every
+    dashboard poll.
+    """
+
+    from .task_sources import ADAPTER_FILE_LEDGER, ADAPTER_VIDEO_EDITOR_LEDGER, discover_tasks, task_source_adapter_name
+
+    if project is None:
+        return frozenset()
+    try:
+        if task_source_adapter_name(project) not in {ADAPTER_FILE_LEDGER, ADAPTER_VIDEO_EDITOR_LEDGER}:
+            return frozenset()
+        return frozenset(t.task_id for t in discover_tasks(project) if t.status.lower() in COMPLETE_STATUSES)
+    except (TaskSourceError, OSError):
+        return frozenset()
+
+
+def superseded_ids(
+    runbooks: list[Runbook], tasks: list[Any], completed_refs: frozenset[str] = frozenset()
+) -> tuple[set[str], set[str]]:
     """(runbook ids, task ids) that are history, not current work.
 
     A failed/blocked run is history when a *later* accepted run took over the same
-    work item; and any failed/blocked task belonging to an accepted run (a review that
-    failed before the recovered acceptance succeeded) is history. Only FAILED/BLOCKED/
+    work item, or when the project's own task source records that work item complete;
+    and any failed/blocked task belonging to an accepted run (a review that failed
+    before the recovered acceptance succeeded) is history. Only FAILED/BLOCKED/
     CANCELLED items are ever superseded: a live task or run is always current.
     """
 
@@ -202,7 +225,9 @@ def superseded_ids(runbooks: list[Runbook], tasks: list[Any]) -> tuple[set[str],
         newest_accepted[ref] = max(newest_accepted.get(ref, ""), run.created_at)
     run_ids = {run.id for run in accepted}
     for run in runbooks:
-        if run.status in _SETTLED_FOR_SUPERSESSION and newest_accepted.get(_work_ref(run), "") > run.created_at:
+        if run.status in _SETTLED_FOR_SUPERSESSION and (
+            newest_accepted.get(_work_ref(run), "") > run.created_at or _work_ref(run) in completed_refs
+        ):
             run_ids.add(run.id)
     owners = [r for r in runbooks if r.id in run_ids]
     task_ids: set[str] = set()

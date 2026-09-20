@@ -115,3 +115,35 @@ def test_api_still_surfaces_a_real_current_failure(api):
     attention = client.get("/api/attention").json()
     assert [t["id"] for t in attention["tasks"]] == ["RB-2-session"]
     assert [r["id"] for r in attention["runbooks"]] == ["RB-2"]
+
+
+def test_a_failed_run_of_a_work_item_the_project_records_complete_is_history():
+    early_ok = rb("RB-ok", "V1-01", "SUCCEEDED", created="2026-09-13T00:00:00+00:00")  # pre-acceptance-pipeline era
+    later_fail = rb("RB-fail", "V1-01", "FAILED", created="2026-09-14T00:00:00+00:00", task_id="RB-fail-session")
+    tasks = [task("RB-fail-session", "FAILED", ref="V1-01", role="primary-implementation")]
+    assert superseded_ids([early_ok, later_fail], tasks) == (set(), set())  # nothing marks it done yet
+    runs, old = superseded_ids([early_ok, later_fail], tasks, frozenset({"V1-01"}))
+    assert runs == {"RB-fail"} and old == {"RB-fail-session"}
+
+
+def test_completed_refs_come_from_the_projects_own_ledger_and_are_read_fresh(tmp_path):
+    import subprocess
+
+    from scripts.agents.control_plane.advancement import completed_work_refs
+    from scripts.agents.control_plane.project import ProjectContract
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "TASKS.md").write_text("| ID | status | notes |\n|---|---|---|\n| A-01 | complete | x |\n| A-02 | pending | y |\n", encoding="utf-8")
+    project = ProjectContract(
+        project_id="p", display_name="P", local_repo_root=root, task_sources=("TASKS.md",),
+        capabilities={"task_source_adapter": "file_ledger"},
+    )
+    assert completed_work_refs(project) == frozenset({"A-01"})
+    (root / "TASKS.md").write_text("| ID | status | notes |\n|---|---|---|\n| A-01 | complete | x |\n| A-02 | complete | y |\n", encoding="utf-8")
+    assert completed_work_refs(project) == frozenset({"A-01", "A-02"})  # not cached
+    assert completed_work_refs(None) == frozenset()
+    github = ProjectContract(project_id="g", display_name="G", local_repo_root=root, github_remote="o/r",
+                             capabilities={"task_source_adapter": "github_issues"})
+    assert completed_work_refs(github) == frozenset()  # never a network call from a dashboard poll
