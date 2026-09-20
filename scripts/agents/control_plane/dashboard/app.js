@@ -2369,6 +2369,15 @@
     ]);
     const signature = JSON.stringify([shown, routeOrders.byRole, (state.models || []).map((m) => [m.worker, m.auth_mode])]);
     if (root.dataset.signature === signature) return;
+    const openDisclosures = new Set(
+      [...root.querySelectorAll(".provider-row")].flatMap((card) => {
+        const worker = card.dataset.worker;
+        if (!worker) return [];
+        return [...card.querySelectorAll("details[open]")].map((details) =>
+          `${worker}:${details.classList.contains("entity-actions-details") ? "actions" : "details"}`
+        );
+      })
+    );
     root.dataset.signature = signature;
     root.innerHTML = "";
     // At-a-glance summary: problems are counted up front rather than reordering the list.
@@ -2383,6 +2392,7 @@
     providers.forEach((p) => {
       const card = el("article", {
         class: "entity-card provider-row",
+        "data-worker": p.name,
         "data-searchable": "true",
         "data-search": `${p.name} ${p.provider} ${p.state}`,
       });
@@ -2401,6 +2411,7 @@
             actionButtons,
           ])
         : actionButtons;
+      if (actions.tagName === "DETAILS" && openDisclosures.has(`${p.name}:actions`)) actions.open = true;
       const titleRow = el("div", { class: "entity-title-row" }, [
         identityBadges(p.execution_system, p.provider),
         el("h3", { text: p.display_name || displayName(p.name) }),
@@ -2433,6 +2444,8 @@
         ]),
         actions,
       ]);
+      const more = foot.querySelector(".provider-more");
+      if (more && openDisclosures.has(`${p.name}:details`)) more.open = true;
       [
         el("header", {}, [
           el("div", {}, [
@@ -2869,8 +2882,8 @@
       ["Dependencies", option.dependency_state || "—"],
       ["Objective", option.objective || "—"],
       ["Preferred implementer", option.parent_worker],
-      ["Tester", option.proposed_tester || "Not configured"],
-      ["Reviewer", option.proposed_reviewer || "Not configured"],
+      ["Tester", option.proposed_tester_unavailable_reason ? `${option.proposed_tester} — ${option.proposed_tester_unavailable_reason}` : option.proposed_tester || "Not configured"],
+      ["Reviewer", option.proposed_reviewer_unavailable_reason ? `${option.proposed_reviewer} — ${option.proposed_reviewer_unavailable_reason}` : option.proposed_reviewer || "Not configured"],
       ["Duration", RUNBOOK_DURATION_LABELS[option.duration_minutes] || `${option.duration_minutes} minutes`],
       ["Permission profile", option.permission_profile],
       [
@@ -3910,45 +3923,66 @@
   }
 
   let currentTasks = [];
+  let refreshInFlight = null;
 
-  async function refreshAll() {
-    const jobs = [
-      // ENG-CP-03: first, so the selector and topbar badge always agree with
-      // the project the panels below are about to be populated from.
-      refreshProjects,
-      refreshIdentity,
-      refreshOverview,
-      refreshWorkers,
-      refreshResources,
-      refreshTasks,
-      refreshProviders,
-      refreshModels,
-      refreshWorktrees,
-      refreshOperations,
-      refreshAppLifecycle,
-      refreshRepositoryHealth,
-      refreshTerminalHistory,
-      refreshRunbooks,
-      refreshQuickStart,
-      refreshFlow,
-      refreshWorkflow,
-      refreshTests,
-      refreshAttention,
-      refreshEvents,
-      refreshRunEvidence,
-      refreshRoadmap,
-      refreshTelemetry,
-      refreshUsageRouting,
-      refreshCheckpointAge,
-    ];
-    for (const job of jobs) {
+  function refreshAll() {
+    // A slow endpoint must not let the 2-second timer stack another complete
+    // refresh over the active one. Besides wasting work, overlapping renders
+    // can replace freshly opened controls with an older response.
+    if (refreshInFlight) return refreshInFlight;
+    document.body.setAttribute("aria-busy", "true");
+    refreshInFlight = (async () => {
+      // Resolve project selection first. The remaining reads run in two bounded
+      // dependency waves; serially awaiting ~25 endpoints made a normal poll
+      // take their summed latency (often 3-8 seconds).
       try {
-        await job();
+        await refreshProjects();
       } catch (err) {
         console.warn(err);
       }
-    }
-    applySearch(document.getElementById("global-search")?.value || "");
+      const foundationJobs = [
+        refreshIdentity,
+        refreshOverview,
+        refreshWorkers,
+        refreshResources,
+        refreshTasks,
+        refreshProviders,
+        refreshModels,
+        refreshWorktrees,
+        refreshOperations,
+        refreshAppLifecycle,
+        refreshRepositoryHealth,
+        refreshTerminalHistory,
+      ];
+      let results = await Promise.allSettled(foundationJobs.map((job) => job()));
+      results.filter((result) => result.status === "rejected").forEach((result) => console.warn(result.reason));
+
+      // These projections consume foundational model/worktree/task state. They
+      // form a second concurrent wave so controls are never rendered against a
+      // half-refreshed worker list while still avoiding serial endpoint latency.
+      const projectionJobs = [
+        refreshRunbooks,
+        refreshQuickStart,
+        refreshFlow,
+        refreshWorkflow,
+        refreshTests,
+        refreshAttention,
+        refreshEvents,
+        refreshRunEvidence,
+        refreshRoadmap,
+        refreshTelemetry,
+        refreshUsageRouting,
+      ];
+      results = await Promise.allSettled(projectionJobs.map((job) => job()));
+      results.filter((result) => result.status === "rejected").forEach((result) => console.warn(result.reason));
+      await refreshCheckpointAge();
+      applySearch(document.getElementById("global-search")?.value || "");
+    })().finally(() => {
+      document.body.removeAttribute("aria-busy");
+      document.documentElement.dataset.initialRefreshComplete = "true";
+      refreshInFlight = null;
+    });
+    return refreshInFlight;
   }
 
   // --------------------------------------------------------------------- confirmation sheet

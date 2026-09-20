@@ -314,9 +314,9 @@ def test_real_quickstart_http_path_falls_back_from_known_claude_quota_to_codex(t
     assert Path(launched_argv[0]).name.startswith("python")
     assert launched_argv[launched_argv.index("--worker") + 1] == "codex-build"
     assert task.worker == "codex-build"
-    assert task.failed_worker_id == "claude-code"
-    assert task.failure_category == "QUOTA"
-    assert task.fallback_automatic is True
+    assert task.failed_worker_id is None
+    assert task.failure_category is None
+    assert task.fallback_automatic is None
     assert runbook.id == runbook_id
     assert task.id == f"{runbook_id}-session"
     assert runbook.name == option_before["title"]
@@ -329,8 +329,8 @@ def test_real_quickstart_http_path_falls_back_from_known_claude_quota_to_codex(t
     assert runbook.codex_auto_eligible is True
     assert runbook.max_codex_invocations == 1
     assert usage["codex_invocations"] == 1
-    assert [item["worker"] for item in usage["route_history"]] == ["claude-code", "codex-build"]
-    assert [item["status"] for item in usage["route_history"]] == ["UNAVAILABLE", "RUNNING"]
+    assert [item["worker"] for item in usage["route_history"]] == ["codex-build"]
+    assert [item["status"] for item in usage["route_history"]] == ["RUNNING"]
     policy = usage["context_manifest"]["policy_manifest"]
     assert policy["role"] == "IMPLEMENTER"
     assert policy["workflow"] == "IMPLEMENT"
@@ -358,12 +358,9 @@ def test_real_quickstart_http_path_blocks_truthfully_when_codex_is_unavailable(t
 
     assert response.status_code == 400
     assert spawned == []
-    [runbook] = ctx.state.list_runbooks()
-    task = ctx.state.get_task(runbook.task_id)
-    usage = ctx.state.get_usage_governance(runbook.id)
-    assert runbook.status == "FAILED"
-    assert task.failed_worker_id == "claude-code"
-    assert task.fallback_automatic is False
-    assert [item["worker"] for item in usage["route_history"]] == ["claude-code"]
-    assert "codex-build: provider is not configured" in runbook.recovery_note
-    assert "grok-build: permission profile repo_configured_auto is unsupported" in runbook.recovery_note
+    assert ctx.state.list_runbooks() == []
+    option = client.get("/api/quickstart").json()[0]
+    assert option["ready"] is False
+    assert "No eligible implementation worker" in option["unavailable_reason"]
+    assert option["codex_policy"] == "conserve"
+    assert option["codex_auto_eligible"] is False

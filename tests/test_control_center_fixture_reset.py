@@ -34,3 +34,8 @@ def test_reset_fixture_context_restores_draft_runbook(tmp_path: Path) -> None:
     assert review_rows
     assert review_rows[0].review_repository == "ACGE248/octages"
     assert review_rows[0].review_pr == 999
+
+    identity = mod._parent_identity()
+    assert identity[0] > 1
+    assert mod._parent_identity_alive(identity) is True
+    assert mod._parent_identity_alive((identity[0] + 10_000_000, identity[1])) is False

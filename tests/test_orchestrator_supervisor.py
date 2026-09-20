@@ -213,6 +213,49 @@ def test_poll_once_preserves_operator_cancellation(tmp_path, monkeypatch):
     assert state.get_task(task.id).result == "CANCELLED"
 
 
+def test_terminate_task_reaps_only_the_owned_process_group(tmp_path):
+    state = State(":memory:")
+    supervisor = Supervisor(registry=load_registry(), repo_root=tmp_path, state=state)
+    task = _write_task(tmp_path)
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    task.state = TASK_RUNNING
+    task.pid = process.pid
+    state.upsert_task(task)
+    supervisor._processes[task.id] = process
+    supervisor._owned_process_groups.add(process.pid)
+
+    assert supervisor.terminate_task(task.id) is True
+    assert process.poll() is not None
+    assert supervisor.live_task_ids() == frozenset()
+    saved = state.get_task(task.id)
+    assert saved.state == TASK_CANCELLED and saved.pid is None
+
+
+def test_shutdown_all_reaps_every_owned_child(tmp_path):
+    state = State(":memory:")
+    supervisor = Supervisor(registry=load_registry(), repo_root=tmp_path, state=state)
+    processes = []
+    for index in range(2):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        processes.append(process)
+        task = _write_task(tmp_path)
+        task.id = f"owned-{index}"
+        task.state = TASK_RUNNING
+        task.pid = process.pid
+        state.upsert_task(task)
+        supervisor._processes[task.id] = process
+        supervisor._owned_process_groups.add(process.pid)
+
+    assert supervisor.shutdown_all() == 2
+    assert all(process.poll() is not None for process in processes)
+
+
 def test_reconcile_recovered_pid_that_exited_fails_closed(tmp_path, monkeypatch):
     registry = load_registry()
     state = State(":memory:")

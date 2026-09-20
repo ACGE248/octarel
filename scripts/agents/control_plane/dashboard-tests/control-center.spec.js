@@ -111,6 +111,7 @@ async function pageOverflows(page) {
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('h1')).toHaveText('Control Center');
+  await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15000 });
 });
 
 test('no horizontal overflow at this viewport', async ({ page }) => {
@@ -523,7 +524,7 @@ test('Quick Start resolves the fixture ledger task and shows a ready Prepared Ru
   // Regression for the reported confusing state: unrelated values may exist
   // in Custom Run, but they must remain hidden and must not alter Quick Start.
   await page.locator('#rb-preset').selectOption('finish-pr', { force: true });
-  await page.locator('#rb-parent-worker').selectOption('antigravity-diff-review', { force: true });
+  await page.locator('#rb-parent-worker').selectOption('opencode2-gemini-flash-lite-review', { force: true });
   await expect(page.locator('#card-runbook-create')).not.toHaveAttribute('open', '');
   await quickstartRow.locator('.quickstart-btn').first().click();
 
@@ -532,9 +533,7 @@ test('Quick Start resolves the fixture ledger task and shows a ready Prepared Ru
   await expect(preparedRun).toContainText('V1-01');
   await expect(preparedRun).toContainText('Preferred implementer');
   await expect(preparedRun).toContainText('claude-code');
-  // The stale Custom Run form value (parent worker antigravity-diff-review) must not become the
-  // implementer. (That worker may legitimately appear as the *reviewer*: it is the first routable
-  // free diff-review route, so the check is on the implementer field, not the whole card.)
+  // The stale Custom Run reviewer value must not become the implementer.
   await expect(preparedRun).toContainText(/Preferred implementer\s*claude-code\s*Tester/);
   await expect(preparedRun).not.toContainText('Finish PR');
   await expect(preparedRun).toContainText('Standalone Video Editor');

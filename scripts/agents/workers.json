@@ -332,6 +332,7 @@
       "allow_api_billing": false,
       "requires_isolated_worktree": false,
       "roles": ["diff-review"],
+      "enabled": false,
       "cli": {
         "bin": "agy",
         "version_args": ["--version"],
@@ -341,7 +342,7 @@
           "--effort", "{intensity}", "--mode", "plan", "--sandbox"
         ]
       },
-      "notes": "Bounded read-only worker: focused diff review for correctness and contract/documentation impact. Read-only, no secrets, no commits."
+      "notes": "Unavailable for unattended review: the current headless transport auto-denies the command permission needed to inspect the diff. Keep disabled until a deterministic read-only health check proves the invocation works; use the free OpenCode2 Gemini Flash Lite reviewer meanwhile."
     },
     "deepseek-overflow": {
       "display_name": "DeepSeek Overflow",

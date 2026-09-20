@@ -50,6 +50,24 @@ def _usage_for_task(state: State, task: Task) -> dict[str, Any]:
     return state.get_usage_governance(task.runbook_id) if task.runbook_id else {}
 
 
+def _route_for_task(state: State, registry: Registry, task: Task) -> tuple[str, ...]:
+    """Return the authoritative route for this task.
+
+    A runbook's ``worker_routes`` is an allowlist, not a preference hint.  In
+    particular, acceptance tasks share the parent runbook id and therefore
+    must not silently fall back to the registry-wide route.
+    """
+
+    registry_route = tuple(registry.route(task.role))
+    if not task.runbook_id:
+        return registry_route
+    runbook = state.get_runbook(task.runbook_id)
+    if runbook is None or task.role not in runbook.worker_routes:
+        return registry_route
+    allowed = tuple(runbook.worker_routes[task.role])
+    return tuple(name for name in allowed if name in registry_route)
+
+
 def _candidate_scores(*, state: State, registry: Registry, task: Task) -> tuple[list[str], dict[str, tuple[Any, ...]], list[str]]:
     tasks = state.list_tasks()
     providers = {item.name: item for item in state.list_provider_states()}
@@ -75,7 +93,7 @@ def _candidate_scores(*, state: State, registry: Registry, task: Task) -> tuple[
     blocked: list[str] = []
     scores: dict[str, tuple[Any, ...]] = {}
     try:
-        route = registry.route(task.role)
+        route = _route_for_task(state, registry, task)
         # ENG-AGENT-07/08 already made and durably reserved this exact
         # fallback decision. Admission revalidates it; it never substitutes a
         # different worker behind the fallback state machine's back.
@@ -249,7 +267,7 @@ def managed_admit(
     # worker refreshes state first.
     if not dry_run:
         try:
-            route_candidates = registry.route(task.role)
+            route_candidates = _route_for_task(state, registry, task)
         except ValueError:
             route_candidates = ()
         refresh_stale_routable_candidates(state, registry, route_candidates)

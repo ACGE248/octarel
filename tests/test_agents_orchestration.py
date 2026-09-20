@@ -779,7 +779,7 @@ def test_diff_review_scope_accepts_a_path_the_candidate_deleted(git_repo):
     # exists on disk, but --include-diff only needs it as a git pathspec.
     subprocess.run(["git", "-C", str(git_repo), "rm", "-q", "seed.txt"], check=True)
     result = _run(
-        load_registry(), git_repo, "antigravity-diff-review", role="diff-review",
+        load_registry(), git_repo, "opencode2-gemini-flash-lite-review", role="diff-review",
         scope_paths=["seed.txt"], include_diff=True, dry_run=True,
     )
     assert result.record.result == "DRY_RUN"

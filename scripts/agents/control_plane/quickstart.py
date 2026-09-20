@@ -145,6 +145,8 @@ class QuickStartOption:
     dependency_state: str = "Ready"
     proposed_tester: str = "opencode2-gemini-flash-lite"
     proposed_reviewer: str = "codex-review"
+    proposed_tester_unavailable_reason: str | None = None
+    proposed_reviewer_unavailable_reason: str | None = None
     branch_worktree_mode: str = "automatic"
     expected_checks: tuple[str, ...] = ()
     checkpoint_pr_behavior: str = "Checkpoint on the task branch; never auto-merge."
@@ -190,6 +192,8 @@ class QuickStartOption:
             "dependency_state": self.dependency_state,
             "proposed_tester": self.proposed_tester,
             "proposed_reviewer": self.proposed_reviewer,
+            "proposed_tester_unavailable_reason": self.proposed_tester_unavailable_reason,
+            "proposed_reviewer_unavailable_reason": self.proposed_reviewer_unavailable_reason,
             "branch_worktree_mode": self.branch_worktree_mode,
             "expected_checks": list(self.expected_checks),
             "checkpoint_pr_behavior": self.checkpoint_pr_behavior,
@@ -509,27 +513,47 @@ def continue_next_task_option(project: Any, repo_root: Path) -> QuickStartOption
     )
 
 
-def _routable_worker(state: State, registry: Registry, role: str, fallback: str) -> str:
-    """First worker on ``role``'s route that could actually run now (no API billing, enabled, healthy)."""
+def _routable_worker(
+    state: State,
+    registry: Registry,
+    role: str,
+    fallback: str,
+    *,
+    permission_profile: str = "standard",
+) -> tuple[str, str | None]:
+    """First runnable worker plus a truthful reason when the route is empty."""
 
     from .provider_state import ROUTABLE_STATES
 
     try:
         route = registry.route(role)
     except Exception:  # noqa: BLE001 - an unknown role keeps the declared default
-        return fallback
+        return fallback, f"role {role!r} has no configured route"
     known = {p.name: p for p in state.list_provider_states()}
+    blocked: list[str] = []
     for name in route:
         worker = registry.workers.get(name)
-        if worker is None or not worker.enabled or worker.allow_api_billing or worker.cost_class == "optional-overflow":
+        if worker is None:
+            blocked.append(f"{name}: unknown worker")
+            continue
+        if not worker.enabled:
+            blocked.append(f"{name}: disabled")
+            continue
+        if worker.allow_api_billing or worker.cost_class == "optional-overflow":
+            blocked.append(f"{name}: paid/overflow route")
             continue
         if not registry.repository_data_reuse_allowed(name):
+            blocked.append(f"{name}: unauthorized for repository data")
+            continue
+        if permission_profile != "standard" and not worker.supports_permission_profile(permission_profile):
+            blocked.append(f"{name}: permission profile {permission_profile} unsupported")
             continue
         provider = known.get(name)
         if known and (provider is None or not provider.configured or provider.state not in ROUTABLE_STATES):
+            blocked.append(f"{name}: {getattr(provider, 'state', 'UNKNOWN')}")
             continue
-        return name
-    return "(no routable worker)"
+        return name, None
+    return "(no routable worker)", "; ".join(blocked) or f"no eligible worker for {role}"
 
 
 def _default_branch_ref(repo_root: Path, project: Any | None) -> str | None:
@@ -639,8 +663,44 @@ def _apply_run_truth(
             ),
         )
     if registry is not None and option.action == "prepare":
-        changes["proposed_tester"] = _routable_worker(state, registry, "focused-tests", option.proposed_tester)
-        changes["proposed_reviewer"] = _routable_worker(state, registry, "diff-review", option.proposed_reviewer)
+        from .provider_state import ROUTABLE_STATES
+
+        tester, tester_reason = _routable_worker(state, registry, "focused-tests", option.proposed_tester)
+        reviewer, reviewer_reason = _routable_worker(state, registry, "diff-review", option.proposed_reviewer)
+        implementer, implementer_reason = _routable_worker(
+            state,
+            registry,
+            "primary-implementation",
+            option.parent_worker,
+            permission_profile=option.permission_profile,
+        )
+        changes.update(
+            proposed_tester=tester,
+            proposed_reviewer=reviewer,
+            proposed_tester_unavailable_reason=tester_reason,
+            proposed_reviewer_unavailable_reason=reviewer_reason,
+            parent_worker=implementer,
+        )
+        provider_rows = {row.name: row for row in state.list_provider_states()}
+        codex_routable = any(
+            name.startswith("codex")
+            and (worker := registry.workers.get(name)) is not None
+            and worker.enabled
+            and not worker.allow_api_billing
+            and worker.cost_class != "optional-overflow"
+            and registry.repository_data_reuse_allowed(name)
+            and (provider := provider_rows.get(name)) is not None
+            and provider.configured
+            and provider.state in ROUTABLE_STATES
+            for name in registry.route("primary-implementation")
+        )
+        if not codex_routable:
+            changes.update(codex_policy="conserve", codex_auto_eligible=False)
+        if implementer_reason and "unavailable_reason" not in changes:
+            changes.update(
+                unavailable_reason=f"No eligible implementation worker: {implementer_reason}",
+                dependency_state="Blocked — no eligible implementation route",
+            )
     return replace(option, **changes) if changes else option
 
 

@@ -30,6 +30,7 @@ test.beforeEach(async ({ page, request }) => {
   expect((await request.post('/__fixture__/reset')).ok()).toBeTruthy();
   await page.goto('/');
   await expect(page.locator('h1')).toHaveText('Control Center');
+  await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15000 });
 });
 
 // 1 -------------------------------------------------------------------- task + run cards

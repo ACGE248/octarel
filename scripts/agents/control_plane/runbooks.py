@@ -333,7 +333,8 @@ def eligible_retry_workers(*, state: State, registry: Registry, runbook: Runbook
         failed_task = state.get_task(runbook.task_id)
         failed_worker = failed_task.failed_worker_id if failed_task else None
     candidates: list[dict[str, str]] = []
-    for name in registry.routes.get(role, ()):
+    route = runbook.worker_routes.get(role, list(registry.routes.get(role, ())))
+    for name in route:
         if name == failed_worker:
             continue
         worker = registry.get(name)
@@ -486,7 +487,12 @@ def create_runbook(
         worktree, branch = _provision_and_register_review_worktree(
             state=state, repo_root=repo_root, pr_reference=worktree, github_remote=github_remote,
         )
-    worker_name = parent_worker or preset_def.default_parent_worker
+    pinned_implementation = (worker_routes or {}).get(preset_def.role)
+    worker_name = parent_worker or (pinned_implementation[0] if pinned_implementation else preset_def.default_parent_worker)
+    if pinned_implementation and worker_name not in pinned_implementation:
+        raise RunbookError(
+            f"parent worker {worker_name!r} is outside the pinned {preset_def.role!r} route"
+        )
     try:
         worker = registry.get(worker_name)
     except RegistryError as exc:
@@ -986,6 +992,12 @@ def retry_runbook(
 
     preset = PRESETS.get(runbook.preset)
     role = preset.role if preset else task.role
+    permitted = runbook.worker_routes.get(role)
+    if permitted is not None and worker_name not in permitted:
+        raise RunbookError(
+            f"worker {worker_name!r} is outside this runbook's pinned {role!r} route; "
+            "change the runbook explicitly before retrying"
+        )
     try:
         worker = registry.get(worker_name)
     except RegistryError as exc:
@@ -1240,9 +1252,10 @@ def automatic_fallback_runbook(
         return None
 
     attempted = _attempted_workers(usage, task)
+    permitted_route = runbook.worker_routes.get(role, list(registry.route(role)))
     availability = {
         name: registry.get(name).availability_reason()
-        for name in registry.route(role)
+        for name in permitted_route
         if name not in attempted
     }
 
@@ -1257,6 +1270,7 @@ def automatic_fallback_runbook(
         excluded_workers=attempted,
         permission_profile=runbook.permission_profile,
         worker_availability=availability,
+        allowed_workers=permitted_route,
     )
     task.fallback_alternatives = decision.alternatives_considered
     task.fallback_selected_worker = decision.worker

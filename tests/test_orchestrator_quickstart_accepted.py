@@ -147,7 +147,8 @@ def test_proposed_reviewer_and_tester_are_workers_that_can_actually_run(repo, st
         ))
     opt = option(repo, state, registry=registry)
     assert opt.proposed_reviewer != "codex-review"  # the old hard-coded default is DISABLED here
-    assert opt.proposed_reviewer == "antigravity-diff-review" and opt.proposed_tester == "opencode2-gemini-flash-lite"
+    assert opt.proposed_reviewer == "opencode2-gemini-flash-lite-review"
+    assert opt.proposed_tester == "opencode2-gemini-flash-lite"
     # If the first reviewer becomes unavailable the next free route is shown, never an API-billed one.
     state.upsert_provider_state(ProviderState(
         name="antigravity-diff-review", execution_system="cli", provider="Google", cost_class="supplemental-configured",

@@ -1100,6 +1100,27 @@ def test_telemetry_checkpoints_recompute_after_the_ttl(ctx, roadmap_file, monkey
     assert len(calls) == 2
 
 
+def test_worktree_endpoint_caches_expensive_git_scan_within_poll_window(ctx, roadmap_file, monkeypatch):
+    from scripts.agents.control_plane import dashboard_api
+
+    calls = []
+
+    def slow_scan(_ctx):
+        calls.append(time.monotonic())
+        time.sleep(0.08)
+        return [{"path": str(_ctx.repo_root), "branch": "main", "dirty": False}]
+
+    monkeypatch.setattr(dashboard_api, "list_worktree_statuses", slow_scan)
+    client = TestClient(create_app(ctx, roadmap_path=roadmap_file))
+    started = time.monotonic()
+    for _ in range(4):
+        assert client.get("/api/worktrees").status_code == 200
+    elapsed = time.monotonic() - started
+
+    assert len(calls) == 1
+    assert elapsed < 0.25
+
+
 def test_concurrent_telemetry_requests_share_one_computation(ctx, roadmap_file, monkeypatch, tmp_path):
     from scripts.agents.control_plane import dashboard_api
     from scripts.agents.control_plane.models import WorktreeRecord

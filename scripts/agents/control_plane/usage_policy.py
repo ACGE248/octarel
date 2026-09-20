@@ -199,6 +199,7 @@ def fallback_for_failure(
     excluded_workers: Iterable[str] = (),
     permission_profile: str = "standard",
     worker_availability: Mapping[str, str] | None = None,
+    allowed_workers: Iterable[str] | None = None,
 ) -> FallbackDecision:
     """Select an equivalent provider without changing engineering behavior."""
 
@@ -222,7 +223,8 @@ def fallback_for_failure(
     considered: list[str] = []
     blocked: list[str] = []
     required_write = original_policy_manifest.get("read_write_mode") == "write"
-    for name in registry.route(route_role):
+    route = tuple(allowed_workers) if allowed_workers is not None else registry.route(route_role)
+    for name in route:
         if name in excluded:
             continue
         worker = registry.get(name)

@@ -540,7 +540,12 @@ def _advance_review_stage(
         return
 
     try:
-        candidates = list(registry.route(ACCEPTANCE_REVIEW_ROLE))
+        candidates = list(
+            runbook.worker_routes.get(
+                ACCEPTANCE_REVIEW_ROLE,
+                list(registry.route(ACCEPTANCE_REVIEW_ROLE)),
+            )
+        )
     except ValueError:
         candidates = []
     if not candidates:

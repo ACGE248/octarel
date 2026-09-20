@@ -374,10 +374,15 @@ def cmd_resume(ctx: CommandContext, *, task_id: str) -> CommandResult:
 
 def cmd_stop(ctx: CommandContext, *, task_id: str) -> CommandResult:
     task = _require_task(ctx, task_id)
+    terminated = ctx.supervisor.terminate_task(task_id)
     task.state = TASK_CANCELLED
+    task.pid = None if terminated else task.pid
     ctx.state.upsert_task(task)
     ctx.state.record_event(category="command", task_id=task_id, level="warning", message="stopped by operator")
-    return CommandResult(ok=True, message=f"{task_id} marked cancelled (a live subprocess is not force-killed here)")
+    return CommandResult(
+        ok=True,
+        message=f"{task_id} cancelled" + (" and its owned process group terminated" if terminated else ""),
+    )
 
 
 def cmd_stop_after_current(ctx: CommandContext) -> CommandResult:
@@ -730,6 +735,8 @@ def cmd_runbook_resume(ctx: CommandContext, *, runbook_id: str) -> CommandResult
 def cmd_runbook_stop(ctx: CommandContext, *, runbook_id: str) -> CommandResult:
     try:
         runbook = runbooks_module.stop_runbook(state=ctx.state, runbook_id=runbook_id)
+        if runbook.task_id:
+            ctx.supervisor.terminate_task(runbook.task_id)
     except RunbookError as exc:
         raise CommandError(str(exc)) from None
     return _runbook_to_result(runbook, f"runbook {runbook.id} stop requested")

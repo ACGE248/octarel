@@ -24,8 +24,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import sys
 import tempfile
+import threading
+import time
+import uuid
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -127,6 +132,44 @@ FIXTURE_AUDIENCE = "fixture-application-aud"
 FIXTURE_ALLOWED_EMAIL = "maintainer@example.com"
 FIXTURE_DENIED_EMAIL = "not-allowlisted@example.com"
 FIXTURE_KID = "fixture-key-1"
+
+
+def _parent_identity() -> tuple[int, float | None]:
+    """PID/create-time proof for the Playwright process that owns this server."""
+
+    pid = os.getppid()
+    try:
+        import psutil
+
+        return pid, psutil.Process(pid).create_time()
+    except (ImportError, OSError):
+        return pid, None
+
+
+def _parent_identity_alive(identity: tuple[int, float | None]) -> bool:
+    pid, created_at = identity
+    if os.getppid() != pid:
+        return False
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        return created_at is None or abs(process.create_time() - created_at) <= 1.0
+    except ImportError:
+        return pid > 1
+    except (OSError, ValueError):
+        return False
+
+
+def _start_parent_watchdog(identity: tuple[int, float | None]) -> None:
+    """Terminate this fixture if Playwright disappears without cleanup."""
+
+    def watch() -> None:
+        while _parent_identity_alive(identity):
+            time.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=watch, name="playwright-parent-watchdog", daemon=True).start()
 
 
 def _git_init_fixture_root(root: Path) -> None:
@@ -234,13 +277,13 @@ def _git_add_review_fixture_worktree(root: Path) -> tuple[Path, str]:
     return worktree, head_sha
 
 
-def build_fixture_context(root: Path) -> CommandContext:
+def build_fixture_context(root: Path, *, state_path: Path | None = None) -> CommandContext:
     _git_init_fixture_root(root)
     second_worktree = _git_add_second_fixture_worktree(root)
     video_editor_worktree = _git_add_video_editor_fixture_worktree(root)
     review_worktree, review_head_sha = _git_add_review_fixture_worktree(root)
     registry = load_registry()
-    state = State(default_db_path(root))
+    state = State(state_path or default_db_path(root))
     for provider in seed_provider_states(registry):
         state.upsert_provider_state(provider)
     state.upsert_worktree(WorktreeRecord(path=str(root), branch=FIXTURE_BRANCH, locked=False))
@@ -584,17 +627,13 @@ def reset_fixture_context(ctx: CommandContext, root: Path) -> CommandContext:
     same deterministic seed ``build_fixture_context`` produced at startup.
     """
 
-    db = default_db_path(root)
-    try:
-        ctx.state.close()
-    except OSError:
-        pass
-    for path in (db, Path(str(db) + "-wal"), Path(str(db) + "-shm")):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-    fresh = build_fixture_context(root)
+    # Build the replacement completely before swapping it into the live app.
+    # Closing/deleting the current SQLite connection first races the browser's
+    # concurrent dashboard reads and produced "closed database" errors during
+    # viewport resets. Old connections remain valid for already-started reads
+    # and disappear with this throwaway fixture process.
+    reset_db = default_db_path(root).with_name(f"reset-{uuid.uuid4().hex}.db")
+    fresh = build_fixture_context(root, state_path=reset_db)
     ctx.state = fresh.state
     ctx.registry = fresh.registry
     ctx.scheduler = fresh.scheduler
@@ -687,6 +726,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8899)
     parser.add_argument("--root", default=None, help="isolated root dir; defaults to a fresh temp dir")
     args = parser.parse_args()
+    _start_parent_watchdog(_parent_identity())
 
     root = Path(args.root) if args.root else Path(tempfile.mkdtemp(prefix="octages-control-center-fixture-"))
     root.mkdir(parents=True, exist_ok=True)

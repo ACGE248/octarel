@@ -13,10 +13,14 @@ recorded as ``BLOCKED`` immediately rather than burning a subprocess.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from ..redaction import redact_text
@@ -63,6 +67,7 @@ class Supervisor:
         self.repo_root = repo_root
         self.state = state
         self._processes: dict[str, subprocess.Popen] = {}
+        self._owned_process_groups: set[int] = set()
 
     def _spawn(self, argv: list[str], *, cwd: Path) -> subprocess.Popen:
         """Isolated so tests can substitute a fake process without a real CLI.
@@ -88,7 +93,61 @@ class Supervisor:
             stderr=subprocess.PIPE,
             text=True,
             env=sanitized_subprocess_env(),
+            start_new_session=True,
         )
+
+    def _terminate_owned_process(self, process: subprocess.Popen, *, grace_seconds: float = 3.0) -> bool:
+        """Terminate one process group proven owned by this Supervisor instance."""
+
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        poll = getattr(process, "poll", None)
+        wait = getattr(process, "wait", None)
+        # Membership is recorded immediately after a successful spawn only
+        # when the child is verifiably its own session/process-group leader.
+        # It remains proof after the leader exits, when descendants may still
+        # hold the group alive but ``getpgid(leader_pid)`` no longer works.
+        if pid not in self._owned_process_groups:
+            return False
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pid, signal.SIGTERM)
+        deadline = time.monotonic() + grace_seconds
+        while callable(poll) and poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if callable(poll) and poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
+        if callable(wait):
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                wait(timeout=1.0)
+        self._owned_process_groups.discard(pid)
+        return True
+
+    def terminate_task(self, task_id: str) -> bool:
+        """Cancel only a subprocess launched and owned by this instance."""
+
+        process = self._processes.get(task_id)
+        if process is None:
+            return False
+        if not self._terminate_owned_process(process):
+            return False
+        task = self.state.get_task(task_id)
+        if task is not None:
+            task.state = TASK_CANCELLED
+            task.result = "CANCELLED"
+            task.pid = None
+            self.state.upsert_task(task)
+        self._processes.pop(task_id, None)
+        return True
+
+    def shutdown_all(self) -> int:
+        """Reap every child this instance owns on shutdown or interruption."""
+
+        task_ids = list(self._processes)
+        for task_id in task_ids:
+            self.terminate_task(task_id)
+        return len(task_ids)
 
     def _build_argv(self, task: Task, *, dry_run: bool) -> list[str]:
         prompt = [
@@ -208,6 +267,11 @@ class Supervisor:
         # ``scripts.agents`` exists even when the selected project worktree is
         # a different repository. ``--repo-root`` still targets the task worktree.
         process = self._spawn(argv, cwd=cp_code_root())
+        try:
+            if os.getpgid(process.pid) == process.pid:
+                self._owned_process_groups.add(process.pid)
+        except (AttributeError, ProcessLookupError, PermissionError, OSError):
+            pass
         self._processes[task.id] = process
         task.pid = process.pid
         task.worktree = str(worktree)
@@ -272,6 +336,10 @@ class Supervisor:
                     message=f"pid={task.pid} exited {return_code}",
                 )
                 finished.append(task)
+                # The wrapper is done, but a misbehaving descendant (browser,
+                # test server, provider helper) may still hold the owned
+                # process group. Reap it on both success and failure.
+                self._terminate_owned_process(process, grace_seconds=0.2)
                 del self._processes[task_id]
             except Exception as exc:  # noqa: BLE001 - a bad reconcile must never kill the daemon
                 self.state.record_event(

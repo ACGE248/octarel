@@ -85,6 +85,7 @@ DEFAULT_OCTASCENE_HOST = "127.0.0.1"
 DEFAULT_OCTASCENE_PORT = 8765
 _PROBE_TIMEOUT_SECONDS = 0.35
 CHECKPOINT_CACHE_TTL_SECONDS = 20.0
+WORKTREE_STATUS_CACHE_TTL_SECONDS = 10.0
 RECONCILE_INTERVAL_SECONDS = 0.5
 # /api/usage spawns a real (non-billable, local-status-only) CLI subprocess
 # per worker that has one — deliberately not part of the 2-second dashboard
@@ -584,14 +585,16 @@ def _provider_to_dict(provider: Any, *, registry: Any = None, tasks: list[Any] |
         "catalog-only": "Not Configured",
     }.get(provider.cost_class, "Unknown")
     capability = worker.capability if worker else "not configured"
-    display_state = "DRAINING" if provider.state == "COOLING_DOWN" else provider.state
+    effective_state = "DISABLED" if worker is not None and not worker.enabled else provider.state
+    display_state = "DRAINING" if effective_state == "COOLING_DOWN" else effective_state
+    effective_reason = "DISABLED_BY_REGISTRY" if worker is not None and not worker.enabled else provider.reason
     return {
         "name": provider.name,
         "display_name": raw.get("display_name", provider.name.replace("-", " ").title()),
         "execution_system": provider.execution_system,
         "provider": provider.provider,
         "cost_class": provider.cost_class,
-        "state": provider.state,
+        "state": effective_state,
         "display_state": display_state,
         "configured": provider.configured,
         "consecutive_failures": provider.consecutive_failures,
@@ -601,7 +604,7 @@ def _provider_to_dict(provider: Any, *, registry: Any = None, tasks: list[Any] |
         # NOT_AUTHENTICATED vs CLI_MISSING vs CATALOG_ONLY -- so the Control
         # Center never has to collapse every unavailability cause into a bare
         # "NOT_CONFIGURED" badge.
-        "reason": provider.reason,
+        "reason": effective_reason,
         # ENG-AGENT-12 (issue #136): explicit freshness facts for the state
         # actually used at route selection -- "source" names where `state`
         # last came from (a real CLI probe vs the initial, never-probed seed
@@ -615,7 +618,7 @@ def _provider_to_dict(provider: Any, *, registry: Any = None, tasks: list[Any] |
             "timestamp": provider.last_probe_at,
             "age_seconds": provider_state_age_seconds(provider),
             "freshness": provider_state_freshness(provider),
-            "reason": provider.reason,
+            "reason": effective_reason,
         },
         "model": worker.default_model if worker else None,
         "intensity": worker.default_intensity if worker else None,
@@ -670,6 +673,13 @@ def _make_lifespan(ctx: CommandContext):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            shutdown_all = getattr(ctx.supervisor, "shutdown_all", None)
+            if callable(shutdown_all):
+                shutdown_all()
+            manager = getattr(_app.state, "app_lifecycle", None)
+            if manager is not None:
+                with contextlib.suppress(OperationError):
+                    manager.shutdown_owned()
 
     return lifespan
 
@@ -826,6 +836,26 @@ def create_app(
     roadmap_file = roadmap_path or (ctx.repo_root / "docs" / "PRODUCT_ROADMAP.md")
     _usage_cache: dict[str, Any] = {"at": 0.0, "body": None}
     app_lifecycle = AppLifecycleManager(ctx)
+    app.state.app_lifecycle = app_lifecycle
+    worktree_status_cache: dict[str, Any] = {"key": object(), "at": 0.0, "rows": []}
+    worktree_status_lock = threading.Lock()
+
+    def cached_worktree_statuses() -> list[dict[str, Any]]:
+        """Cache expensive Git-derived facts while task/run state stays live elsewhere."""
+
+        key = ctx.selected_project_id
+        with worktree_status_lock:
+            fresh = (
+                worktree_status_cache["key"] == key
+                and time.monotonic() - worktree_status_cache["at"] < WORKTREE_STATUS_CACHE_TTL_SECONDS
+            )
+            if not fresh:
+                worktree_status_cache.update(
+                    key=key,
+                    at=time.monotonic(),
+                    rows=list_worktree_statuses(ctx),
+                )
+            return [dict(row) for row in worktree_status_cache["rows"]]
 
     # ENG-CP-03 (issue #165): every project-dependent read in this app goes
     # through one of these three helpers, so "which project am I looking at" is
@@ -880,7 +910,7 @@ def create_app(
                 "validation_command": list(project.validation_command),
             }
         latest = read_latest_gate(gate_root)
-        row = next((item for item in list_worktree_statuses(ctx) if Path(item["path"]).resolve() == gate_root.resolve()), {})
+        row = next((item for item in cached_worktree_statuses() if Path(item["path"]).resolve() == gate_root.resolve()), {})
         branch = row.get("branch")
         candidate_states = TASK_ACTIVE_STATES | TASK_QUEUED_STATES | TASK_PAUSED_STATES
         has_candidate = any(task.state in candidate_states for task in scoped_tasks())
@@ -1403,7 +1433,7 @@ def create_app(
 
     @app.get("/api/worktrees")
     def worktrees() -> list[dict[str, Any]]:
-        return list_worktree_statuses(ctx)
+        return cached_worktree_statuses()
 
     @app.get("/api/operations")
     def operations(limit: int = 100) -> list[dict[str, Any]]:
@@ -1679,10 +1709,17 @@ def create_app(
             }
             for p in ctx.state.list_provider_states()
         ]
+        checkpoint_rows = cached_checkpoints()
+        checkpoint_age = max(0.0, time.monotonic() - checkpoint_cache["at"])
         return {
             "providers": providers,
             "quota_windows": [w.as_dict() for w in claude_quota_windows()],
-            "checkpoints": cached_checkpoints(),
+            "checkpoints": checkpoint_rows,
+            "checkpoint_cache": {
+                "age_seconds": round(checkpoint_age, 3),
+                "ttl_seconds": CHECKPOINT_CACHE_TTL_SECONDS,
+                "stale": checkpoint_age >= CHECKPOINT_CACHE_TTL_SECONDS,
+            },
         }
 
     @app.get("/api/usage")

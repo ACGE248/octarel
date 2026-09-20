@@ -27,7 +27,7 @@ metadata commands. It does not make live product-provider generation calls.
 | `antigravity-focused-tests` | Antigravity (`agy`) | local Antigravity session | read-only tests | not required | prohibited |
 | `antigravity-impact-search` | Antigravity | local session | read-only search | not required | prohibited |
 | `antigravity-doc-drift` | Antigravity | local session | read-only docs review | not required | prohibited |
-| `antigravity-diff-review` | Antigravity | local session | read-only diff review | not required | prohibited |
+| `antigravity-diff-review` | Antigravity | local session | read-only diff review; **disabled for unattended use while headless command permission is deterministically auto-denied** | not required | prohibited |
 | `deepseek-overflow` | OpenCode | manual API authorization | focused-edit | required | **disabled**; never auto-selected |
 
 ## Model selection
@@ -51,6 +51,13 @@ Quota, rate limits, missing CLI, and unauthenticated sessions are reported as
 availability reasons (`NOT_AUTHENTICATED`, `CLI_MISSING`, `DISABLED`, …).
 They do **not** authorize a stronger model or a paid API route. DeepSeek
 overflow stays disabled unless `--allow-overflow` and prior authorization.
+
+Runbook `worker_routes` are authoritative allowlists. Dispatch, retry, resume,
+fallback, and acceptance stages may use only the workers listed for that role.
+If none is eligible, the stage blocks and reports each unavailability reason;
+it never widens to the registry route. The disabled Antigravity diff-review
+route therefore yields to the configured free
+`opencode2-gemini-flash-lite-review` route when that route is permitted.
 
 ## Policy adapters
 

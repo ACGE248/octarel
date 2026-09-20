@@ -20,6 +20,7 @@ from scripts.agents.control_plane.models import (
     TASK_RUNNING,
     TASK_SUCCEEDED,
     ProviderState,
+    Runbook,
     Task,
 )
 from scripts.agents.control_plane.provider_state import STATE_AVAILABLE
@@ -85,6 +86,59 @@ def test_cost_first_selection_is_explainable_and_durable(tmp_path):
     assert decision["selected_worker"] == "grok-build"
     assert decision["alternatives"]
     assert decision["scores"]["grok-build"][0] < decision["scores"]["claude-code"][0]
+
+
+def _pinned_runbook(state: State, tmp_path: Path, *, route: list[str], role: str = "primary-implementation") -> Runbook:
+    runbook = Runbook(
+        id="RB-pinned", name="Pinned", preset="test-fix", objective="test", source_ref="ENG-PIN",
+        branch="eng/pinned", worktree=str(tmp_path), parent_worker=route[0], max_duration_minutes=30,
+        worker_routes={role: route},
+    )
+    state.upsert_runbook(runbook)
+    return runbook
+
+
+def test_pinned_route_primary_success_never_broadens_to_cheaper_worker(tmp_path):
+    state, registry = _available_state()
+    _pinned_runbook(state, tmp_path, route=["claude-code"])
+    task = Task(
+        id="pinned-primary", task_ref="ENG-PIN-1", role="primary-implementation",
+        worker="claude-code", runbook_id="RB-pinned", worktree=str(tmp_path),
+    )
+    result, *_ = _managed(tmp_path, task, state=state)
+    assert result.launched is True
+    assert result.task.worker == "claude-code"
+    assert result.task.selection_alternatives == ()
+
+
+def test_pinned_route_uses_only_allowed_fallback_and_blocks_when_it_is_unavailable(tmp_path):
+    state, registry = _available_state()
+    _pinned_runbook(state, tmp_path, route=["claude-code", "codex-build"])
+    claude = state.get_provider_state("claude-code")
+    claude.state = "QUOTA_EXHAUSTED"
+    state.upsert_provider_state(claude)
+    task = Task(
+        id="pinned-fallback", task_ref="ENG-PIN-2", role="primary-implementation",
+        worker="claude-code", runbook_id="RB-pinned", worktree=str(tmp_path),
+        codex_policy="balanced", codex_auto_eligible=True,
+    )
+    result, *_ = _managed(tmp_path, task, state=state)
+    assert result.launched is True
+    assert result.task.worker == "codex-build"
+    assert "grok-build" not in result.scores
+
+    codex = state.get_provider_state("codex-build")
+    codex.state = "DISABLED"
+    state.upsert_provider_state(codex)
+    blocked = Task(
+        id="pinned-blocked", task_ref="ENG-PIN-3", role="primary-implementation",
+        worker="claude-code", runbook_id="RB-pinned", worktree=str(tmp_path / "other"),
+        codex_policy="balanced", codex_auto_eligible=True,
+    )
+    blocked_result, *_ = _managed(tmp_path, blocked, state=state)
+    assert blocked_result.launched is False
+    assert blocked_result.task.state == TASK_BLOCKED
+    assert "grok-build" not in blocked_result.reason
 
 
 def test_fairness_and_stable_tie_breaking_apply_only_after_cost_and_pressure(tmp_path):
@@ -181,7 +235,7 @@ def test_provider_diverse_reviewer_and_failed_reviewer_are_excluded(tmp_path):
         state=state, registry=registry, scheduler=Scheduler(), supervisor=supervisor,
         repo_root=tmp_path, task=task, dry_run=True,
     )
-    assert result.task.worker == "antigravity-diff-review"
+    assert result.task.worker == "grok-build-review"
     assert result.task.worker != "codex-review"
 
 

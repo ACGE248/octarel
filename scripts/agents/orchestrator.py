@@ -306,6 +306,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\norchestrator daemon stopping (KeyboardInterrupt)")
         return EXIT_OK
+    finally:
+        ctx.supervisor.shutdown_all()
 
 
 def _cmd_dashboard(args: argparse.Namespace) -> int:

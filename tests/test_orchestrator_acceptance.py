@@ -67,7 +67,11 @@ def _implementation_runbook(state: State, worktree: Path, *, runbook_id: str = "
 
 
 class FakeSupervisor:
+    def __init__(self):
+        self.launched = []
+
     def launch_task(self, task, *, dry_run=False):  # noqa: ARG002
+        self.launched.append(task)
         return task
 
 
@@ -77,6 +81,34 @@ def _fake_run_gate(**kwargs):
 
 def _failing_run_gate(**kwargs):
     return {"result": "fail", "prerequisite_failures": ["a required test failed"], "evidence_path": None}
+
+
+def test_acceptance_review_dispatch_honors_pinned_route_on_initial_and_resumed_stage(tmp_path):
+    repo = _git_repo(tmp_path)
+    state = State(":memory:")
+    rb, task = _implementation_runbook(state, repo)
+    rb.worker_routes[acceptance.ACCEPTANCE_REVIEW_ROLE] = ["opencode2-gemini-flash-lite-review"]
+    rb.acceptance_stage = acceptance.STAGE_REVIEW
+    state.upsert_runbook(rb)
+    supervisor = FakeSupervisor()
+
+    acceptance._advance_review_stage(
+        state=state, repo_root=repo, registry=load_registry(), scheduler=Scheduler(), supervisor=supervisor,
+        runbook=rb, task=task, worktree=repo, tree="tree-1", changed_paths=["seed.txt"],
+        evidence=rb.acceptance_evidence, base_ref="HEAD",
+    )
+
+    [review_task] = supervisor.launched
+    assert review_task.worker == "opencode2-gemini-flash-lite-review"
+    assert "antigravity-diff-review" not in review_task.selection_alternatives
+
+    review_task.state = TASK_BLOCKED
+    review_task.admission_reason = "pinned reviewer unavailable"
+    state.upsert_task(review_task)
+    rb.status = RUNBOOK_BLOCKED
+    state.upsert_runbook(rb)
+    runbooks.retry_acceptance(state=state, runbook_id=rb.id)
+    assert state.get_runbook(rb.id).acceptance_stage == acceptance.STAGE_REVIEW
 
 
 # --------------------------------------------------------------------------- Test stage

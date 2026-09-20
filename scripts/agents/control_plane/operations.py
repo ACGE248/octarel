@@ -722,6 +722,14 @@ class AppLifecycleManager:
             return self._start(actor)
         return self._stop(actor)
 
+    def shutdown_owned(self) -> bool:
+        """Stop a development process only when durable identity proves ownership."""
+
+        if self._owned_pid() is None:
+            return False
+        self._stop("control-center-shutdown")
+        return True
+
     def _start(self, actor: str, event: str | None = None) -> dict[str, Any]:
         argv, port, launch_root, display = self._lifecycle_spec()
         if event is None:

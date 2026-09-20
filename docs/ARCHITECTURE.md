@@ -47,3 +47,15 @@ command.
 - `runtime=octarel`
 
 `code_root_equals_selected_project` must be false in normal operation.
+
+## Runtime polling and process ownership
+
+The Control Center keeps active task/run state live while caching expensive
+Git-derived worktree/checkpoint facts for short, labelled TTLs. Its browser
+refresh resolves project selection first, then fetches independent read models
+concurrently; normal monitoring never probes or invokes an AI provider.
+
+Delegated workers, terminal shells, test lanes, and managed development apps
+start in owned process sessions. Cancellation and shutdown terminate only
+process groups whose PID/session handle or durable PID/create-time/cwd/argv
+metadata proves Octarel ownership. Octarel never kills by executable name.
