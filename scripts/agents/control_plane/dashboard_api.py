@@ -34,8 +34,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..redaction import redact_text
-from .commands import CommandContext, CommandError, apply_command
 from .agent_activity import list_attempts, read_attempt
+from .commands import CommandContext, CommandError, apply_command
 from .operations import (
     AppLifecycleManager,
     OperationError,
