@@ -1043,3 +1043,121 @@ def test_runbook_start_with_unregistered_worktree_returns_400(git_client, tmp_pa
     runbook_id = create_resp.json()["data"]["runbook_id"]
     resp = git_client.post("/api/commands/runbook_start", json={"runbook_id": runbook_id})
     assert resp.status_code == 400
+
+
+# ------------------------------------------------ telemetry checkpoint cost (large projects)
+
+
+def _checkpoint_probe(monkeypatch):
+    """Count checkpoint_status() calls; each one is a git subprocess in production."""
+
+    from scripts.agents.control_plane import dashboard_api
+
+    calls: list[str] = []
+
+    class _Status:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def as_dict(self) -> dict:
+            return {"worktree": str(self.path)}
+
+    def fake(path: Path):
+        calls.append(str(path))
+        return _Status(path)
+
+    monkeypatch.setattr(dashboard_api, "checkpoint_status", fake)
+    return calls
+
+
+def test_telemetry_checkpoints_are_computed_once_per_ttl_not_per_poll(ctx, roadmap_file, monkeypatch, tmp_path):
+    from scripts.agents.control_plane.models import WorktreeRecord
+
+    calls = _checkpoint_probe(monkeypatch)
+    for index in range(5):
+        path = tmp_path / f"wt{index}"
+        path.mkdir()
+        ctx.state.upsert_worktree(WorktreeRecord(path=str(path), branch=f"b{index}"))
+    client = TestClient(create_app(ctx, roadmap_path=roadmap_file))
+
+    bodies = [client.get("/api/telemetry").json() for _ in range(6)]  # six 2-second polls
+    assert len(calls) == 5  # one git status per worktree, once -- not 30
+    assert all(len(body["checkpoints"]) == 5 for body in bodies)
+
+
+def test_telemetry_checkpoints_recompute_after_the_ttl(ctx, roadmap_file, monkeypatch, tmp_path):
+    from scripts.agents.control_plane import dashboard_api
+    from scripts.agents.control_plane.models import WorktreeRecord
+
+    calls = _checkpoint_probe(monkeypatch)
+    path = tmp_path / "wt"
+    path.mkdir()
+    ctx.state.upsert_worktree(WorktreeRecord(path=str(path), branch="b"))
+    client = TestClient(create_app(ctx, roadmap_path=roadmap_file))
+    client.get("/api/telemetry")
+    monkeypatch.setattr(dashboard_api, "CHECKPOINT_CACHE_TTL_SECONDS", 0.0)
+    client.get("/api/telemetry")
+    assert len(calls) == 2
+
+
+def test_concurrent_telemetry_requests_share_one_computation(ctx, roadmap_file, monkeypatch, tmp_path):
+    from scripts.agents.control_plane import dashboard_api
+    from scripts.agents.control_plane.models import WorktreeRecord
+
+    started = threading.Event()
+    calls: list[str] = []
+
+    class _Status:
+        def as_dict(self) -> dict:
+            return {"worktree": "x"}
+
+    def slow(path: Path):
+        calls.append(str(path))
+        started.set()
+        time.sleep(0.3)
+        return _Status()
+
+    monkeypatch.setattr(dashboard_api, "checkpoint_status", slow)
+    path = tmp_path / "wt"
+    path.mkdir()
+    ctx.state.upsert_worktree(WorktreeRecord(path=str(path), branch="b"))
+    client = TestClient(create_app(ctx, roadmap_path=roadmap_file))
+    results: list[int] = []
+    threads = [threading.Thread(target=lambda: results.append(len(client.get("/api/telemetry").json()["checkpoints"]))) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results == [1] * 6 and len(calls) == 1  # a stampede of pollers costs one git status
+
+
+def test_telemetry_checkpoints_are_scoped_to_the_selected_project(ctx, roadmap_file, monkeypatch, tmp_path):
+    import subprocess
+
+    from scripts.agents.control_plane import project_registry as pr
+    from scripts.agents.control_plane.models import WorktreeRecord
+
+    def repo(name: str) -> Path:
+        root = tmp_path / name
+        root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        return root
+
+    calls = _checkpoint_probe(monkeypatch)
+    for project_id in ("proj-a", "proj-b"):
+        pr.register_project(ctx.state, {"project_id": project_id, "display_name": project_id, "local_repo_root": str(repo(project_id))})
+    pr.select_project(ctx.state, "proj-a")
+    mine, other = tmp_path / "mine", tmp_path / "other"
+    mine.mkdir()
+    other.mkdir()
+    client = TestClient(create_app(ctx, roadmap_path=roadmap_file))  # startup re-observes real Git worktrees
+    ctx.state.upsert_worktree(WorktreeRecord(path=str(mine), branch="m", project_id="proj-a"))
+    ctx.state.upsert_worktree(WorktreeRecord(path=str(other), branch="o", project_id="proj-b"))
+    paths = {row["worktree"] for row in client.get("/api/telemetry").json()["checkpoints"]}
+    assert str(mine) in paths and str(other) not in paths
+    assert str(other) not in calls  # the other project's worktree is never shelled out to
+
+    # Switching project invalidates the cache immediately (no stale cross-project rows).
+    pr.select_project(ctx.state, "proj-b")
+    paths = {row["worktree"] for row in client.get("/api/telemetry").json()["checkpoints"]}
+    assert str(other) in paths and str(mine) not in paths

@@ -22,6 +22,7 @@ import socket
 import struct
 import subprocess
 import termios
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -83,6 +84,7 @@ DASHBOARD_DIR = Path(__file__).with_name("dashboard")
 DEFAULT_OCTASCENE_HOST = "127.0.0.1"
 DEFAULT_OCTASCENE_PORT = 8765
 _PROBE_TIMEOUT_SECONDS = 0.35
+CHECKPOINT_CACHE_TTL_SECONDS = 20.0
 RECONCILE_INTERVAL_SECONDS = 0.5
 # /api/usage spawns a real (non-billable, local-status-only) CLI subprocess
 # per worker that has one — deliberately not part of the 2-second dashboard
@@ -1620,6 +1622,27 @@ def create_app(
         body["remote_access_configured"] = remote.config.enabled
         return body
 
+    # Checkpoint status shells out to git once per worktree. A project with dozens of
+    # worktrees (OctaScene has ~36) made every /api/telemetry poll cost seconds of CPU,
+    # and the UI polls it every 2s from every open client, which saturated the process
+    # and slowed every other endpoint. Compute it at most once per TTL, shared by all
+    # callers (one computation at a time), and only for the selected project's worktrees.
+    checkpoint_cache: dict[str, Any] = {"key": object(), "at": 0.0, "rows": []}
+    checkpoint_lock = threading.Lock()
+
+    def cached_checkpoints() -> list[dict[str, Any]]:
+        key = ctx.selected_project_id
+        with checkpoint_lock:
+            fresh = checkpoint_cache["key"] == key and time.monotonic() - checkpoint_cache["at"] < CHECKPOINT_CACHE_TTL_SECONDS
+            if not fresh:
+                rows = [
+                    checkpoint_status(Path(w.path)).as_dict()
+                    for w in ctx.state.list_worktrees(project_id=key)
+                    if Path(w.path).exists()
+                ]
+                checkpoint_cache.update(key=key, at=time.monotonic(), rows=rows)
+            return list(checkpoint_cache["rows"])
+
     @app.get("/api/telemetry")
     def telemetry() -> dict[str, Any]:
         """Slice 3 read model: routes, quota, and checkpoint state.
@@ -1641,13 +1664,10 @@ def create_app(
             }
             for p in ctx.state.list_provider_states()
         ]
-        worktrees = [
-            checkpoint_status(Path(w.path)).as_dict() for w in ctx.state.list_worktrees() if Path(w.path).exists()
-        ]
         return {
             "providers": providers,
             "quota_windows": [w.as_dict() for w in claude_quota_windows()],
-            "checkpoints": worktrees,
+            "checkpoints": cached_checkpoints(),
         }
 
     @app.get("/api/usage")
