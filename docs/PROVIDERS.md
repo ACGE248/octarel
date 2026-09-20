@@ -54,6 +54,8 @@ overflow stays disabled unless `--allow-overflow` and prior authorization.
 
 Runbook `worker_routes` are authoritative allowlists. Dispatch, retry, resume,
 fallback, and acceptance stages may use only the workers listed for that role.
+Quick Start exposes and persists the same selected route object; a rejected
+start rolls back its provisional draft instead of leaving a reusable runbook.
 If none is eligible, the stage blocks and reports each unavailability reason;
 it never widens to the registry route. The disabled Antigravity diff-review
 route therefore yields to the configured free

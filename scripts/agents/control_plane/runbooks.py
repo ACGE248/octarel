@@ -67,7 +67,7 @@ from .models import (
     utc_now_iso,
 )
 from .provider_state import failure_attribution
-from .recovery import discover_git_worktrees, pid_is_alive
+from .recovery import discover_git_worktrees, pid_is_alive, reconcile_worktree_locks
 from .state import State
 from .usage_policy import (
     CODEX_POLICIES,
@@ -75,6 +75,7 @@ from .usage_policy import (
     classify_failure,
     classify_task,
     codex_allowed,
+    finalize_route_attempt,
     new_usage_record,
     should_escalate,
 )
@@ -87,6 +88,36 @@ MAX_DURATION_MINUTES = 720
 
 class RunbookError(ValueError):
     pass
+
+
+def _adopt_runbook_worktree(*, state: State, runbook: Runbook, repo_root: Path) -> None:
+    """Persist Octarel ownership without hiding Git's physical worktree truth."""
+
+    path = Path(runbook.worktree).resolve()
+    if path == repo_root.resolve():
+        return
+    existing = next(
+        (
+            item
+            for item in state.list_worktrees(project_id=runbook.project_id)
+            if Path(item.path).resolve() == path
+        ),
+        None,
+    )
+    branch = runbook.branch
+    if existing is not None:
+        existing.managed = True
+        existing.branch = existing.branch or branch
+        state.upsert_worktree(existing)
+        return
+    state.upsert_worktree(
+        WorktreeRecord(
+            path=str(path),
+            branch=branch,
+            managed=True,
+            project_id=runbook.project_id,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -752,6 +783,7 @@ def start_runbook(
         raise RunbookError(str(exc)) from None
     _validate_permission_profile_for_worker(runbook.permission_profile, launch_worker, worker_name=runbook.parent_worker)
     validate_target(repo_root=repo_root, state=state, branch=runbook.branch, worktree=runbook.worktree)
+    _adopt_runbook_worktree(state=state, runbook=runbook, repo_root=repo_root)
     if scheduler is None:
         from .scheduler import Scheduler
 
@@ -1346,19 +1378,37 @@ def resume_runbook(*, state: State, runbook_id: str) -> Runbook:
 
 
 def stop_runbook(*, state: State, runbook_id: str) -> Runbook:
-    """Mark the runbook's underlying task cancelled. Matches ``cmd_stop``: a live
+    """Reconcile a stop after the command layer tries to terminate owned work.
 
-    subprocess is not force-killed here (safer than corrupting in-flight work);
-    the daemon's normal reconciliation records it FAILED/SUCCEEDED once the
-    process actually exits, at which point ``reconcile_runbooks`` finalizes
-    the runbook's own terminal status.
+    A dead/no-PID task and its attempt history become CANCELLED immediately.
+    A genuinely live process not owned by this daemon remains STOPPING rather
+    than being falsely presented as cancelled. Draft cancellation is terminal
+    and idempotent without creating a task.
     """
 
+    runbook = state.get_runbook(runbook_id)
+    if runbook is None:
+        raise RunbookError(f"unknown runbook {runbook_id!r}")
+    if runbook.status == RUNBOOK_CANCELLED and runbook.task_id is None:
+        return runbook
+    if runbook.status == RUNBOOK_DRAFT and runbook.task_id is None:
+        runbook.status = RUNBOOK_CANCELLED
+        runbook.ended_at = utc_now_iso()
+        state.upsert_runbook(runbook)
+        state.record_event(category="runbook", level="warning", message=f"draft runbook {runbook.id} cancelled")
+        return runbook
     runbook, task = _require_launched(state, runbook_id)
-    if task.state not in (TASK_SUCCEEDED, TASK_FAILED, TASK_CANCELLED):
+    if task.state not in (TASK_SUCCEEDED, TASK_FAILED, TASK_CANCELLED) and not pid_is_alive(task.pid):
         task.state = TASK_CANCELLED
+        task.result = "CANCELLED"
+        task.pid = None
         state.upsert_task(task)
-    runbook.status = RUNBOOK_STOPPING
+        finalize_route_attempt(state, task)
+    if task.state == TASK_CANCELLED:
+        runbook.status = RUNBOOK_CANCELLED
+        runbook.ended_at = runbook.ended_at or utc_now_iso()
+    else:
+        runbook.status = RUNBOOK_STOPPING
     state.upsert_runbook(runbook)
     state.record_event(
         category="runbook", level="warning", task_id=task.id, message=f"runbook {runbook.id} stop requested by operator"
@@ -1495,6 +1545,27 @@ def reconcile_runbooks(
             task = state.get_task(runbook.task_id)
             if task is None:
                 continue
+            if task.state == TASK_CANCELLED:
+                # Repair legacy/partially-cancelled rows before the ordinary
+                # terminal-state early return.  Repeating this is a no-op.
+                task.result = task.result or "CANCELLED"
+                if not pid_is_alive(task.pid):
+                    task.pid = None
+                state.upsert_task(task)
+                attempt_changed = finalize_route_attempt(state, task)
+                runbook_changed = runbook.status != RUNBOOK_CANCELLED or runbook.ended_at is None
+                if runbook_changed:
+                    runbook.status = RUNBOOK_CANCELLED
+                    runbook.ended_at = runbook.ended_at or utc_now_iso()
+                    state.upsert_runbook(runbook)
+                _adopt_runbook_worktree(state=state, runbook=runbook, repo_root=repo_root)
+                lock_path = Path(runbook.worktree) / ".agent-output" / ".write-lock"
+                if lock_path.exists():
+                    discovered = discover_git_worktrees(repo_root)
+                    if discovered:
+                        reconcile_worktree_locks(state, discovered, project_id=runbook.project_id)
+                if attempt_changed or runbook_changed:
+                    finalized += 1
             stale_fallback_presentation = (
                 runbook.status == RUNBOOK_FAILED
                 and task.state in {TASK_RUNNING, TASK_SUCCEEDED}

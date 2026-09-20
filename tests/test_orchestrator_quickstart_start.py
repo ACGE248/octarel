@@ -12,6 +12,7 @@ tests, so this stays a fast, deterministic, zero-subprocess-worker test.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -21,11 +22,18 @@ from fastapi.testclient import TestClient
 from scripts.agents.control_plane.commands import CommandContext, apply_command
 from scripts.agents.control_plane.dashboard_api import create_app
 from scripts.agents.control_plane.intake import check_and_claim
-from scripts.agents.control_plane.models import RUNBOOK_RUNNING
+from scripts.agents.control_plane.models import (
+    RUNBOOK_RUNNING,
+    TASK_RUNNING,
+    Runbook,
+    Task,
+)
+from scripts.agents.control_plane.operations import list_worktree_statuses
 from scripts.agents.control_plane.provider_state import reconcile_provider_states
 from scripts.agents.control_plane.quickstart import (
     VIDEO_EDITOR_LEDGER_RELATIVE,
     QuickStartError,
+    list_quickstart_options,
     start_quickstart_option,
 )
 from scripts.agents.control_plane.scheduler import Scheduler
@@ -85,6 +93,12 @@ def test_start_quickstart_option_provisions_a_worktree_when_none_exists(tmp_path
     assert Path(runbook.worktree).is_dir()
     assert Path(runbook.worktree).parent == repo_root.parent
     assert runbook.branch.startswith("video-editor/v1-01")
+    advertised = next(
+        item
+        for item in list_quickstart_options(repo_root, state=state, registry=registry)
+        if item["key"] == "continue-video-editor"
+    )
+    assert runbook.worker_routes == advertised["worker_routes"]
 
 
 def test_start_quickstart_option_reuses_an_already_existing_worktree(tmp_path, monkeypatch):
@@ -328,6 +342,9 @@ def test_real_quickstart_http_path_falls_back_from_known_claude_quota_to_codex(t
     assert runbook.codex_policy == "balanced"
     assert runbook.codex_auto_eligible is True
     assert runbook.max_codex_invocations == 1
+    assert runbook.worker_routes == option_before["worker_routes"]
+    assert runbook.worker_routes["primary-implementation"] == ["codex-build"]
+    assert "grok-build" not in runbook.worker_routes["primary-implementation"]
     assert usage["codex_invocations"] == 1
     assert [item["worker"] for item in usage["route_history"]] == ["codex-build"]
     assert [item["status"] for item in usage["route_history"]] == ["RUNNING"]
@@ -337,6 +354,56 @@ def test_real_quickstart_http_path_falls_back_from_known_claude_quota_to_codex(t
     assert policy["read_write_mode"] == "write"
     assert policy["api_billing_enabled"] is False
     assert ctx.registry.get("codex-build").allow_api_billing is False
+
+
+def test_rejected_quickstart_is_atomic_across_repeated_active_conflicts(tmp_path, monkeypatch):
+    ctx, _client, spawned, existing_worktree = _quickstart_http_context(tmp_path, monkeypatch)
+    active = Runbook(
+        id="RB-existing", name="existing", preset="test-fix", objective="existing",
+        source_ref="V1-01", branch="video-editor/V1-01-local-import", worktree=str(existing_worktree),
+        parent_worker="claude-code", max_duration_minutes=30, status=RUNBOOK_RUNNING,
+        task_id="existing-task",
+    )
+    ctx.state.upsert_runbook(active)
+    ctx.state.upsert_task(Task(
+        id="existing-task", task_ref="V1-01", role="primary-implementation", worker="claude-code",
+        state=TASK_RUNNING, pid=os.getpid(), worktree=str(existing_worktree), runbook_id=active.id,
+    ))
+
+    for _ in range(2):
+        with pytest.raises(QuickStartError, match="active (task|runbook)"):
+            start_quickstart_option(
+                state=ctx.state, registry=ctx.registry, supervisor=ctx.supervisor,
+                repo_root=ctx.repo_root, key="continue-video-editor",
+            )
+
+    assert [item.id for item in ctx.state.list_runbooks()] == ["RB-existing"]
+    assert spawned == []
+
+
+def test_cancelled_quickstart_worktree_remains_physically_and_durably_visible(tmp_path, monkeypatch):
+    ctx, _client, _spawned, existing_worktree = _quickstart_http_context(tmp_path, monkeypatch)
+    runbook = start_quickstart_option(
+        state=ctx.state, registry=ctx.registry, supervisor=ctx.supervisor,
+        repo_root=ctx.repo_root, key="continue-video-editor",
+    )
+    task = ctx.state.get_task(runbook.task_id)
+    task.pid = None
+    ctx.state.upsert_task(task)
+    from scripts.agents.control_plane import runbooks
+
+    runbooks.stop_runbook(state=ctx.state, runbook_id=runbook.id)
+    rows = list_worktree_statuses(ctx)
+    row = next(item for item in rows if Path(item["path"]) == existing_worktree.resolve())
+
+    assert existing_worktree.is_dir()
+    listed = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"], cwd=ctx.repo_root,
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert str(existing_worktree) in listed
+    assert row["management"] == "MANAGED"
+    assert row["task_state"] == "CANCELLED"
 
 
 def test_real_quickstart_http_path_blocks_truthfully_when_codex_is_unavailable(tmp_path, monkeypatch):

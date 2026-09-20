@@ -93,6 +93,48 @@ def _stale_write_lock_holder(lock_path: Path) -> tuple[str | None, bool]:
     return holder, not pid_is_alive(int(match.group(1)))
 
 
+def release_owned_write_lock(
+    state: State,
+    *,
+    worktree: str,
+    expected_pid: int,
+    project_id: str | None = None,
+) -> bool:
+    """Release only the dead standard lock owned by a just-terminated process."""
+
+    saved = next(
+        (
+            item
+            for item in state.list_worktrees(project_id=project_id)
+            if Path(item.path).resolve() == Path(worktree).resolve()
+        ),
+        None,
+    )
+    if saved is None or not saved.managed or pid_is_alive(expected_pid):
+        return False
+    lock_path = Path(worktree) / _AGENT_OUTPUT_DIRNAME / _WRITE_LOCK_NAME
+    holder, stale = _stale_write_lock_holder(lock_path)
+    match = re.fullmatch(r"[\w.-]+\s+pid=(\d+)\s+at=\d+", holder or "")
+    if not stale or match is None or int(match.group(1)) != expected_pid:
+        return False
+    try:
+        lock_path.unlink()
+    except OSError:
+        return False
+    saved.locked = False
+    saved.lock_holder = None
+    saved.stale_lock = False
+    saved.stale_lock_holder = None
+    state.upsert_worktree(saved)
+    state.record_event(
+        category="recovery",
+        level="warning",
+        message=f"released terminated owned-process write lock at {lock_path} (pid={expected_pid})",
+        project_id=project_id,
+    )
+    return True
+
+
 def reconcile_worktree_locks(
     state: State, worktrees: list[WorktreeRecord], *, project_id: str | None = None
 ) -> list[WorktreeRecord]:

@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
 
 from ..policy import PolicyError, compose_policy_bundle, validate_policy_preservation
+from .models import TASK_FAILED, Task, utc_now_iso
 
 CODEX_CONSERVE = "conserve"
 CODEX_BALANCED = "balanced"
@@ -339,3 +340,40 @@ def new_usage_record(*, runbook_id: str, task_id: str | None, classification: st
         "escalation_state": "none", "escalation_reason": None, "route_history": [],
         "escalation_history": [], "context_manifest": context_manifest or {},
     }
+
+
+def finalize_route_attempt(state, task: Task) -> bool:
+    """Terminalize the newest live durable attempt for ``task`` exactly once."""
+
+    if not task.runbook_id:
+        return False
+    record = state.get_usage_governance(task.runbook_id)
+    if not record:
+        return False
+    history = list(record.get("route_history", []))
+    for index in range(len(history) - 1, -1, -1):
+        attempt = history[index]
+        if not isinstance(attempt, dict) or attempt.get("worker") != task.worker:
+            continue
+        if attempt.get("status") not in {None, "STARTING", "RUNNING"}:
+            continue
+        outcome = {
+            **attempt,
+            "status": task.state,
+            "result": task.result,
+            "ended_at": utc_now_iso(),
+        }
+        if task.state == TASK_FAILED:
+            outcome.update(
+                {
+                    "failure_category": task.failure_category or "UNKNOWN",
+                    "failure_reason": task.failure_reason_sanitized or task.last_error,
+                    "failure_provider": task.failure_provider,
+                    "failure_model": task.failure_model,
+                }
+            )
+        history[index] = outcome
+        record["route_history"] = history
+        state.upsert_usage_governance(record)
+        return True
+    return False

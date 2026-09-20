@@ -734,9 +734,10 @@ def cmd_runbook_resume(ctx: CommandContext, *, runbook_id: str) -> CommandResult
 
 def cmd_runbook_stop(ctx: CommandContext, *, runbook_id: str) -> CommandResult:
     try:
+        current = ctx.state.get_runbook(runbook_id)
+        if current is not None and current.task_id:
+            ctx.supervisor.terminate_task(current.task_id)
         runbook = runbooks_module.stop_runbook(state=ctx.state, runbook_id=runbook_id)
-        if runbook.task_id:
-            ctx.supervisor.terminate_task(runbook.task_id)
     except RunbookError as exc:
         raise CommandError(str(exc)) from None
     return _runbook_to_result(runbook, f"runbook {runbook.id} stop requested")

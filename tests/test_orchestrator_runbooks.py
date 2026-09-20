@@ -16,6 +16,7 @@ from scripts.agents.control_plane.models import (
     PERMISSION_STANDARD,
     RUNBOOK_ACCEPTANCE_PENDING,
     RUNBOOK_BLOCKED,
+    RUNBOOK_CANCELLED,
     RUNBOOK_DEADLINE_REACHED,
     RUNBOOK_DRAFT,
     RUNBOOK_FAILED,
@@ -401,7 +402,7 @@ def test_start_runbook_twice_is_rejected():
         runbooks.start_runbook(state=state, registry=registry, supervisor=None, repo_root=Path("/tmp"), runbook_id=rb.id)
 
 
-def test_stop_runbook_cancels_the_underlying_task_without_force_killing(tmp_path, monkeypatch):
+def test_stop_and_reconcile_terminalize_attempt_idempotently(tmp_path, monkeypatch):
     repo = _git_worktree(tmp_path)
     state = State(":memory:")
     registry = load_registry()
@@ -413,9 +414,29 @@ def test_stop_runbook_cancels_the_underlying_task_without_force_killing(tmp_path
     runbooks.start_runbook(state=state, registry=registry, supervisor=supervisor, repo_root=repo, runbook_id=rb.id)
 
     stopped = runbooks.stop_runbook(state=state, runbook_id=rb.id)
-    assert stopped.status == RUNBOOK_STOPPING
+    assert stopped.status == RUNBOOK_CANCELLED
     task = state.get_task(stopped.task_id)
     assert task.state == TASK_CANCELLED
+    assert task.result == "CANCELLED"
+    first_history = state.get_usage_governance(rb.id)["route_history"]
+    assert first_history[-1]["status"] == TASK_CANCELLED
+    assert first_history[-1]["result"] == "CANCELLED"
+
+    runbooks.reconcile_runbooks(state=state, repo_root=repo, registry=registry, supervisor=supervisor)
+    runbooks.reconcile_runbooks(state=state, repo_root=repo, registry=registry, supervisor=supervisor)
+    assert state.get_runbook(rb.id).status == RUNBOOK_CANCELLED
+    assert state.get_usage_governance(rb.id)["route_history"] == first_history
+
+
+def test_stop_draft_runbook_is_idempotently_cancelled():
+    state = State(":memory:")
+    registry = load_registry()
+    rb = runbooks.create_runbook(
+        state=state, registry=registry, name="draft", preset="test-fix", source_ref="x",
+        branch="b", worktree="/tmp/draft",
+    )
+    assert runbooks.stop_runbook(state=state, runbook_id=rb.id).status == RUNBOOK_CANCELLED
+    assert runbooks.stop_runbook(state=state, runbook_id=rb.id).status == RUNBOOK_CANCELLED
 
 
 def test_pause_then_resume_a_not_yet_launched_task(tmp_path, monkeypatch):

@@ -41,10 +41,9 @@ from .models import (
     TASK_RUNNING,
     TASK_SUCCEEDED,
     Task,
-    utc_now_iso,
 )
 from .project import cp_code_root
-from .recovery import pid_is_alive
+from .recovery import pid_is_alive, release_owned_write_lock
 from .state import State
 
 _AGENT_OUTPUT_DIRNAME = ".agent-output"
@@ -130,6 +129,7 @@ class Supervisor:
         process = self._processes.get(task_id)
         if process is None:
             return False
+        owned_pid = getattr(process, "pid", None)
         if not self._terminate_owned_process(process):
             return False
         task = self.state.get_task(task_id)
@@ -138,6 +138,14 @@ class Supervisor:
             task.result = "CANCELLED"
             task.pid = None
             self.state.upsert_task(task)
+            self._record_route_outcome(task)
+            if isinstance(owned_pid, int) and task.worktree:
+                release_owned_write_lock(
+                    self.state,
+                    worktree=task.worktree,
+                    expected_pid=owned_pid,
+                    project_id=task.project_id,
+                )
         self._processes.pop(task_id, None)
         return True
 
@@ -382,38 +390,9 @@ class Supervisor:
 
     def _record_route_outcome(self, task: Task) -> None:
         """Finalize the current durable route attempt without erasing history."""
+        from .usage_policy import finalize_route_attempt
 
-        if not task.runbook_id:
-            return
-        record = self.state.get_usage_governance(task.runbook_id)
-        if not record:
-            return
-        history = list(record.get("route_history", []))
-        for index in range(len(history) - 1, -1, -1):
-            attempt = history[index]
-            if not isinstance(attempt, dict) or attempt.get("worker") != task.worker:
-                continue
-            if attempt.get("status") not in {None, "STARTING", "RUNNING"}:
-                continue
-            outcome = {
-                **attempt,
-                "status": task.state,
-                "result": task.result,
-                "ended_at": utc_now_iso(),
-            }
-            if task.state == TASK_FAILED:
-                outcome.update(
-                    {
-                        "failure_category": task.failure_category or "UNKNOWN",
-                        "failure_reason": task.failure_reason_sanitized or task.last_error,
-                        "failure_provider": task.failure_provider,
-                        "failure_model": task.failure_model,
-                    }
-                )
-            history[index] = outcome
-            record["route_history"] = history
-            self.state.upsert_usage_governance(record)
-            return
+        finalize_route_attempt(self.state, task)
 
     @staticmethod
     def _completed_output(process: subprocess.Popen) -> tuple[str, str]:

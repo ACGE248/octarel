@@ -15,6 +15,7 @@ from scripts.agents.control_plane.models import (
     TASK_RUNNING,
     TASK_SUCCEEDED,
     Task,
+    WorktreeRecord,
 )
 from scripts.agents.control_plane.state import State
 from scripts.agents.control_plane.supervisor import Supervisor
@@ -217,6 +218,7 @@ def test_terminate_task_reaps_only_the_owned_process_group(tmp_path):
     state = State(":memory:")
     supervisor = Supervisor(registry=load_registry(), repo_root=tmp_path, state=state)
     task = _write_task(tmp_path)
+    task.runbook_id = "RB-cancel"
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         start_new_session=True,
@@ -224,6 +226,15 @@ def test_terminate_task_reaps_only_the_owned_process_group(tmp_path):
     task.state = TASK_RUNNING
     task.pid = process.pid
     state.upsert_task(task)
+    state.upsert_worktree(WorktreeRecord(path=str(tmp_path), managed=True))
+    state.upsert_usage_governance({
+        "runbook_id": task.runbook_id, "task_id": task.id,
+        "route_history": [{"worker": task.worker, "status": "RUNNING"}],
+    })
+    lock_dir = tmp_path / ".agent-output"
+    lock_dir.mkdir()
+    lock_path = lock_dir / ".write-lock"
+    lock_path.write_text(f"{task.worker} pid={process.pid} at=0", encoding="utf-8")
     supervisor._processes[task.id] = process
     supervisor._owned_process_groups.add(process.pid)
 
@@ -232,6 +243,33 @@ def test_terminate_task_reaps_only_the_owned_process_group(tmp_path):
     assert supervisor.live_task_ids() == frozenset()
     saved = state.get_task(task.id)
     assert saved.state == TASK_CANCELLED and saved.pid is None
+    assert not lock_path.exists()
+    attempt = state.get_usage_governance(task.runbook_id)["route_history"][-1]
+    assert attempt["status"] == TASK_CANCELLED
+    assert attempt["result"] == "CANCELLED"
+
+
+def test_terminate_task_preserves_live_unrelated_write_lock(tmp_path):
+    state = State(":memory:")
+    supervisor = Supervisor(registry=load_registry(), repo_root=tmp_path, state=state)
+    task = _write_task(tmp_path)
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    task.state = TASK_RUNNING
+    task.pid = process.pid
+    state.upsert_task(task)
+    state.upsert_worktree(WorktreeRecord(path=str(tmp_path), managed=True))
+    lock_dir = tmp_path / ".agent-output"
+    lock_dir.mkdir()
+    lock_path = lock_dir / ".write-lock"
+    lock_path.write_text(f"other-worker pid={os.getpid()} at=0", encoding="utf-8")
+    supervisor._processes[task.id] = process
+    supervisor._owned_process_groups.add(process.pid)
+
+    assert supervisor.terminate_task(task.id) is True
+    assert lock_path.read_text(encoding="utf-8") == f"other-worker pid={os.getpid()} at=0"
 
 
 def test_shutdown_all_reaps_every_owned_child(tmp_path):

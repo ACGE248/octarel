@@ -1014,7 +1014,13 @@ def test_runbook_full_lifecycle_via_dashboard_endpoints(git_client, tmp_path):
 
     confirmed = git_client.post("/api/commands/runbook_stop", json={"runbook_id": runbook_id, "confirm": True})
     assert confirmed.status_code == 200
-    assert confirmed.json()["data"]["status"] == "STOPPING"
+    assert confirmed.json()["data"]["status"] == "CANCELLED"
+    cancelled = git_client.get(f"/api/runbooks/{runbook_id}").json()
+    assert cancelled["attempt_history"][-1]["status"] == "CANCELLED"
+    task = next(item for item in git_client.get("/api/tasks").json() if item["id"] == cancelled["task_id"])
+    assert task["state"] == "CANCELLED"
+    assert task["projection"] == "HISTORICAL"
+    assert task["pid"] is None
 
 
 def test_runbook_report_endpoint_reports_none_before_completion(git_client, tmp_path):

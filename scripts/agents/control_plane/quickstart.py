@@ -173,7 +173,28 @@ class QuickStartOption:
     # ledger, straight from the API response.
     resolution_evidence: dict[str, str | None] | None = None
 
+    def selected_worker_routes(self) -> dict[str, list[str]]:
+        """Return the exact operator-visible routes that this option will persist.
+
+        Quick Start pins the selected preset's launch role. Acceptance roles
+        are pinned to the separately displayed tester/reviewer selections.
+        This object is the single route projection used by both the API and
+        create_runbook.
+        """
+
+        routes = {
+            "mechanical-testing": [self.proposed_tester],
+            "focused-tests": [self.proposed_tester],
+            "diff-review": [self.proposed_reviewer],
+        }
+        if self.preset == "review-only":
+            routes["diff-review"] = [self.parent_worker]
+        else:
+            routes["primary-implementation"] = [self.parent_worker]
+        return routes
+
     def as_dict(self) -> dict:
+        worker_routes = self.selected_worker_routes()
         return {
             "key": self.key,
             "title": self.title,
@@ -192,6 +213,7 @@ class QuickStartOption:
             "dependency_state": self.dependency_state,
             "proposed_tester": self.proposed_tester,
             "proposed_reviewer": self.proposed_reviewer,
+            "worker_routes": worker_routes,
             "proposed_tester_unavailable_reason": self.proposed_tester_unavailable_reason,
             "proposed_reviewer_unavailable_reason": self.proposed_reviewer_unavailable_reason,
             "branch_worktree_mode": self.branch_worktree_mode,
@@ -919,6 +941,7 @@ def start_quickstart_option(
 
     from .runbooks import RunbookError, create_runbook, start_runbook
 
+    runbook = None
     try:
         runbook = create_runbook(
             state=state,
@@ -937,6 +960,7 @@ def start_quickstart_option(
             codex_policy=option.codex_policy,
             codex_auto_eligible=option.codex_auto_eligible,
             max_codex_invocations=option.max_codex_invocations,
+            worker_routes=option.selected_worker_routes(),
         )
         return start_runbook(
             state=state,
@@ -948,4 +972,17 @@ def start_quickstart_option(
             scheduler=scheduler,
         )
     except RunbookError as exc:
+        # Quick Start is one operator transaction.  If start rejected the
+        # just-created provisional row before any task was durably attached,
+        # remove it instead of accumulating an unusable DRAFT on each retry.
+        if runbook is not None:
+            persisted = state.get_runbook(runbook.id)
+            if persisted is not None and persisted.status == "DRAFT" and persisted.task_id is None:
+                state.delete_runbook(runbook.id)
+                state.record_event(
+                    category="runbook",
+                    level="warning",
+                    message=f"rolled back provisional Quick Start runbook {runbook.id}: {exc}",
+                    project_id=project_id,
+                )
         raise QuickStartError(str(exc)) from None
