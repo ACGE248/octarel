@@ -194,7 +194,12 @@ def completed_work_refs(project: Any) -> frozenset[str]:
     dashboard poll.
     """
 
-    from .task_sources import ADAPTER_FILE_LEDGER, ADAPTER_VIDEO_EDITOR_LEDGER, discover_tasks, task_source_adapter_name
+    from .task_sources import (
+        ADAPTER_FILE_LEDGER,
+        ADAPTER_VIDEO_EDITOR_LEDGER,
+        discover_tasks,
+        task_source_adapter_name,
+    )
 
     if project is None:
         return frozenset()
