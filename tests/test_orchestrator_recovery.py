@@ -166,8 +166,8 @@ def test_reconcile_releases_only_proven_stale_managed_lock(tmp_path):
 
     [record] = reconcile_worktree_locks(state, [WorktreeRecord(path=str(repo), branch="work")])
 
-    assert record.stale_lock is True
-    assert record.stale_lock_holder.startswith("claude-code pid=")
+    assert record.stale_lock is False
+    assert record.stale_lock_holder is None
     assert record.locked is False
     assert not lock_path.exists()
 

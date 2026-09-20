@@ -172,8 +172,8 @@ def reconcile_worktree_locks(
             locked=bool(holder) and not stale,
             lock_holder=holder if (holder and not stale) else None,
             managed=bool(saved and saved.managed),
-            stale_lock=bool(stale),
-            stale_lock_holder=holder if stale else None,
+            stale_lock=bool(stale and not released),
+            stale_lock_holder=holder if (stale and not released) else None,
             project_id=project_id,
             # ENG-AGENT-14: Git discovery does not observe PR/head origin.
             # Copy durable stamps onto the in-memory snapshot so refresh
@@ -183,8 +183,6 @@ def reconcile_worktree_locks(
             review_pr=saved.review_pr if saved else None,
             review_head_sha=saved.review_head_sha if saved else None,
         )
-        if released:
-            record.locked = False
         annotated.append(record)
     state.replace_worktrees(annotated, project_id=project_id)
     return annotated
