@@ -394,10 +394,11 @@ def _resources_snapshot(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def _task_to_dict(task: Any) -> dict[str, Any]:
+def _task_to_dict(task: Any, *, superseded: bool = False) -> dict[str, Any]:
     from .models import task_projection
 
     return {
+        "superseded": superseded,
         "id": task.id,
         "task_ref": task.task_ref,
         "role": task.role,
@@ -412,7 +413,7 @@ def _task_to_dict(task: Any) -> dict[str, Any]:
         "last_error": task.last_error,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
-        "projection": task_projection(task.state),
+        "projection": "HISTORICAL" if superseded else task_projection(task.state),
         "failed_worker_id": task.failed_worker_id,
         "failure_execution_system": task.failure_execution_system,
         "failure_provider": task.failure_provider,
@@ -841,6 +842,17 @@ def create_app(
     def scoped_runbooks() -> list[Any]:
         return ctx.state.list_runbooks(project_id=ctx.selected_project_id)
 
+    def superseded() -> tuple[set[str], set[str]]:
+        """Run/task ids that are history (already accepted, or taken over by a later accepted run)."""
+
+        from .advancement import superseded_ids
+
+        return superseded_ids(scoped_runbooks(), scoped_tasks())
+
+    def current_tasks() -> list[Any]:
+        _runs, old_tasks = superseded()
+        return [t for t in scoped_tasks() if t.id not in old_tasks]
+
     def scoped_events(limit: int) -> list[Any]:
         return ctx.state.list_events(limit=limit, project_id=ctx.selected_project_id)
 
@@ -880,11 +892,12 @@ def create_app(
     def overview() -> dict[str, Any]:
         from .models import task_projection
 
+        _runs, old_tasks = superseded()
         tasks = scoped_tasks()
         providers = ctx.state.list_provider_states()
         counts = {key: 0 for key in ("ACTIVE", "QUEUED", "PAUSED", "NEEDS_ATTENTION", "HISTORICAL")}
         for task in tasks:
-            counts[task_projection(task.state)] += 1
+            counts["HISTORICAL" if task.id in old_tasks else task_projection(task.state)] += 1
         return {
             "task_count": counts["ACTIVE"],
             "task_counts": {key.lower(): value for key, value in counts.items()},
@@ -1088,7 +1101,8 @@ def create_app(
 
     @app.get("/api/tasks")
     def tasks() -> list[dict[str, Any]]:
-        return [_task_to_dict(t) for t in scoped_tasks()]
+        _runs, old_tasks = superseded()
+        return [_task_to_dict(t, superseded=t.id in old_tasks) for t in scoped_tasks()]
 
     @app.get("/api/processes")
     def processes() -> list[dict[str, Any]]:
@@ -1226,7 +1240,7 @@ def create_app(
         null/empty; configured providers are never promoted to active stages.
         """
 
-        all_tasks = scoped_tasks()
+        all_tasks = current_tasks()  # history (accepted/superseded) never becomes "the current task"
         active_states = {"RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED"}
         groups: dict[str, list[Any]] = {}
         for item in all_tasks:
@@ -1536,7 +1550,8 @@ def create_app(
 
     @app.get("/api/attention")
     def attention() -> dict[str, Any]:
-        failed_or_blocked = [_task_to_dict(t) for t in scoped_tasks() if t.state in ("FAILED", "BLOCKED")]
+        old_runs, old_tasks = superseded()
+        failed_or_blocked = [_task_to_dict(t) for t in scoped_tasks() if t.state in ("FAILED", "BLOCKED") and t.id not in old_tasks]
         troubled_providers = [
             _provider_to_dict(p, registry=ctx.registry, tasks=scoped_tasks())
             for p in ctx.state.list_provider_states()
@@ -1545,7 +1560,7 @@ def create_app(
         troubled_runbooks = [
             _runbook_to_dict(r)
             for r in scoped_runbooks()
-            if r.status in ("FAILED", "DEADLINE_REACHED", "OWNER_ACTION_REQUIRED", "BLOCKED")
+            if r.status in ("FAILED", "DEADLINE_REACHED", "OWNER_ACTION_REQUIRED", "BLOCKED") and r.id not in old_runs
         ]
         return {"tasks": failed_or_blocked, "providers": troubled_providers, "runbooks": troubled_runbooks}
 

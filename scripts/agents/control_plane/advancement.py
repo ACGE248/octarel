@@ -176,6 +176,44 @@ def accepted_run_for_task(state: State, project_id: str | None, task_id: str) ->
     return None
 
 
+_SETTLED_FOR_SUPERSESSION = frozenset({"FAILED", "BLOCKED", "CANCELLED", "OWNER_ACTION_REQUIRED", "DEADLINE_REACHED"})
+
+
+def _work_ref(runbook: Runbook) -> str:
+    """The stable work item a run is about (``V1-08`` from ``V1-08 (Split/trim…)``), else its own id."""
+
+    head = (runbook.source_ref or "").split(maxsplit=1)
+    return head[0].rstrip(":;,.()") if head else runbook.id
+
+
+def superseded_ids(runbooks: list[Runbook], tasks: list[Any]) -> tuple[set[str], set[str]]:
+    """(runbook ids, task ids) that are history, not current work.
+
+    A failed/blocked run is history when a *later* accepted run took over the same
+    work item; and any failed/blocked task belonging to an accepted run (a review that
+    failed before the recovered acceptance succeeded) is history. Only FAILED/BLOCKED/
+    CANCELLED items are ever superseded: a live task or run is always current.
+    """
+
+    accepted = [r for r in runbooks if r.status == RUNBOOK_SUCCEEDED and r.acceptance_stage == "DONE"]
+    newest_accepted: dict[str, str] = {}
+    for run in accepted:
+        ref = _work_ref(run)
+        newest_accepted[ref] = max(newest_accepted.get(ref, ""), run.created_at)
+    run_ids = {run.id for run in accepted}
+    for run in runbooks:
+        if run.status in _SETTLED_FOR_SUPERSESSION and newest_accepted.get(_work_ref(run), "") > run.created_at:
+            run_ids.add(run.id)
+    owners = [r for r in runbooks if r.id in run_ids]
+    task_ids: set[str] = set()
+    for task in tasks:
+        if task.state not in {"FAILED", "BLOCKED", "CANCELLED"}:
+            continue
+        if any(task.id == r.task_id or task.id.startswith(f"{r.id}-") for r in owners):
+            task_ids.add(task.id)
+    return {r.id for r in owners if r.status in _SETTLED_FOR_SUPERSESSION}, task_ids
+
+
 def _accepted_task_ids(state: State, project_id: str | None, tasks: list[DiscoveredTask]) -> set[str]:
     accepted: set[str] = set()
     for other in state.list_runbooks(project_id=project_id):

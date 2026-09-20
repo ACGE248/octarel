@@ -205,7 +205,7 @@
       else if (["QUEUED", "PENDING"].includes(t.state)) counts.queued += 1;
       else if (t.state === "PAUSED") counts.paused += 1;
       else if (COMPLETED_STATES.includes(t.state)) counts.completed += 1;
-      else if (BLOCKED_STATES.includes(t.state)) counts.blocked += 1;
+      else if (BLOCKED_STATES.includes(t.state) && !t.superseded) counts.blocked += 1;
     });
     return counts;
   }
