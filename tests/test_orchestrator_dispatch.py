@@ -422,3 +422,67 @@ def test_control_center_projects_only_persisted_dispatch_truth(tmp_path):
     assert dispatch_body["waves"][0]["wave"] == 2
     assert dispatch_body["waves"][0]["alternatives"] == ["claude-code"]
     assert dispatch_body["caps"]["global"]["used"] == 0
+
+
+def _runbook_with_implementer_bundle(state: State, registry, repo: Path, runbook_id: str) -> None:
+    """Persist the runbook-level policy manifest exactly as a launched implementer leaves it."""
+
+    from scripts.agents.control_plane.usage_policy import new_usage_record
+    from scripts.agents.policy import compose_policy_bundle
+
+    manifest = compose_policy_bundle(
+        root=repo, registry=registry, worker_name="claude-code", route_role="primary-implementation",
+    ).manifest
+    assert manifest["role"] == "IMPLEMENTER"
+    state.upsert_usage_governance(new_usage_record(
+        runbook_id=runbook_id, task_id=None, classification="feature", codex_policy="conserve",
+        codex_auto_eligible=False, max_codex_invocations=0, context_manifest={"policy_manifest": manifest},
+    ))
+
+
+def test_reviewer_fallback_is_held_to_the_reviewer_bundle_not_the_implementer_bundle():
+    """The runbook manifest is the implementer's; a same-role reviewer fallback must still be admissible."""
+
+    repo = Path(__file__).resolve().parents[1]
+    state, registry = _available_state()
+    _runbook_with_implementer_bundle(state, registry, repo, "RB-review-fallback")
+    failed = state.get_provider_state("antigravity-diff-review")
+    failed.state = "FAILED"
+    failed.consecutive_failures = 1
+    failed.last_error = "structured worker result contained an empty response"
+    state.upsert_provider_state(failed)
+    task = Task(
+        id="RB-review-fallback-review-1", task_ref="V1-X", owner_ref="task:V1-X", role="diff-review",
+        worker="antigravity-diff-review", kind=KIND_READ, runbook_id="RB-review-fallback",
+        worktree=str(repo),
+    )
+    result, _state, _registry, supervisor = _managed(repo, task, state=state)
+    assert result.task.worker == "opencode2-gemini-flash-lite-review"
+    assert result.task.selected_provider == "Google"
+    assert supervisor.launched == [task.id]
+
+
+def test_reviewer_fallback_still_refuses_a_bundle_that_changes_the_role_contract(monkeypatch):
+    """A fallback whose composed identity differs from the original reviewer's is still rejected."""
+
+    from scripts.agents.control_plane import dispatch
+    repo = Path(__file__).resolve().parents[1]
+    state, registry = _available_state()
+    _runbook_with_implementer_bundle(state, registry, repo, "RB-review-drift")
+    real = dispatch.compose_policy_bundle
+
+    def drifting(**kwargs):
+        bundle = real(**kwargs)
+        if kwargs["worker_name"] == "opencode2-gemini-flash-lite-review":
+            bundle.manifest["preserved_policy_identity"] = {**bundle.manifest["preserved_policy_identity"], "workflow": "IMPLEMENT"}
+        return bundle
+
+    monkeypatch.setattr(dispatch, "compose_policy_bundle", drifting)
+    task = Task(
+        id="RB-review-drift-review-1", task_ref="V1-X", owner_ref="task:V1-X", role="diff-review",
+        worker="antigravity-diff-review", kind=KIND_READ, runbook_id="RB-review-drift", worktree=str(repo),
+    )
+    ok, reason = dispatch._preserves_policy(
+        state=state, registry=registry, task=task, worker_name="opencode2-gemini-flash-lite-review", repo_root=repo,
+    )
+    assert not ok and "preserved role/workflow" in reason

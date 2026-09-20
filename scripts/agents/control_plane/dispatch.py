@@ -151,13 +151,21 @@ def _preserves_policy(*, state: State, registry: Registry, task: Task, worker_na
     original = (usage.get("context_manifest") or {}).get("policy_manifest")
     if not original:
         return True, ""
+    root = Path(task.worktree or repo_root)
+    criteria = "managed dispatch preserves the existing task acceptance contract"
     try:
+        if original.get("route_role") != task.role:
+            # The runbook-level manifest records the implementer bundle. An acceptance-stage task (for
+            # example the independent reviewer) has a different role/workflow/capability, so a fallback
+            # must be held to the bundle of the worker that stage was originally assigned to, never to
+            # the implementer's (which no same-role fallback could ever match).
+            original = compose_policy_bundle(
+                root=root, registry=registry, worker_name=task.worker, route_role=task.role,
+                acceptance_criteria=criteria,
+            ).manifest
         replacement = compose_policy_bundle(
-            root=Path(task.worktree or repo_root),
-            registry=registry,
-            worker_name=worker_name,
-            route_role=task.role,
-            acceptance_criteria="managed dispatch preserves the existing task acceptance contract",
+            root=root, registry=registry, worker_name=worker_name, route_role=task.role,
+            acceptance_criteria=criteria,
         ).manifest
         validate_policy_preservation(original, replacement)
     except PolicyError as exc:
