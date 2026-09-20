@@ -2286,3 +2286,5 @@ body { padding-bottom: calc(var(--bottom-nav-h) + var(--sticky-h) + 16px); }
 .log-flag-error[data-flag]::after { background: color-mix(in srgb, var(--console-bg) 88%, #f87171); }
 .log-flag-warn[data-flag]::after { background: color-mix(in srgb, var(--console-bg) 90%, #fbbf24); }
 .agent-activity-log.wrap .log-line[data-flag]::after { display: none; }
+
+.quickstart-btn .quickstart-reason { display: block; margin-top: 6px; font-size: 12px; font-weight: 400; color: var(--muted); text-align: left; white-space: normal; overflow-wrap: anywhere; }

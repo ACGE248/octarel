@@ -314,3 +314,22 @@ test('system page separates runtime, repository, environment, services and diagn
   await expect(page.locator('#card-app-lifecycle #app-start')).toBeVisible();
   expect(await overflows(page)).toBe(false);
 });
+
+// 11 ------------------------------------------------------------- accepted task is not startable
+
+test('Quick Start shows why an already-accepted task cannot be started again', async ({ page }) => {
+  const reason = 'V1-08 was already implemented and accepted by run RB-x (every acceptance stage passed). Octarel will not start it again.';
+  await page.route('**/api/quickstart', async (route) => {
+    const options = await (await route.fetch()).json();
+    options[0] = { ...options[0], ready: false, unavailable_reason: reason, dependency_state: 'Blocked — already accepted; awaiting merge/reconciliation' };
+    await route.fulfill({ json: options });
+  });
+  await page.goto('/');
+  await navTo(page, 'view-runs');
+  const first = page.locator('#quickstart-row .quickstart-btn').first();
+  await expect(first.locator('.status-pill')).toHaveText('Needs setup', { timeout: 15000 });
+  await expect(first.locator('.quickstart-reason')).toContainText('already implemented and accepted');
+  await first.click();
+  await expect(page.locator('#prepared-run-start')).toBeDisabled();
+  await expect(page.locator('#prepared-run-feedback')).toContainText('will not start it again');
+});

@@ -161,6 +161,21 @@ def _completed_task_id(runbook: Runbook, tasks: list[DiscoveredTask]) -> str | N
     return None
 
 
+def accepted_run_for_task(state: State, project_id: str | None, task_id: str) -> Runbook | None:
+    """The accepted implementation run for ``task_id`` in this project, if any.
+
+    Accepted means an acceptance-pipeline run (implementation + review + test +
+    checkpoint + PR readiness all recorded) that finished SUCCEEDED and DONE. A
+    task source keeps listing such a task as eligible until its PR merges and its
+    ledger is reconciled, so callers use this to avoid presenting it as startable.
+    """
+
+    for other in state.list_runbooks(project_id=project_id):
+        if other.status == RUNBOOK_SUCCEEDED and other.acceptance_stage == "DONE" and _mentions(other, task_id):
+            return other
+    return None
+
+
 def _accepted_task_ids(state: State, project_id: str | None, tasks: list[DiscoveredTask]) -> set[str]:
     accepted: set[str] = set()
     for other in state.list_runbooks(project_id=project_id):

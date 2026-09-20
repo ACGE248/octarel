@@ -1716,7 +1716,7 @@ def create_app(
         `unavailable_reason` rather than a proposal that would fail later.
         """
 
-        return list_quickstart_options(ctx.project_root, project=ctx.selected_project)
+        return list_quickstart_options(ctx.project_root, project=ctx.selected_project, state=ctx.state, registry=ctx.registry)
 
     @app.get("/api/runbooks")
     def runbooks_list() -> list[dict[str, Any]]:
@@ -1817,6 +1817,8 @@ def create_app(
                 ctx.project_root,
                 str(proposal.args.get("key", "continue-video-editor")),
                 project=ctx.selected_project,
+                state=ctx.state,
+                registry=ctx.registry,
             )
             body["quickstart_option"] = option.as_dict()
         ctx.state.record_event(

@@ -509,7 +509,71 @@ def continue_next_task_option(project: Any, repo_root: Path) -> QuickStartOption
     )
 
 
-def resolve_quickstart_option(repo_root: Path, key: str, project: Any | None = None) -> QuickStartOption:
+def _routable_worker(state: State, registry: Registry, role: str, fallback: str) -> str:
+    """First worker on ``role``'s route that could actually run now (no API billing, enabled, healthy)."""
+
+    from .provider_state import ROUTABLE_STATES
+
+    try:
+        route = registry.route(role)
+    except Exception:  # noqa: BLE001 - an unknown role keeps the declared default
+        return fallback
+    known = {p.name: p for p in state.list_provider_states()}
+    for name in route:
+        worker = registry.workers.get(name)
+        if worker is None or not worker.enabled or worker.allow_api_billing or worker.cost_class == "optional-overflow":
+            continue
+        if not registry.repository_data_reuse_allowed(name):
+            continue
+        provider = known.get(name)
+        if known and (provider is None or not provider.configured or provider.state not in ROUTABLE_STATES):
+            continue
+        return name
+    return "(no routable worker)"
+
+
+def _apply_run_truth(option: QuickStartOption, *, project: Any | None, state: State | None, registry: Registry | None) -> QuickStartOption:
+    """Overlay what Octarel itself knows about this project's runs and routes.
+
+    Two truths the task source cannot supply: (1) the task may already have an
+    accepted implementation run that is only waiting on its PR/ledger, and (2) the
+    tester/reviewer shown must be workers that can actually run right now.
+    """
+
+    if state is None:
+        return option
+    from dataclasses import replace
+
+    changes: dict[str, Any] = {}
+    if option.action == "prepare" and option.task_id and option.unavailable_reason is None:
+        from .advancement import accepted_run_for_task
+
+        accepted = accepted_run_for_task(state, getattr(project, "project_id", None), option.task_id)
+        if accepted is not None:
+            changes.update(
+                unavailable_reason=(
+                    f"{option.task_id} was already implemented and accepted by run {accepted.id} (every acceptance "
+                    "stage passed). Its task source still lists it as eligible until its PR merges and the ledger is "
+                    "reconciled, so Octarel will not start it again. Merge or reconcile the existing branch/PR first."
+                ),
+                dependency_state="Blocked — already accepted; awaiting merge/reconciliation",
+                why_next=f"{option.task_id} is first in the ledger but already has accepted run {accepted.id}.",
+                checkpoint_pr_behavior="No new run is started for an accepted task; finish its existing PR instead.",
+            )
+    if registry is not None and option.action == "prepare":
+        changes["proposed_tester"] = _routable_worker(state, registry, "focused-tests", option.proposed_tester)
+        changes["proposed_reviewer"] = _routable_worker(state, registry, "diff-review", option.proposed_reviewer)
+    return replace(option, **changes) if changes else option
+
+
+def resolve_quickstart_option(
+    repo_root: Path, key: str, project: Any | None = None, *, state: State | None = None, registry: Registry | None = None
+) -> QuickStartOption:
+    option = _resolve_quickstart_option_base(repo_root, key, project)
+    return _apply_run_truth(option, project=project, state=state, registry=registry)
+
+
+def _resolve_quickstart_option_base(repo_root: Path, key: str, project: Any | None = None) -> QuickStartOption:
     if key == "continue-next-task":
         if project is None:
             raise QuickStartError("continue-next-task requires a selected project")
@@ -598,7 +662,9 @@ def resolve_quickstart_option(repo_root: Path, key: str, project: Any | None = N
     raise QuickStartError(f"unknown quickstart option {key!r}")
 
 
-def list_quickstart_options(repo_root: Path, project: Any | None = None) -> list[dict]:
+def list_quickstart_options(
+    repo_root: Path, project: Any | None = None, *, state: State | None = None, registry: Registry | None = None
+) -> list[dict]:
     """All Quick Start options the dashboard's Runs UI should offer today.
 
     OctaScene (or a legacy caller with no selected project) keeps the Video
@@ -623,7 +689,7 @@ def list_quickstart_options(repo_root: Path, project: Any | None = None) -> list
             "review-current-diff",
             "custom-run",
         )
-    return [resolve_quickstart_option(repo_root, key, project=project).as_dict() for key in keys]
+    return [resolve_quickstart_option(repo_root, key, project=project, state=state, registry=registry).as_dict() for key in keys]
 
 
 class QuickStartError(ValueError):
@@ -662,7 +728,7 @@ def start_quickstart_option(
     the production UI.
     """
 
-    option = resolve_quickstart_option(repo_root, key, project=project)
+    option = resolve_quickstart_option(repo_root, key, project=project, state=state, registry=registry)
     if option.action != "prepare":
         raise QuickStartError(f"quickstart option {key!r} must be configured in Advanced Settings")
     if option.unavailable_reason is not None:
@@ -711,7 +777,7 @@ def start_quickstart_option(
             provision_worktree(repo_root=repo_root, worktree=option.worktree, branch=option.branch)
         except ProvisioningError as exc:
             raise QuickStartError(f"could not provision a worktree for {key!r}: {exc}") from None
-        option = resolve_quickstart_option(repo_root, key, project=project)
+        option = resolve_quickstart_option(repo_root, key, project=project, state=state, registry=registry)
 
     from .runbooks import RunbookError, create_runbook, start_runbook
 

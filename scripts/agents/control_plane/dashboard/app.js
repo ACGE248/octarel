@@ -2940,6 +2940,10 @@
           text: option.ready ? "Ready" : "Needs setup",
         })
       );
+      // Say why it cannot start (e.g. the task is already accepted) right on the card.
+      if (!option.ready && option.unavailable_reason) {
+        btn.appendChild(el("span", { class: "quickstart-reason", text: option.unavailable_reason }));
+      }
       btn.addEventListener("click", () => {
         if (option.action === "advanced") {
           openAdvancedSettings();

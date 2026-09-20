@@ -532,7 +532,10 @@ test('Quick Start resolves the fixture ledger task and shows a ready Prepared Ru
   await expect(preparedRun).toContainText('V1-01');
   await expect(preparedRun).toContainText('Preferred implementer');
   await expect(preparedRun).toContainText('claude-code');
-  await expect(preparedRun).not.toContainText('antigravity-diff-review');
+  // The stale Custom Run form value (parent worker antigravity-diff-review) must not become the
+  // implementer. (That worker may legitimately appear as the *reviewer*: it is the first routable
+  // free diff-review route, so the check is on the implementer field, not the whole card.)
+  await expect(preparedRun).toContainText(/Preferred implementer\s*claude-code\s*Tester/);
   await expect(preparedRun).not.toContainText('Finish PR');
   await expect(preparedRun).toContainText('Standalone Video Editor');
   await expect(preparedRun).toContainText('Tester');
