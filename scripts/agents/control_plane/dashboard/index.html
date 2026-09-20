@@ -250,6 +250,7 @@
             <div>
               <h2 id="greeting-title">Good morning</h2>
               <p class="subtitle" id="greeting-sub">Your local development orchestrator is ready.</p>
+              <p class="overview-context" id="overview-context" aria-label="Controlled project"></p>
             </div>
           </div>
           <button type="button" id="run-overnight-btn" class="btn-secondary">
@@ -278,6 +279,26 @@
           </div>
           <button type="button" id="overview-continue-btn" class="btn-primary" disabled>Start Development</button>
         </section>
+
+        <div class="overview-focus">
+          <!-- OCTAREL-UI-02: current execution is the dominant Overview surface.
+               Populated by renderActiveWork() from the same /api/workflow +
+               /api/tasks truth the Live Workflow below uses. -->
+          <section class="card active-work-card" id="overview-active-work" aria-labelledby="active-work-title">
+            <div class="card-head tight">
+              <h2 id="active-work-title">Active Work</h2>
+              <span class="hint" id="active-work-state" role="status"></span>
+            </div>
+            <div id="active-work-body" class="active-work-body"></div>
+          </section>
+          <section class="card attention-card" id="overview-attention" aria-labelledby="overview-attention-title">
+            <div class="card-head tight">
+              <h2 id="overview-attention-title">Needs attention</h2>
+              <span class="hint" id="overview-attention-count" role="status"></span>
+            </div>
+            <ul id="overview-attention-list" class="attention-rows" aria-label="Items needing operator action"></ul>
+          </section>
+        </div>
 
         <div class="status-grid" id="status-grid">
           <article class="status-card" data-tone="running">
@@ -345,6 +366,8 @@
           <div id="overview-usage-snapshot" class="usage-snapshot-row"></div>
         </section>
 
+        <details class="disclosure overview-insights" open>
+        <summary>Insights <span class="hint">task status, activity, recent events</span></summary>
         <div class="overview-bottom">
           <section class="card" aria-labelledby="task-status-title">
             <h2 id="task-status-title">Task Status</h2>
@@ -362,6 +385,7 @@
             <ul id="recent-events" class="event-feed"></ul>
           </section>
         </div>
+        </details>
 
         <form id="overview-command-form" class="command-bar" aria-label="Steering command">
           <span class="command-bar-icon" aria-hidden="true">

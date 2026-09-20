@@ -133,6 +133,10 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('every actionable Control Center control is either baselined or explicitly exempt', async ({ page, request }) => {
+  // This test walks every view (mobile also opens the More sheet for each), which
+  // takes ~25-30s on a quiet machine. The default 30s test timeout made it fail
+  // spuriously under bounded-parallel matrix load; the assertions are unchanged.
+  test.setTimeout(120_000);
   // Discover against the seeded fixture, not leftover mutations from earlier
   // tests in this shared backend process (start/pause/stop runbooks).
   const reset = await request.post('/__fixture__/reset');

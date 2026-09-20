@@ -1,16 +1,22 @@
 {
   "view-overview": [
     "+ # more · not exposed by provider",
+    "Insights task status, activity, recent events",
     "Open Orchestrator details, #",
     "Open Review details, #",
+    "Open Testing & QA activity for Gemini Flash Lite",
+    "Open Testing & QA activity for Grok Build",
     "Open Testing & QA details, #",
+    "Open providers for Spend / quota issue",
+    "Open runs for Run needs attention",
+    "Open tasks for Task blocked",
     "Run Overnight",
     "Send",
     "Type a command… (e.g., /start, /status, /dry-run TASK-ID)",
     "View Active Run",
     "Workflow time range",
     "⑂Worktrees# active in this workflow",
-    "▤ENG-AGENT-#ENG-AGENT-##—",
+    "▤ENG-AGENT-#ENG-AGENT-#●#—",
     "◇Results# reported item"
   ],
   "view-runs": [
@@ -99,6 +105,7 @@
     "Cost-block grok-build-review",
     "Cost-block opencode#-gemini-flash-lite",
     "Cost-block opencode#-gemini-flash-lite-review",
+    "Details",
     "Disable antigravity-diff-review",
     "Disable antigravity-doc-drift",
     "Disable antigravity-focused-tests",
