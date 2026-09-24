@@ -420,6 +420,9 @@ def test_runbook_create_start_pause_resume_stop_round_trip(tmp_path, monkeypatch
 
     monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FakeProcess())
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+    # The fake worker is not a process this Supervisor owns, and it is genuinely live: stop must report
+    # STOPPING, not CANCELLED (a dead/no-PID task is cancelled immediately, see stop_runbook).
+    monkeypatch.setattr("scripts.agents.control_plane.runbooks.pid_is_alive", lambda pid: pid == FakeProcess.pid)
 
     ctx = CommandContext(state=state, registry=registry, scheduler=Scheduler(), supervisor=supervisor, repo_root=repo)
 

@@ -31,6 +31,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .graph_context import build_graph_context
 from .manifest import (
     RESULT_BLOCKED,
     RESULT_DRY_RUN,
@@ -115,6 +116,35 @@ def _agent_preset_block_reason(root: Path, command: list[str]) -> str | None:
     )
 
 
+def _dirty_paths(root: Path) -> list[str]:
+    """Repository-relative files changed against HEAD (tracked edits plus untracked files)."""
+
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=root, capture_output=True, check=True, timeout=60,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return []
+    entries = [os.fsdecode(e) for e in out.split(b"\0") if e]
+    return sorted({e[3:] for e in entries if len(e) > 3})
+
+
+def _attach_graph_context(
+    prompt: str, *, root: Path, seeds: list[str], project_id: str | None, policy_manifest: dict
+) -> str:
+    """Append the shared, advisory Graphify section (ENG-AO-01) and record its evidence.
+
+    One transport-neutral seam for every worker (Claude, Codex, OpenCode with any model,
+    native Grok, Antigravity): the section is plain prompt text after the policy bundle and
+    can never alter policy identity. ``root`` is always the selected checkout, not Octarel's cwd.
+    """
+
+    context = build_graph_context(root, [*seeds, *_dirty_paths(root)], project_id=project_id)
+    policy_manifest["graph_context"] = context.evidence
+    return prompt + context.text
+
+
 def run_delegation(
     *,
     registry: Registry,
@@ -138,6 +168,7 @@ def run_delegation(
     contract_paths: list[str] | None = None,
     workflow: str | None = None,
     fallback_reason: str | None = None,
+    project_id: str | None = None,
 ) -> DelegationResult:
     """Execute (or plan) a single delegated worker run and persist its manifest."""
 
@@ -206,7 +237,9 @@ def run_delegation(
     policy_manifest["actual_provider"] = worker.provider
     policy_manifest["actual_model"] = model or worker.default_model
     policy_manifest["actual_intensity"] = resolved_intensity
-    bounded_prompt = bundle.prompt + task_prompt
+    bounded_prompt = _attach_graph_context(
+        bundle.prompt, root=root, seeds=resolved_scopes, project_id=project_id, policy_manifest=policy_manifest
+    ) + task_prompt
     if include_diff:
         if not worker.is_read_only:
             raise ValidationError("--include-diff is limited to read-only workers")
@@ -413,6 +446,7 @@ def run_session(
     contract_paths: list[str] | None = None,
     workflow: str | None = None,
     fallback_reason: str | None = None,
+    project_id: str | None = None,
 ) -> DelegationResult:
     """Run one whole-worktree unattended session (ENG-AGENT-02-S5 runbooks).
 
@@ -465,7 +499,9 @@ def run_session(
     policy_manifest["actual_provider"] = worker.provider
     policy_manifest["actual_model"] = model or worker.default_model
     policy_manifest["actual_intensity"] = resolved_intensity
-    composed_prompt = bundle.prompt
+    composed_prompt = _attach_graph_context(
+        bundle.prompt, root=root, seeds=[], project_id=project_id, policy_manifest=policy_manifest
+    )
     command = worker.build_command(
         model=model, intensity=resolved_intensity, prompt=composed_prompt, permission_profile=permission_profile
     )
@@ -629,6 +665,7 @@ def _cmd_run(registry: Registry, args: argparse.Namespace) -> int:
             contract_paths=args.contract,
             workflow=args.workflow,
             fallback_reason=args.fallback_reason,
+            project_id=args.project_id,
         )
     except (ValidationError, RegistryError, PolicyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -662,6 +699,7 @@ def _cmd_session(registry: Registry, args: argparse.Namespace) -> int:
             contract_paths=args.contract,
             workflow=args.workflow,
             fallback_reason=args.fallback_reason,
+            project_id=args.project_id,
         )
     except (ValidationError, RegistryError, PolicyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -732,6 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--contract", action="append", default=[], help="bounded task/program/ADR contract path")
     p_run.add_argument("--workflow", default=None, help="canonical workflow override")
     p_run.add_argument("--fallback-reason", default=None, help="recorded fallback/escalation reason")
+    p_run.add_argument("--project-id", default=None, help="selected managed project id (graph-context cache identity)")
     p_run.add_argument(
         "prompt",
         nargs=argparse.REMAINDER,
@@ -756,6 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_session.add_argument("--contract", action="append", default=[], help="bounded task/program/ADR contract path")
     p_session.add_argument("--workflow", default=None, help="canonical workflow override")
     p_session.add_argument("--fallback-reason", default=None, help="recorded fallback/escalation reason")
+    p_session.add_argument("--project-id", default=None, help="selected managed project id (graph-context cache identity)")
     p_session.add_argument(
         "--permission-profile",
         default=PERMISSION_STANDARD,

@@ -61,6 +61,15 @@ it never widens to the registry route. The disabled Antigravity diff-review
 route therefore yields to the configured free
 `opencode2-gemini-flash-lite-review` route when that route is permitted.
 
+## Repository intelligence (Graphify)
+
+Every worker receives the same optional, advisory Graphify context through the normal bounded prompt/context
+bundle: Claude Code, Codex, Gemini through OpenCode or Antigravity, native Grok (`grok-build` /
+`grok-build-review`), and Grok/xAI (or any approved model) selected on an OpenCode worker. It is
+transport-neutral, so a model change never needs new Graphify code and never changes routing priority. It is
+local and deterministic (no API key, billing, or LLM enrichment), provider-native Graphify installers are not
+used, and provider policy files are never rewritten. Details: `scripts/agents/README.md`.
+
 ## Policy adapters
 
 Provider-specific execution notes live under `.agents/providers/`. Canonical
