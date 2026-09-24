@@ -75,6 +75,11 @@ COMMAND_TERMINAL_HISTORY_CLEAR = "terminal_history_clear"
 COMMAND_USAGE_OVERRIDE = "usage_override"
 COMMAND_MANAGED_DISPATCH = "managed_dispatch"
 COMMAND_SET_CONCURRENCY = "set_concurrency"
+COMMAND_OVERNIGHT_START = "overnight_start"
+COMMAND_OVERNIGHT_PAUSE = "overnight_pause"
+COMMAND_OVERNIGHT_RESUME = "overnight_resume"
+COMMAND_OVERNIGHT_STOP_AFTER_CURRENT = "overnight_stop_after_current"
+COMMAND_OVERNIGHT_STOP = "overnight_stop"
 
 ALL_COMMANDS = (
     COMMAND_ENQUEUE,
@@ -110,6 +115,11 @@ ALL_COMMANDS = (
     COMMAND_USAGE_OVERRIDE,
     COMMAND_MANAGED_DISPATCH,
     COMMAND_SET_CONCURRENCY,
+    COMMAND_OVERNIGHT_START,
+    COMMAND_OVERNIGHT_PAUSE,
+    COMMAND_OVERNIGHT_RESUME,
+    COMMAND_OVERNIGHT_STOP_AFTER_CURRENT,
+    COMMAND_OVERNIGHT_STOP,
 )
 
 
@@ -820,6 +830,73 @@ def cmd_git_operation(
     return CommandResult(ok=data.get("state") == "SUCCEEDED", message=str(data.get("message", data.get("state"))), data=data)
 
 
+def _overnight_command(ctx: CommandContext, fn: Callable[..., dict[str, Any]], session_id: str | None, message: str, **kw: Any) -> CommandResult:
+    """Run a session-control function. These only mutate the durable record; the daemon advances it."""
+
+    from .overnight import OvernightError, get_session, session_view
+
+    try:
+        target = get_session(ctx.state, session_id, ctx.selected_project_id)["session_id"]
+        session = fn(ctx.state, target, **kw)
+    except OvernightError as exc:
+        raise CommandError(str(exc)) from None
+    return CommandResult(ok=True, message=f"overnight session {session['session_id']}: {message}", data=session_view(ctx.state, session))
+
+
+def cmd_overnight_start(
+    ctx: CommandContext,
+    *,
+    duration: Any,
+    project_id: str | None = None,
+    max_tasks: int | None = None,
+    authorize_merge: bool = False,
+) -> CommandResult:
+    from .overnight import OvernightError, create_session, session_view
+
+    project_id = project_id or ctx.selected_project_id
+    if not project_id:
+        raise CommandError("no project selected; pass project_id")
+    try:
+        session = create_session(
+            ctx.state, project_id=project_id, duration=duration, max_tasks=max_tasks,
+            merge_authorized=bool(authorize_merge),
+        )
+    except OvernightError as exc:
+        raise CommandError(str(exc)) from None
+    return CommandResult(
+        ok=True,
+        message=(
+            f"overnight session {session['session_id']} started for {project_id} until {session['deadline_at']}; "
+            "the Octarel daemon (octarel run) performs the advancement"
+        ),
+        data=session_view(ctx.state, session),
+    )
+
+
+def cmd_overnight_pause(ctx: CommandContext, *, session_id: str | None = None) -> CommandResult:
+    from .overnight import pause_session
+
+    return _overnight_command(ctx, pause_session, session_id, "paused")
+
+
+def cmd_overnight_resume(ctx: CommandContext, *, session_id: str | None = None) -> CommandResult:
+    from .overnight import resume_session
+
+    return _overnight_command(ctx, resume_session, session_id, "resumed")
+
+
+def cmd_overnight_stop_after_current(ctx: CommandContext, *, session_id: str | None = None) -> CommandResult:
+    from .overnight import stop_after_current
+
+    return _overnight_command(ctx, stop_after_current, session_id, "will stop after the current task")
+
+
+def cmd_overnight_stop(ctx: CommandContext, *, session_id: str | None = None) -> CommandResult:
+    from .overnight import stop_now
+
+    return _overnight_command(ctx, stop_now, session_id, "stopped", supervisor=ctx.supervisor)
+
+
 def cmd_terminal_history_clear(ctx: CommandContext) -> CommandResult:
     ctx.state.clear_terminal_commands(project_id=ctx.selected_project_id)
     ctx.state.record_event(category="terminal", message="terminal command metadata cleared by operator")
@@ -861,6 +938,11 @@ _DISPATCH: dict[str, Callable[..., CommandResult]] = {
     COMMAND_USAGE_OVERRIDE: cmd_usage_override,
     COMMAND_MANAGED_DISPATCH: cmd_managed_dispatch,
     COMMAND_SET_CONCURRENCY: cmd_set_concurrency,
+    COMMAND_OVERNIGHT_START: cmd_overnight_start,
+    COMMAND_OVERNIGHT_PAUSE: cmd_overnight_pause,
+    COMMAND_OVERNIGHT_RESUME: cmd_overnight_resume,
+    COMMAND_OVERNIGHT_STOP_AFTER_CURRENT: cmd_overnight_stop_after_current,
+    COMMAND_OVERNIGHT_STOP: cmd_overnight_stop,
 }
 
 

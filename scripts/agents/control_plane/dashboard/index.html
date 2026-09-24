@@ -428,6 +428,33 @@
           <span class="hint" id="prepared-run-feedback" role="status"></span>
         </div>
 
+        <!-- ENG-AO-05: read model + controls for the durable overnight session. The Octarel daemon
+             (never this page) advances it; merge authorization is deliberately CLI/API-only. -->
+        <section class="card wide" id="card-overnight" aria-labelledby="overnight-title">
+          <div class="card-head">
+            <div>
+              <h2 id="overnight-title">Continuous Overnight Advancement</h2>
+              <p class="hint">The Octarel daemon advances the selected project one task at a time from its current repository truth. It never uses paid/API fallback. Keep this Mac awake; a daemon restart recovers safely.</p>
+            </div>
+            <span class="hint" id="overnight-state" role="status"></span>
+          </div>
+          <div id="overnight-body" class="kv"></div>
+          <form id="overnight-form" class="prepared-run-actions">
+            <label for="overnight-duration">Duration (hours)</label>
+            <input id="overnight-duration" aria-label="Overnight duration in hours" type="number" min="0.5" max="48" step="0.5" value="10" />
+            <label for="overnight-max-tasks">Max tasks</label>
+            <input id="overnight-max-tasks" aria-label="Overnight maximum accepted tasks" type="number" min="1" step="1" placeholder="optional" />
+            <button type="submit" id="overnight-start" class="btn-primary">Start</button>
+          </form>
+          <div class="prepared-run-actions" id="overnight-controls" hidden>
+            <button type="button" id="overnight-pause">Pause</button>
+            <button type="button" id="overnight-resume">Resume</button>
+            <button type="button" id="overnight-stop-after">Stop after current</button>
+            <button type="button" id="overnight-stop">Stop</button>
+          </div>
+          <span class="hint" id="overnight-feedback" role="status"></span>
+        </section>
+
         <details class="card wide" id="card-runbook-create">
           <summary><h2>Custom Run — independent manual configuration</h2></summary>
           <p class="hint"><strong>Separate from Quick Start.</strong> Values in this panel do not edit or affect the prepared Quick Start above. Use Custom Run only when you intentionally want full manual control over source reference, branch, worktree, worker, permissions, and stop conditions.</p>

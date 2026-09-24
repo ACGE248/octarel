@@ -44,6 +44,7 @@ DESTRUCTIVE_VERBS = frozenset(
         "provider_disable",
         "provider_drain",
         "provider_cost_block",
+        "overnight_stop",
     }
 )
 

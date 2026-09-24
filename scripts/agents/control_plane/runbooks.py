@@ -1743,9 +1743,14 @@ def reconcile_runbooks(
                         # OCTAREL-OPS-02: accepted work continues from the project's
                         # *current* repository truth; a failure here is recorded, never fatal.
                         try:
+                            from .overnight import owns_runbook
+
+                            # ENG-AO-05: a live overnight session gates the successor (bounds,
+                            # merge verification, one writer) itself, so never auto-start here.
                             advance_after_success(
                                 state=state, runbook=runbook, registry=registry,
                                 supervisor=supervisor, scheduler=scheduler,
+                                auto_start=False if owns_runbook(state, runbook) else None,
                             )
                         except Exception as exc:  # noqa: BLE001
                             state.record_event(

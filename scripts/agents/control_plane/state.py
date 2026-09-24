@@ -226,6 +226,15 @@ CREATE TABLE IF NOT EXISTS advancements (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS overnight_sessions (
+    session_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_projects_enabled ON projects (enabled, project_id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks (state);
@@ -1110,6 +1119,101 @@ class State:
     def _advancement_from_row(row: sqlite3.Row) -> dict[str, Any]:
         record = json.loads(row["payload"] or "{}")
         record["runbook_id"] = row["runbook_id"]
+        record["project_id"] = row["project_id"]
+        record["state"] = row["state"]
+        record["updated_at"] = row["updated_at"]
+        return record
+
+    # ------------------------------------------------- overnight sessions
+
+    @_serialized
+    def get_overnight_session(self, session_id: str) -> dict[str, Any] | None:
+        """Durable ENG-AO-05 continuous-advancement session (bounds, counters, stop reason)."""
+
+        row = self._conn.execute("SELECT * FROM overnight_sessions WHERE session_id = ?", (session_id,)).fetchone()
+        return self._overnight_from_row(row) if row else None
+
+    @_serialized
+    def upsert_overnight_session(self, record: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        self._conn.execute(
+            "INSERT INTO overnight_sessions (session_id, project_id, state, payload, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+            "state=excluded.state, payload=excluded.payload, updated_at=excluded.updated_at",
+            (record["session_id"], record["project_id"], record["state"], json.dumps(record, sort_keys=True), now, now),
+        )
+        self._conn.commit()
+
+    @_serialized
+    def insert_overnight_session_if_none_live(self, record: dict[str, Any], live_states: Iterable[str]) -> bool:
+        """Insert a new session unless its project already has a live one (atomic across processes)."""
+
+        states = tuple(live_states)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            marks = ",".join("?" for _ in states)
+            taken = self._conn.execute(
+                f"SELECT 1 FROM overnight_sessions WHERE project_id = ? AND state IN ({marks}) LIMIT 1",
+                (record["project_id"], *states),
+            ).fetchone()
+            if taken:
+                self._conn.rollback()
+                return False
+            now = utc_now_iso()
+            self._conn.execute(
+                "INSERT INTO overnight_sessions (session_id, project_id, state, payload, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (record["session_id"], record["project_id"], record["state"], json.dumps(record, sort_keys=True), now, now),
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return True
+
+    @_serialized
+    def mutate_overnight_session(
+        self, session_id: str, fn: Callable[[dict[str, Any]], dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Atomic read-modify-write of one session under a cross-process write lock.
+
+        The daemon and the dashboard/CLI are separate processes that both update a session;
+        ``BEGIN IMMEDIATE`` makes each update see the other's latest committed record, so an
+        operator's pause/stop can never be overwritten by a stale daemon copy (or vice versa).
+        ``fn`` may raise to abort; the transaction is rolled back and the error propagates.
+        """
+
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute("SELECT * FROM overnight_sessions WHERE session_id = ?", (session_id,)).fetchone()
+            if row is None:
+                self._conn.rollback()
+                return None
+            record = fn(self._overnight_from_row(row))
+            self._conn.execute(
+                "UPDATE overnight_sessions SET state = ?, payload = ?, updated_at = ? WHERE session_id = ?",
+                (record["state"], json.dumps(record, sort_keys=True), utc_now_iso(), session_id),
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return record
+
+    @_serialized
+    def list_overnight_sessions(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
+        if project_id is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM overnight_sessions WHERE project_id = ? ORDER BY created_at DESC, session_id", (project_id,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM overnight_sessions ORDER BY created_at DESC, session_id").fetchall()
+        return [self._overnight_from_row(row) for row in rows]
+
+    @staticmethod
+    def _overnight_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        record = json.loads(row["payload"] or "{}")
+        record["session_id"] = row["session_id"]
         record["project_id"] = row["project_id"]
         record["state"] = row["state"]
         record["updated_at"] = row["updated_at"]

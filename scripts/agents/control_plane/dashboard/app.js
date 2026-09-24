@@ -3467,6 +3467,103 @@
     document.getElementById("report-backdrop").addEventListener("click", close);
   }
 
+  // ENG-AO-05: durable overnight session read model + controls (the daemon advances it).
+  function overnightRemaining(seconds) {
+    const s = Math.max(0, Number(seconds) || 0);
+    return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+  }
+
+  function renderOvernight(payload) {
+    const session = payload && payload.current;
+    const body = document.getElementById("overnight-body");
+    body.innerHTML = "";
+    const live = !!session && ["ACTIVE", "PAUSED", "STOPPING"].includes(session.state);
+    document.getElementById("overnight-state").textContent = session ? session.state : "No session";
+    document.getElementById("overnight-form").hidden = live || !!(session && session.state === "STOPPED" && session.resumable);
+    document.getElementById("overnight-controls").hidden = !live;
+    document.getElementById("overnight-pause").hidden = !(session && session.state === "ACTIVE");
+    document.getElementById("overnight-resume").hidden = !(
+      session && (session.state === "PAUSED" || (session.state === "STOPPED" && session.resumable))
+    );
+    document.getElementById("overnight-stop-after").hidden = !live || session.state === "STOPPING";
+    if (session && session.state === "STOPPED" && session.resumable) {
+      document.getElementById("overnight-controls").hidden = false;
+      document.getElementById("overnight-pause").hidden = true;
+      document.getElementById("overnight-stop-after").hidden = true;
+      document.getElementById("overnight-stop").hidden = true;
+    } else {
+      document.getElementById("overnight-stop").hidden = !live;
+    }
+    if (!session) {
+      body.appendChild(el("div", { class: "hint", text: "No overnight session for this project." }));
+      return;
+    }
+    const rb = session.current_runbook;
+    const last = session.last_accepted;
+    const rows = [
+      ["Project", session.project_id],
+      ["State", session.state],
+      ["Started", session.started_at || "—"],
+      ["Deadline", session.deadline_at || "—"],
+      ["Time remaining", live ? overnightRemaining(session.time_remaining_seconds) : "—"],
+      ["Current task", session.current_task ? `${session.current_task.task_id} — ${session.current_task.title || ""}` : "—"],
+      ["Current runbook / stage", rb ? `${rb.id} · ${rb.status}${rb.stage ? " · " + rb.stage : ""}` : "—"],
+      ["Current provider", rb ? [rb.worker, rb.provider].filter(Boolean).join(" / ") || "—" : "—"],
+      ["Accepted tasks", String(session.accepted_count)],
+      ["Maximum tasks", session.max_tasks ? String(session.max_tasks) : "no limit"],
+      ["Last accepted task", last ? `${last.task_id || last.runbook_id}${last.merged ? " (merged)" : " (not merged)"}` : "—"],
+      ["Merge authorization", session.merge_authorized ? "authorized for this session" : "owner merges (not authorized)"],
+      ["Stop reason", session.stop_reason ? `${session.stop_kind}: ${session.stop_reason}` : "—"],
+      ["Next advancement", session.next_advancement || "—"],
+    ];
+    rows.forEach(([k, v]) => {
+      body.appendChild(el("div", { class: "k", text: k }));
+      body.appendChild(el("div", { text: String(v) }));
+    });
+  }
+
+  async function refreshOvernight() {
+    if (!document.getElementById("card-overnight")) return;
+    try {
+      renderOvernight(await getJSON("/api/overnight"));
+    } catch (err) {
+      document.getElementById("overnight-feedback").textContent = `Could not load overnight session: ${err.message}`;
+    }
+  }
+
+  async function overnightCommand(verb, payload, working) {
+    const feedback = document.getElementById("overnight-feedback");
+    feedback.textContent = working;
+    const result = await postCommand(verb, payload);
+    feedback.textContent =
+      result.ok && result.body && result.body.ok
+        ? result.body.message
+        : `Error: ${(result.body && (result.body.detail || result.body.message)) || "request failed"}`;
+    await refreshOvernight();
+  }
+
+  function initOvernightActions() {
+    document.getElementById("overnight-form").addEventListener("submit", (evt) => {
+      evt.preventDefault();
+      const payload = { duration: `${Number(document.getElementById("overnight-duration").value)}h` };
+      const max = document.getElementById("overnight-max-tasks").value;
+      if (max !== "") payload.max_tasks = Number(max);
+      overnightCommand("overnight_start", payload, "Starting…");
+    });
+    document.getElementById("overnight-pause").addEventListener("click", () => overnightCommand("overnight_pause", {}, "Pausing…"));
+    document.getElementById("overnight-resume").addEventListener("click", () => overnightCommand("overnight_resume", {}, "Resuming…"));
+    document
+      .getElementById("overnight-stop-after")
+      .addEventListener("click", () => overnightCommand("overnight_stop_after_current", {}, "Requesting stop after current…"));
+    document
+      .getElementById("overnight-stop")
+      .addEventListener("click", () =>
+        confirmAndRun("Stop the overnight session now and cancel its current run through safe process termination?", () =>
+          overnightCommand("overnight_stop", { confirm: true }, "Stopping…")
+        )
+      );
+  }
+
   async function refreshRunbooks() {
     const [presets, worktrees, models, runbooks] = await Promise.all([
       state.presets.length ? Promise.resolve(state.presets) : getJSON("/api/runbooks/presets"),
@@ -3483,6 +3580,7 @@
     badge.textContent = String(active);
     badge.hidden = active === 0;
     renderOverviewContinue(state.quickstart);
+    await refreshOvernight();
   }
 
   function initRunbookFormSubmit() {
@@ -4354,6 +4452,7 @@
   initRunbookFormSubmit();
   initRunOvernightButton();
   initPreparedRunActions();
+  initOvernightActions();
   initOverviewContinueAction();
   initTerminal();
   document.getElementById("usage-refresh-btn")?.addEventListener("click", () => refreshUsage(true));

@@ -6,6 +6,7 @@ All notable changes to Octarel are documented in this file.
 
 ### Added
 
+- ENG-AO-05: continuous overnight project advancement. A durable, daemon-advanced session (`octarel overnight start <project> --duration 10h [--max-tasks N]`, Runs-view card, `overnight_*` commands, `GET /api/overnight`) resolves each next eligible task from the managed project's current repository truth after every verified merge, runs one write-capable task at a time through the normal runbook/acceptance path, honours duration/task-limit/pause/stop-after-current bounds, survives daemon restart without duplicating work, never uses paid/API fallback, and merges only with explicit per-session authorization plus the project's `overnight_merge` capability (otherwise stops at owner action).
 - CPX-07 public-safety scanner, clean-room acceptance, and public-history snapshot helper
 - `octarel project`, `octarel providers`, `octarel public-safety`, and `octarel service canonicalize-state`
 - Maintained install, architecture, provider, release, state, and publication docs

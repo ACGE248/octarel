@@ -287,6 +287,60 @@ installed native CLI advance the *effective* model without a registry edit (`scr
 Limit: enumeration by the authenticated CLI is entitlement evidence, not a generation, so a model the CLI lists but the
 account cannot actually run is only discovered on first use (the run fails visibly; no API-key or paid fallback occurs).
 
+## Continuous overnight advancement (ENG-AO-05)
+
+A durable **overnight session** keeps advancing one managed project through its eligible tasks within explicit
+bounds. It is a wrapper over the existing Runbook / Quick Start / `advance_after_success` / acceptance /
+event machinery, not another queue: `scripts/agents/control_plane/overnight.py`, one `overnight_sessions` SQLite
+table, and `overnight` events in the ordinary event log.
+
+- **Start (AO or operator).** `python -m octarel overnight start <project> --duration 10h [--max-tasks 5]`
+  (project defaults to the selected one), the Runs view card, or `POST /api/commands/overnight_start`
+  (`{"duration": "10h", "max_tasks": 5, "project_id": "..."}`). Control: `overnight pause | resume |
+  stop-after-current | stop`, `overnight status`, `GET /api/overnight`. AO never builds branches/worktrees/runbooks:
+  the session resolves task, branch/worktree, runbook, provider and stages through the normal Quick Start path.
+- **Daemon is the authority.** `octarel run` (the daemon) calls `overnight.tick` every poll. The dashboard, API and
+  CLI only create/control the durable record; a session does nothing while no daemon runs.
+- **Current truth, never a list.** Nothing is planned in advance. Before every product task the daemon fetches, fast-
+  forwards a clean default-branch checkout, then resolves the next eligible task from the project's own current task
+  source with the same gates as `advance_after_success` (dependencies, owner decisions, stale/already-accepted, active
+  writer, provider route). If merged truth changed the order, the new truth wins.
+- **One writer.** At most one product runbook of the project is active. A foreign active runbook/write task (or a DRAFT this session left behind
+  by an interrupted start) stops the session (`active_writer_conflict`); a run is never adopted: the session only owns a runbook its own guarded start returned. A live run for the next task it cannot prove is its own (someone else's, or its own orphaned by a crash before the pointer was saved) is left running untouched and the session stops (`active_writer_conflict`), so a crash can never cause a takeover or a duplicate. Read-only reviewer/test stages and heavy jobs keep the normal scheduler caps;
+  the session never changes concurrency. While a session owns a runbook, generic `auto_advance` is suppressed so the
+  successor cannot start before bounds and merge are checked.
+- **Acceptance is not weakened.** A task counts only when its runbook is `SUCCEEDED` with acceptance stage `DONE`
+  and no failed stage (focused tests, independent review, exact-tree gate, checkpoint, PR readiness all ran in the
+  normal pipeline). `OWNER_ACTION_REQUIRED`, `BLOCKED`, `FAILED` and `CANCELLED` stop the session; there is no retry loop.
+- **Merge authorization.** Octarel never auto-merges by default. A session may merge only if the operator passes
+  `--authorize-merge` / `authorize_merge` for that session **and** the project opted in with capability
+  `overnight_merge=true`; the merge then uses the existing gated `prepare_merge` -> confirmed `merge` operations with all
+  their blockers, and must be verified in repository truth. Otherwise, after acceptance the session stops as
+  `owner_action_required` ("merge the PR, then resume"); `resume` re-checks truth and continues. The dashboard cannot
+  grant merge authorization.
+- **Bounds.** `--duration` (up to 48h) and optional `--max-tasks`; whichever is reached first ends the session
+  `COMPLETE` (`deadline_reached` / `task_limit_reached`). At the deadline no new task starts; a task already in flight is
+  never killed: the session goes `STOPPING` (`stop_requested=deadline`, recorded as an event) and finishes the task to
+  its normal checkpoint (through merge handling when authorized), then completes. (If the deadline elapses during the pre-task fetch, that one task may still begin and is run to its checkpoint.)
+- **States.** `ACTIVE`, `PAUSED` (holds counting, merge and next-task; the in-flight runbook is untouched),
+  `STOPPING` (stop-after-current or deadline), `STOPPED` (needs attention: `owner_action_required`, `merge_blocked`,
+  `blocking_failure`, `provider_unavailable`, `policy_blocked`, `project_unavailable`, `active_writer_conflict`,
+  `stale_repository_state` (the pre-task fetch/fast-forward failed, or the canonical checkout of a project with an `origin` is dirty or off its default branch and is left untouched: it never advances from stale truth),
+  `operator_stop`, `operator_cancelled`, `internal_error`), `COMPLETE` (`deadline_reached`, `task_limit_reached`,
+  `no_eligible_task`). `stop` (confirmed) cancels the current runbook through the existing owned-process termination.
+  Owner-action stops (awaiting merge, owner decision) are resumable while inside the deadline.
+- **Restart safety.** The session stores counters and pointers only (`session_id`, project + identity fingerprint,
+  start/deadline, `max_tasks`, `accepted_count`, `current_runbook_id`, `last_accepted`, stop reason, state). On daemon
+  start live sessions record a recovery event; a live runbook keeps its worker and is never relaunched, an accepted
+  task is not double-counted, and truth is refreshed before any further task. A project that is removed, disabled or
+  whose root/remote/default branch changed fails the session closed.
+- **No paid/API fallback.** The session names no provider and never touches billing switches; the route gate rejects
+  API-billing and optional-overflow workers, so an only-paid route stops the session `provider_unavailable`.
+  Graphify context (ENG-AO-01), Grok bot fan-out (ENG-AO-02), qualified free OpenCode reviewers (ENG-AO-03) and current
+  native model versions (ENG-AO-04) apply inside the normal runbooks exactly as without a session.
+- **macOS.** Octarel does not change power settings. Keep the Mac awake (for example `caffeinate -i` started by you)
+  for uninterrupted execution; if the daemon or machine restarts, restart `octarel run` and recovery continues safely.
+
 ## Worker registry (`workers.json`)
 
 Routing (cheapest capable worker first):

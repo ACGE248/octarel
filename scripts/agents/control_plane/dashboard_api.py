@@ -79,7 +79,7 @@ from .telemetry import (
 # Runbook lifecycle commands are destructive/state-changing exactly like their
 # task-level counterparts; the same client-tamper-proof confirm gate applies.
 RUNBOOK_DESTRUCTIVE_COMMANDS = frozenset({"runbook_stop", "runbook_stop_after_current"})
-CONFIRM_COMMANDS = frozenset({"terminal_history_clear", "usage_override"})
+CONFIRM_COMMANDS = frozenset({"terminal_history_clear", "usage_override", "overnight_stop"})
 
 DASHBOARD_DIR = Path(__file__).with_name("dashboard")
 DEFAULT_OCTASCENE_HOST = "127.0.0.1"
@@ -1835,6 +1835,17 @@ def create_app(
         """
 
         return list_quickstart_options(ctx.project_root, project=ctx.selected_project, state=ctx.state, registry=ctx.registry)
+
+    @app.get("/api/overnight")
+    def overnight_sessions() -> dict[str, Any]:
+        """Durable ENG-AO-05 sessions for the selected project (read-only; the daemon advances them)."""
+
+        from .overnight import list_views
+
+        project_id = ctx.selected_project_id
+        sessions = list_views(ctx.state, project_id) if project_id else []
+        live = next((s for s in sessions if s["state"] in {"ACTIVE", "PAUSED", "STOPPING"}), None)
+        return {"project_id": project_id, "current": live or (sessions[0] if sessions else None), "sessions": sessions[:10]}
 
     @app.get("/api/runbooks")
     def runbooks_list() -> list[dict[str, Any]]:
