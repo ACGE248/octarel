@@ -16,3 +16,13 @@ def _isolated_opencode_model_catalog(tmp_path, monkeypatch):
 
     monkeypatch.setattr(model_catalog, "opencode_state_dir", lambda: tmp_path / "opencode-models-state")
     monkeypatch.setattr(model_catalog, "OPENCODE_BIN", "opencode-not-installed-under-test")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_native_model_state(tmp_path, monkeypatch):
+    """ENG-AO-04: no test may read or write the real native-model cache or spawn the real ``grok``/``codex``."""
+
+    from scripts.agents import native_models
+
+    monkeypatch.setattr(native_models, "state_dir", lambda: tmp_path / "native-models-state")
+    monkeypatch.setattr(native_models, "_which", lambda _binary: None)

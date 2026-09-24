@@ -427,7 +427,7 @@ def run_fanout(
             "scope": scope,
             "worker": bot.name,
             "provider": bot.provider,
-            "model": model or bot.default_model,
+            "model": model or bot.effective_model,
             "intensity": resolved_intensity,
             "read_only": True,
             "attempts": 1,
@@ -475,7 +475,7 @@ def run_fanout(
     def _failed_record(index: int, role: BotRole, result: str, reason: str, category: str) -> dict[str, Any]:
         return {
             "id": f"bot-{index}-{role.key}", "role": role.key, "title": role.title, "focus": role.focus,
-            "scope": scope, "worker": bot.name, "provider": bot.provider, "model": model or bot.default_model,
+            "scope": scope, "worker": bot.name, "provider": bot.provider, "model": model or bot.effective_model,
             "intensity": resolved_intensity, "read_only": True, "attempts": 1, "retries": 0,
             "graph_context": {"supplied": False, "status": None, "reason": None, "focus": role.focus,
                               "context_characters": 0},

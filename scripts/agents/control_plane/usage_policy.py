@@ -161,7 +161,7 @@ def route_for_role(*, registry, provider_states: Mapping[str, object], role: str
                                "; ".join(blocked) or "no configured route", (), False)
     selected = registry.get(candidates[0])
     return RoutingDecision(
-        role, classification, selected.name, selected.provider, selected.default_model,
+        role, classification, selected.name, selected.provider, selected.effective_model,
         selected.default_intensity, f"first eligible worker for role {role}", tuple(candidates[1:]),
         selected.provider == "OpenAI" or selected.name.startswith("codex"),
     )

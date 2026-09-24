@@ -178,6 +178,9 @@ class Worker:
     # ENG-AO-03: name of a runtime model pool (``scripts/agents/model_catalog.py``) that supplies this read-only worker's
     # model.  Empty for every configured worker, whose ``default_model`` stays authoritative.
     model_pool: str = ""
+    # ENG-AO-04: native CLI family (``grok`` / ``codex``) whose verified newer model may replace ``default_model``
+    # (``scripts/agents/native_models.py``).  ``default_model`` stays the last verified baseline; empty = never advances.
+    native_model_family: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -187,6 +190,22 @@ class Worker:
     @property
     def is_read_only(self) -> bool:
         return self.capability == READ_ONLY_CAPABILITY
+
+    @property
+    def effective_model(self) -> str:
+        """The model a run uses when none is requested: the verified native model, else ``default_model``.
+
+        Cache-only (no subprocess); worker identity, role, permissions, and routing are unaffected by it.
+        """
+
+        if not self.native_model_family:
+            return self.default_model
+        from . import native_models
+
+        return native_models.effective_model(
+            self.native_model_family, self.default_model, worker=self.name,
+            shape=native_models.shape_hash(native_models.WorkerShape.of(self)),
+        )
 
     def cli_available(self) -> bool:
         return shutil.which(self.cli_bin) is not None
@@ -372,7 +391,7 @@ class Worker:
         interactive-shaped default.
         """
 
-        resolved_model = model or self.default_model
+        resolved_model = model or self.effective_model
         if self.model_pool and not model:
             raise RegistryError(f"worker {self.name!r} draws its model from pool {self.model_pool!r}; resolve one first")
         if permission_profile == PERMISSION_STANDARD:
@@ -431,6 +450,7 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             launch_probe_success_pattern=launch_probe_raw.get("success_pattern"),
             subagents=dict(data.get("subagents") or {}),
             model_pool=str(data.get("model_pool") or ""),
+            native_model_family=str(data.get("native_model_family") or ""),
             raw=data,
         )
     except KeyError as exc:  # pragma: no cover - guarded by test_registry_is_well_formed
@@ -510,6 +530,11 @@ def load_registry(path: Path | None = None) -> Registry:
             raise RegistryError(f"write-capable worker {worker.name!r} must require worktree isolation")
         if worker.allow_api_billing:
             raise RegistryError(f"worker {worker.name!r} may not enable API billing")
+        if worker.native_model_family:
+            from . import native_models
+
+            if not native_models.known_family(worker.native_model_family) or worker.model_pool:
+                raise RegistryError(f"worker {worker.name!r} has an invalid native_model_family")
         if worker.model_pool and not worker.is_read_only:
             raise RegistryError(f"dynamic-model worker {worker.name!r} must be read-only")
     from .subagents import validate_subagent_configs

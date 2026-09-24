@@ -74,6 +74,17 @@ transport-neutral, so a model change never needs new Graphify code and never cha
 local and deterministic (no API key, billing, or LLM enrichment), provider-native Graphify installers are not
 used, and provider policy files are never rewritten. Details: `scripts/agents/README.md`.
 
+## Native model freshness (Grok / Codex)
+
+Native Grok and Codex workers keep stable identities and routing; their configured `default_model` is the last
+verified baseline, and the installed native CLI may advance the effective model to a strictly newer same-tier model it
+enumerates itself, but only when the existing subscription/session is authenticated and the worker flags and
+read-only/worktree permission shape still verify (`python -m scripts.agents.native_models refresh|list`,
+`GET /api/native-models`). Otherwise the configured model is retained with the reason recorded. OpenCode labels are
+hints only, a different tier (for example `gpt-6-astra`) is never adopted by freshness, and no API key, paid, or
+premium route is involved. Details: `scripts/agents/README.md`, `.agents/providers/GROK.md`,
+`.agents/providers/CODEX_OPENAI.md`.
+
 ## Dynamic OpenCode models (free fallback)
 
 `opencode-free-review` / `opencode-free-tests` take their model from the installed OpenCode's current catalog rather

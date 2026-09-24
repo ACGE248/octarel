@@ -245,6 +245,48 @@ opencode models --verbose + providers list  ->  classify cost/auth + capability 
 Deferred: promoting subscription-backed OpenCode models (for example OpenCode+xAI) to an automatic route needs its own
 explicit authorization mapping; discovered models are never write-capable.
 
+## Native Grok/Codex model freshness (ENG-AO-04)
+
+`grok-build*` and `codex-*` keep stable identities, roles, permissions, and routing. Their `default_model`
+(`grok-4.6`, `gpt-5.6-sol`) is the **last verified baseline**; `native_model_family` (`grok` / `codex`) lets the
+installed native CLI advance the *effective* model without a registry edit (`scripts/agents/native_models.py`):
+
+    native CLI -> local enumeration -> candidate -> compatibility verification -> verified record -> effective model
+
+- **Enumeration** uses only local, non-billable commands: `--version`, `--help`, `grok models`,
+  `codex login status`, `codex debug models`. No prompt or generation is ever sent (`probe: "none"`), and API-key
+  variables are stripped from the child environment so the answer describes the existing subscription/session only.
+- **Candidate** = the newest *strictly newer, same-tier* model the CLI itself enumerates (`grok-4.6` -> `grok-4.7`;
+  `gpt-5.6-sol` -> a newer `gpt-N-sol`). Variant ids such as `-build-fast` are ignored, and newer models of another
+  tier (for example `gpt-6-astra`) are reported (`newer_other_tier`) but never adopted: choosing a stronger tier is
+  routing policy, not freshness.
+- **Verified** only when the session is authenticated (Grok: `grok models` confirms a logged-in session; Codex:
+  `codex login status` exits 0 and reports the ChatGPT subscription session; negated phrases and API-key modes are
+  ineligible), every flag in every worker template of the family is still documented by the CLI's `--help`, and each
+  route still carries exactly its required guards (review: read-only sandbox, plus plan mode for Grok; implementation: its
+  worktree sandbox, default permission mode, and isolated worktree; Grok: `--no-subagents`, web search off) with no
+  conflicting later value and no write or approval-bypass flag.
+- **Otherwise the configured model stays in force** and the reason is recorded (`unverified` / `unavailable`: CLI
+  missing, unauthenticated, malformed or incomplete listing, missing flag, stale configured model). Nothing raises into
+  AO startup, and the previous verified model is never removed because a newer one exists.
+- **OpenCode is not native truth.** Newer OpenCode labels ("Grok 4.7", "GPT-6 Sol") are recorded as `opencode_hints`
+  only; the native identifier is whatever the native CLI enumerates. #7's free reviewer fallback is untouched.
+- **Where it applies.** `Worker.effective_model` is the verified model when a valid record exists, else `default_model`;
+  it feeds command building, run/session planning, `grok-build-bot` (so `grok-build-bots` bots inherit the verified Grok
+  model), and status/dashboard rows. An explicit `--model` still wins. Every live `run`/`session` re-verifies the family
+  first (CLI version, sign-in state, model list, flags, permission shape), so a logged-out or API-key session can never
+  ride a cached advance; managed admission may reuse a record up to five minutes old (invalidated by a changed CLI
+  `--version`, configured default, or worker shape). A dry run and the dashboard only read the cache, and a cached
+  advance is ignored for a worker whose flags/permissions changed since verification or once older than seven days.
+- **Evidence.** Each run manifest's `policy_manifest.actual_model` is the model actually requested, and
+  `policy_manifest.model_freshness` records provider, configured default, actual/effective model, candidate, last
+  verified model, status, reason, CLI version, verification timestamp, and fingerprint. No second history exists.
+- **Operate.** `python -m scripts.agents.native_models refresh|list`; `GET /api/native-models` (read-only, never runs a
+  CLI); `/api/models` rows carry `effective_model` and `native_model_family`.
+
+Limit: enumeration by the authenticated CLI is entitlement evidence, not a generation, so a model the CLI lists but the
+account cannot actually run is only discovered on first use (the run fails visibly; no API-key or paid fallback occurs).
+
 ## Worker registry (`workers.json`)
 
 Routing (cheapest capable worker first):

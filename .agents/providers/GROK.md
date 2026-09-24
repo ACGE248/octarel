@@ -14,6 +14,12 @@ the primary. A failed bot is recorded once and never retried or escalated to a s
 assistance, not independent review: provider-diverse review remains a separate stage. Subscription/OIDC
 session only; no API-key or paid fallback.
 
+Native model freshness (ENG-AO-04): `grok-4.6` in `workers.json` is the last verified baseline. AO may advance the
+effective model of every Grok route (including `grok-build-bots` and its bots) to a strictly newer `grok-N.M` that
+`grok models` itself lists, only for an authenticated existing CLI session with unchanged flags and permission shape;
+otherwise the baseline stays. A newer model never changes routing priority, permissions, or cost policy, and OpenCode
+labels are hints, not native identifiers.
+
 Configured xAI development workers are persistently pre-authorized for minimized, redacted,
 task-relevant Octarel and selected managed-project repository-data reuse without repeated per-task consent. This does not waive
 authentication, health, role/capability, permission-profile, worktree/write-lock, cost/concurrency,
