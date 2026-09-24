@@ -113,6 +113,40 @@ See [`docs/engineering/ENG-AGENT-10.md`](../../docs/engineering/ENG-AGENT-10.md)
   violation.
 - **Never in CI.** No GitHub workflow invokes this tooling or any worker CLI.
 
+## Graphify repository intelligence (optional, ENG-AO-01)
+
+`scripts/agents/graph_context.py` is one generic, optional adapter that gives every worker the same
+bounded, graph-derived code context. It is **derived, advisory context only**; it never becomes a source of
+task status, policy, roadmap, ADRs, validation, or exact-tree acceptance. Truth precedence is always:
+(1) the current managed-project source tree, (2) the managed project's AGENTS/policy and maintained docs,
+(3) task/program/ADR contracts, (4) Graphify context, (5) agent inference.
+
+- **Optional.** Detected locally (`graphify` on `PATH`, or `OCTAREL_GRAPHIFY_BIN`); never auto-installed;
+  `OCTAREL_GRAPHIFY=off` disables it. Absent, stale, or failing Graphify only records a reason
+  (`unavailable`, `stale`, `skipped`, `failed-safe`) and AO proceeds with ordinary repository inspection.
+- **Local and free.** Only the deterministic AST `graphify update` verb runs, with provider/API credential
+  variables scrubbed from its environment. No API billing, LLM or semantic enrichment, or premium
+  infrastructure; Graphify's own provider installers/hooks are never run, so no `AGENTS.md`, `CLAUDE.md`,
+  provider policy, or `.opencode` file is written.
+- **Selected project only.** The graph is built from the explicit selected checkout/worktree (never Octarel's
+  cwd) using a snapshot of its non-sensitive files kept under Octarel state
+  (`<state dir>/graph-context/<project>/<worktree>/<tree>/`, gitignored, `OCTAREL_STATE_DIR` aware). Secret
+  paths (`.env`, `data/`, credentials, keys, ...) are excluded before Graphify sees them; nothing is written
+  into the managed repository.
+- **Freshness.** A cache is used only when project, repository, worktree, and content-tree identity all
+  match. A changed tree is refreshed deterministically (`refreshed`); if it cannot be, the graph is skipped
+  (`stale`) and the reason recorded. Graph nodes naming files missing from the current tree are dropped.
+- **Delivery.** `orchestrate.run_delegation` and `run_session` append one bounded (~6 KB), redacted,
+  clearly-labelled advisory section after the composed policy bundle. It is plain prompt text, so Claude Code,
+  Codex, Gemini through OpenCode/Antigravity, native Grok (`grok-build`, `grok-build-review`), and Grok/xAI (or
+  any future approved model) launched through OpenCode receive byte-identical context; there is no
+  per-provider implementation and routing preference is unchanged. It never alters the preserved policy
+  identity used for provider fallback.
+- **Evidence.** The status, reason, tree/worktree/project keys, sizes, and `authoritative: false` are recorded
+  in the run manifest under `policy_manifest.graph_context`.
+- **Exact-tree acceptance** (`scripts/ci/local_gate.py`) never reads graph data; it verifies the real
+  candidate tree.
+
 ## Worker registry (`workers.json`)
 
 Routing (cheapest capable worker first):

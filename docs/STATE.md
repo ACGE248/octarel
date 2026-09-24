@@ -18,6 +18,9 @@ operations, project registry. Not product databases, not managed-repo files.
 Rows that belong to a project carry `project_id`. Switching projects does not
 rewrite another project's history.
 
+Graphify cache (optional, derived): `<state dir>/graph-context/<project>/<worktree>/<tree>/`. It is
+disposable; delete it freely. It is never a source of task or repository truth.
+
 ## Backup
 
 Copy the state directory after a SQLite checkpoint, or use:

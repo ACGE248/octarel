@@ -48,6 +48,15 @@ command.
 
 `code_root_equals_selected_project` must be false in normal operation.
 
+## Graphify repository intelligence
+
+Octarel can optionally pass bounded, tree-matched Graphify code-graph context (symbols, imports,
+dependents, callers/callees, likely tests) to workers as an advisory section of the normal context bundle.
+Graphify is derived data below the managed project's source tree, policy/docs, and task contracts; it is
+cached under Octarel state keyed by project + worktree + content tree, never inside the managed repository,
+and never used by the exact-tree gate. Absent or stale Graphify degrades to normal repository inspection.
+See `scripts/agents/README.md` (Graphify repository intelligence) for the contract.
+
 ## Runtime polling and process ownership
 
 The Control Center keeps active task/run state live while caching expensive
