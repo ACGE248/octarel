@@ -79,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
     p_canon.add_argument("--to", dest="destination", default=None)
     p_canon.add_argument("--dry-run", action="store_true")
 
+    p_daemon = sub.add_parser("daemon", help="unattended orchestrator daemon: start (detached)/status/stop")
+    p_daemon.add_argument("daemon_cmd", choices=["start", "status", "stop"])
+
     p_proj = sub.add_parser("project", help="list/add/select/remove managed repositories")
     proj_sub = p_proj.add_subparsers(dest="project_cmd", required=True)
     proj_sub.add_parser("list", help="print registered projects")
@@ -116,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_health()
     if args.cmd == "service":
         return _cmd_service(args)
+    if args.cmd == "daemon":
+        return _cmd_daemon(args)
     if args.cmd == "project":
         return _cmd_project(args)
     if args.cmd == "providers":
@@ -192,6 +197,38 @@ def _cmd_cutover(args: argparse.Namespace) -> int:
         print(report.as_text())
         return 0 if report.ok else 1
     return 2
+
+
+def _cmd_daemon(args: argparse.Namespace) -> int:
+    from scripts.agents.control_plane.service import (
+        DaemonError,
+        daemon_log_path,
+        daemon_status,
+        start_daemon,
+        stop_daemon,
+    )
+
+    root = _octarel_root()
+    state_dir = _default_state_dir()
+    if args.daemon_cmd == "start":
+        try:
+            pid = start_daemon(root, state_dir)
+        except DaemonError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"started pid={pid}")
+        print(f"log={daemon_log_path(state_dir)}")
+        return 0
+    if args.daemon_cmd == "stop":
+        pid = stop_daemon(state_dir)
+        print(f"stopped pid={pid}" if pid else "daemon not running")
+        return 0
+    status = daemon_status(state_dir)
+    print(f"state={status['state']}")
+    print(f"pid={status.get('pid') or ''}")
+    print(f"code_root={root}")
+    print(f"log={daemon_log_path(state_dir)}")
+    return 0 if status["state"] == "RUNNING" else 1
 
 
 def _cmd_service(args: argparse.Namespace) -> int:

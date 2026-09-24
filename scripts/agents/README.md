@@ -340,6 +340,15 @@ table, and `overnight` events in the ordinary event log.
   native model versions (ENG-AO-04) apply inside the normal runbooks exactly as without a session.
 - **macOS.** Octarel does not change power settings. Keep the Mac awake (for example `caffeinate -i` started by you)
   for uninterrupted execution; if the daemon or machine restarts, restart `octarel run` and recovery continues safely.
+- **Unattended daemon launch (ENG-AO-06).** Start the daemon with `octarel daemon start` (also `daemon status` /
+  `daemon stop`), never `nohup octarel run &` from an interactive terminal: a terminal-attached daemon can be
+  suspended by shell job control (state `T`) and then silently stops advancing every session. `daemon start` runs
+  `octarel run` in its own session with no stdin and no controlling terminal, logging unbuffered to
+  `.orchestrator-state/daemon.log` and recording `.orchestrator-state/daemon.pid`. It refuses a second daemon, a
+  non-canonical state directory, and reports a suspended daemon as `SUSPENDED` (`daemon stop` resumes then stops it).
+  `octarel run` also ignores SIGTTIN/SIGTTOU. Provider CLI probes (`claude auth status`, `codex login status`, the
+  launch probe, telemetry) all go through `scripts/agents/probe.py`: closed stdin, own session, hard timeout;
+  a timeout is a deterministic "could not probe" (launch error) and never enables an API/paid route.
 
 ## Worker registry (`workers.json`)
 

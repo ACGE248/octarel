@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.agents.probe import run_probe
 from scripts.ci.runtime_paths import has_non_runtime_changes
 
 # ------------------------------------------------------------------ tokens
@@ -327,13 +328,7 @@ def claude_account_facts(*, timeout: float = 5.0) -> list[AccountFact]:
 
     worker = "claude-code"
     try:
-        result = subprocess.run(
-            ["claude", "auth", "status", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        result = run_probe(["claude", "auth", "status", "--json"], timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return [_not_exposed(worker, "subscription_type")]
 

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .probe import run_probe
+
 REGISTRY_PATH = Path(__file__).with_name("workers.json")
 
 WRITE_CAPABILITIES = frozenset({"write", "focused-edit"})
@@ -231,13 +233,7 @@ class Worker:
         if not self.cli_available():
             return AuthCheckResult.LAUNCH_ERROR
         try:
-            result = subprocess.run(
-                [self.cli_bin, *self.auth_check_args],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            result = run_probe([self.cli_bin, *self.auth_check_args], timeout=timeout)
         except (OSError, subprocess.SubprocessError):
             return AuthCheckResult.LAUNCH_ERROR
         combined = f"{result.stdout}\n{result.stderr}".lower()
@@ -298,13 +294,7 @@ class Worker:
         if not self.cli_available():
             return False
         try:
-            result = subprocess.run(
-                [self.cli_bin, *self.launch_probe_args],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            result = run_probe([self.cli_bin, *self.launch_probe_args], timeout=timeout)
         except (OSError, subprocess.SubprocessError):
             return False
         if result.returncode != 0 or not self.launch_probe_success_pattern:
