@@ -48,6 +48,14 @@ command.
 
 `code_root_equals_selected_project` must be false in normal operation.
 
+## Controlled Grok bot fan-out
+
+For complex work AO can explicitly select `grok-build-bots`: AO runs a bounded (max 3), one-level, read-only,
+parallel set of `grok-build-bot` workers inside the primary's checkout write lock, each with a scoped Graphify
+slice, then starts the single write-capable primary with their findings. Evidence lives in the ordinary run
+manifest (`policy_manifest.bot_fanout`) and the existing dashboard `subagents` field. See
+`scripts/agents/README.md` (Controlled Grok bot fan-out).
+
 ## Graphify repository intelligence
 
 Octarel can optionally pass bounded, tree-matched Graphify code-graph context (symbols, imports,

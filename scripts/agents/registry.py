@@ -172,6 +172,9 @@ class Worker:
     # See ``availability_reason`` for when this actually fires.
     launch_probe_args: tuple[str, ...] = ()
     launch_probe_success_pattern: str | None = None
+    # ENG-AO-02: explicit, AO-orchestrated read-only bot fan-out policy for a write-capable primary
+    # (empty for every ordinary worker, including ``grok-build``).  See ``scripts/agents/subagents.py``.
+    subagents: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -421,6 +424,7 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             auth_check_success_pattern=auth_check_raw.get("success_pattern"),
             launch_probe_args=tuple(launch_probe_raw.get("args", ())),
             launch_probe_success_pattern=launch_probe_raw.get("success_pattern"),
+            subagents=dict(data.get("subagents") or {}),
             raw=data,
         )
     except KeyError as exc:  # pragma: no cover - guarded by test_registry_is_well_formed
@@ -500,6 +504,9 @@ def load_registry(path: Path | None = None) -> Registry:
             raise RegistryError(f"write-capable worker {worker.name!r} must require worktree isolation")
         if worker.allow_api_billing:
             raise RegistryError(f"worker {worker.name!r} may not enable API billing")
+    from .subagents import validate_subagent_configs
+
+    validate_subagent_configs(workers)
     known_providers = {worker.provider for worker in workers.values()}
     for provider, mode in provider_authorizations.items():
         if provider not in known_providers:

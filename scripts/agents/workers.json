@@ -13,7 +13,9 @@
     "impact-search": ["antigravity-impact-search", "opencode2-gemini-flash-lite"],
     "doc-drift-review": ["antigravity-doc-drift"],
     "diff-review": ["antigravity-diff-review", "opencode2-gemini-flash-lite-review", "grok-build-review", "codex-review"],
-    "overflow": ["deepseek-overflow"]
+    "overflow": ["deepseek-overflow"],
+    "bot-implementation": ["grok-build-bots"],
+    "bot-investigation": ["grok-build-bot"]
   },
   "workers": {
     "claude-code": {
@@ -124,6 +126,43 @@
       },
       "notes": "Secondary implementation when configured. Uses normal permission prompts plus a sandbox, never auto-approval. Write runs require --allow-write and a dedicated worktree."
     },
+    "grok-build-bots": {
+      "display_name": "Grok Build Bots",
+      "description": "Explicitly selected Grok primary that may first receive findings from a bounded, AO-run, read-only Grok bot fan-out for complex work.",
+      "best_for": ["Serious integration", "Hard debugging", "Architecture/high-risk investigation", "Broad impact analysis"],
+      "execution_system": "Grok Build",
+      "provider": "xAI",
+      "default_model": "grok-4.6",
+      "default_intensity": "medium",
+      "capability": "write",
+      "cost_class": "metered-configured",
+      "allowed_policy_roles": ["IMPLEMENTER"],
+      "provider_policy": ".agents/providers/GROK.md",
+      "auth_mode": "configured-cli-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": true,
+      "roles": ["bot-implementation"],
+      "subagents": {
+        "mode": "ao-orchestrated",
+        "transport": "grok-cli",
+        "bot_worker": "grok-build-bot",
+        "max_bots": 3,
+        "levels": 1,
+        "bot_timeout_seconds": 600,
+        "eligible_task_classes": ["serious-integration", "hard-debugging", "architecture-high-risk"]
+      },
+      "cli": {
+        "bin": "grok",
+        "version_args": ["--version"],
+        "template": [
+          "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
+          "--reasoning-effort", "{intensity}", "--permission-mode", "default",
+          "--sandbox", "work-tree", "--no-subagents", "--disable-web-search"
+        ]
+      },
+      "notes": "Separate, never-automatic route (ENG-AO-02). The primary is the only writer and keeps --no-subagents: AO, not the model, runs at most max_bots one-level read-only bots (grok-build-bot) before the primary starts, so count, scope, timeout, evidence, and read-only enforcement stay deterministic. Bot output is assistance, not independent review. Subscription/OIDC session only; no API-key fallback. grok-build and grok-build-review are unchanged."
+    },
     "grok-build-review": {
       "display_name": "Grok Build Review",
       "description": "Read-only xAI reviewer for bounded code, integration, and documentation diffs.",
@@ -151,6 +190,34 @@
         ]
       },
       "notes": "Independent bounded read-only review through Grok Build. Plan+sandbox, no subagents, and web access disabled."
+    },
+    "grok-build-bot": {
+      "display_name": "Grok Build Bot",
+      "description": "Read-only, non-recursive Grok bot for one bounded parallel investigation scope (dependency, tests, or UI/API/docs impact).",
+      "best_for": ["Blast-radius inspection", "Regression-test discovery", "UI/API/documentation impact"],
+      "execution_system": "Grok Build",
+      "provider": "xAI",
+      "default_model": "grok-4.6",
+      "default_intensity": "medium",
+      "capability": "read-only",
+      "cost_class": "metered-configured",
+      "allowed_policy_roles": ["RESEARCHER"],
+      "provider_policy": ".agents/providers/GROK.md",
+      "auth_mode": "configured-cli-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["bot-investigation"],
+      "cli": {
+        "bin": "grok",
+        "version_args": ["--version"],
+        "template": [
+          "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
+          "--reasoning-effort", "{intensity}", "--permission-mode", "plan",
+          "--sandbox", "read-only", "--no-subagents", "--disable-web-search"
+        ]
+      },
+      "notes": "Launched only by AO bot fan-out for a grok-build-bots run; never a normal route. Plan mode plus read-only sandbox, no subagents (a bot cannot fan out further), web disabled. A working-tree change during the fan-out is a contract violation that blocks the primary. Not an independent reviewer."
     },
     "codex-review": {
       "display_name": "Codex Review",

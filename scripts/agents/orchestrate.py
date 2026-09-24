@@ -31,6 +31,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import subagents
 from .graph_context import build_graph_context
 from .manifest import (
     RESULT_BLOCKED,
@@ -145,6 +146,134 @@ def _attach_graph_context(
     return prompt + context.text
 
 
+def _plan_bots(
+    *,
+    registry: Registry,
+    root: Path,
+    worker,
+    task_class: str | None,
+    scope_paths: list[str],
+    objective: str,
+    contract_paths: list[str] | None,
+    policy_manifest: dict,
+) -> tuple[subagents.FanoutPlan | None, str]:
+    """Deterministic ENG-AO-02 bot-fan-out decision plus the bots' policy bundle (``""`` unless enabled).
+
+    Never automatic: only a worker with a ``subagents`` block (``grok-build-bots``) and an explicit
+    eligible task class fans out; every other case is recorded as a decline and runs single-agent.
+    """
+
+    if task_class is not None and task_class not in subagents.KNOWN_TASK_CLASSES:
+        raise ValidationError(
+            f"invalid bot task class {task_class!r}; expected one of {', '.join(sorted(subagents.KNOWN_TASK_CLASSES))}"
+        )
+    plan = subagents.plan_fanout(worker, task_class, scope_paths)
+    if plan is None:
+        if task_class is not None:
+            raise ValidationError(
+                f"--bot-task-class requires a bot-enabled worker; {worker.name!r} has no bot fan-out mode"
+            )
+        return None, ""
+    policy_manifest["bot_fanout"] = plan.evidence()
+    if not plan.enabled:
+        return plan, ""
+    bundle = compose_policy_bundle(
+        root=root,
+        registry=registry,
+        worker_name=plan.bot_worker,
+        route_role=subagents.ROLE_BOT_INVESTIGATION,
+        contracts=contract_paths or (),
+        workflow=None,  # the primary's workflow override never attaches write-oriented policy to read-only bots
+        acceptance_criteria="Bounded read-only investigation that assists a primary worker; not an independent review.",
+    )
+    policy_manifest["bot_fanout"]["bot_policy_identity"] = bundle.manifest["preserved_policy_identity"]
+    return plan, bundle.prompt
+
+
+def _fan_out_bots(
+    *,
+    plan: subagents.FanoutPlan,
+    policy_prompt: str,
+    registry: Registry,
+    root: Path,
+    task: str,
+    objective: str,
+    scope_paths: list[str],
+    project_id: str | None,
+    worker_dir: Path,
+    timeout: float | None,
+    policy_manifest: dict,
+) -> subagents.FanoutOutcome:
+    """Run the bounded read-only bots (inside the primary's write lock) and record their evidence."""
+
+    outcome = subagents.run_fanout(
+        plan,
+        bot=registry.get(plan.bot_worker),
+        root=root,
+        task=task,
+        objective=objective,
+        scope_paths=scope_paths,
+        extra_seed_paths=_dirty_paths(root),
+        policy_prompt=policy_prompt,
+        project_id=project_id,
+        # Bots run in parallel and may never consume more than a third of the run budget, so the primary
+        # (the only writer) always keeps most of it.
+        timeout_cap=None if timeout is None else timeout / 3,
+    )
+    subagents.write_bot_logs(outcome, worker_dir)
+    outcome.evidence["bot_policy_identity"] = policy_manifest["bot_fanout"].get("bot_policy_identity")
+    policy_manifest["bot_fanout"] = outcome.evidence
+    return outcome
+
+
+def _run_primary(
+    *,
+    worker,
+    registry: Registry,
+    root: Path,
+    lock_dir: Path,
+    command: list[str],
+    rebuild,
+    timeout: float | None,
+    record: RunRecord,
+    plan: subagents.FanoutPlan | None,
+    bot_policy_prompt: str,
+    task: str,
+    objective: str,
+    scope_paths: list[str],
+    project_id: str | None,
+    worker_dir: Path,
+) -> tuple[int, str] | None:
+    """Hold the writer lock, run any bounded read-only bot fan-out, then run the primary.
+
+    Bots and the primary never overlap: the fan-out finishes (and its read-only guarantee is verified)
+    before the single write-capable primary starts, all inside AO's one-writer lock. ``None`` means a bot
+    violated its read-only contract, so the primary was not launched (``record`` is already BLOCKED).
+    """
+
+    with write_lock(worker, lock_dir):
+        if plan is not None and plan.enabled:
+            outcome = _fan_out_bots(
+                plan=plan, policy_prompt=bot_policy_prompt, registry=registry, root=root, task=task,
+                objective=objective, scope_paths=scope_paths, project_id=project_id, worker_dir=worker_dir,
+                timeout=timeout, policy_manifest=record.policy_manifest,
+            )
+            record.notes.append(
+                f"bot fan-out {outcome.evidence['decision']}: {outcome.evidence['succeeded']}/"
+                f"{outcome.evidence['bot_count']} read-only bots produced findings (advisory, not independent review)"
+            )
+            if outcome.blocked_reason:
+                record.result = RESULT_BLOCKED
+                record.notes.append(outcome.blocked_reason)
+                return None
+            if outcome.prompt_section:
+                command = rebuild(outcome.prompt_section)
+                record.requested_command = command
+            if timeout is not None:
+                timeout = max(1.0, timeout - outcome.elapsed_seconds)
+        return run_worker_process(command, root, timeout=timeout)
+
+
 def run_delegation(
     *,
     registry: Registry,
@@ -169,6 +298,7 @@ def run_delegation(
     workflow: str | None = None,
     fallback_reason: str | None = None,
     project_id: str | None = None,
+    bot_task_class: str | None = None,
 ) -> DelegationResult:
     """Execute (or plan) a single delegated worker run and persist its manifest."""
 
@@ -240,6 +370,10 @@ def run_delegation(
     bounded_prompt = _attach_graph_context(
         bundle.prompt, root=root, seeds=resolved_scopes, project_id=project_id, policy_manifest=policy_manifest
     ) + task_prompt
+    bot_plan, bot_policy_prompt = _plan_bots(
+        registry=registry, root=root, worker=worker, task_class=bot_task_class, scope_paths=resolved_scopes,
+        objective=user_prompt, contract_paths=contract_paths, policy_manifest=policy_manifest,
+    )
     if include_diff:
         if not worker.is_read_only:
             raise ValidationError("--include-diff is limited to read-only workers")
@@ -363,6 +497,8 @@ def run_delegation(
     if dry_run:
         record.result = RESULT_DRY_RUN
         record.notes.append("dry run: command was built and validated but not executed")
+        if bot_plan is not None:
+            record.notes.append(f"dry run: bot fan-out {'planned' if bot_plan.enabled else 'declined'}: {bot_plan.reason}")
         if not worker.cli_available():
             record.notes.append(f"note: CLI {worker.cli_bin!r} is not currently installed")
         return finish("[dry run: worker not executed]\n")
@@ -394,12 +530,25 @@ def run_delegation(
     before = worktree_snapshot(root)
     started = _time.monotonic()
     try:
-        with write_lock(worker, checkout_lock_dir):
-            exit_status, log_text = run_worker_process(command, root, timeout=timeout)
+        ran = _run_primary(
+            worker=worker, registry=registry, root=root, lock_dir=checkout_lock_dir, command=command,
+            rebuild=lambda section: worker.build_command(
+                model=model, intensity=resolved_intensity, prompt=bounded_prompt + section,
+                permission_profile=permission_profile,
+            ),
+            timeout=timeout, record=record, plan=bot_plan, bot_policy_prompt=bot_policy_prompt, task=task,
+            objective=user_prompt, scope_paths=resolved_scopes, project_id=project_id, worker_dir=worker_dir,
+        )
     except WriteSafetyError as exc:
         record.result = RESULT_BLOCKED
         record.notes.append(f"write-safety block: {exc}")
         return finish("")
+    if ran is None:
+        record.duration_seconds = round(_time.monotonic() - started, 3)
+        after = worktree_snapshot(root)
+        record.files_changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+        return finish("")
+    exit_status, log_text = ran
     record.duration_seconds = round(_time.monotonic() - started, 3)
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
@@ -447,6 +596,8 @@ def run_session(
     workflow: str | None = None,
     fallback_reason: str | None = None,
     project_id: str | None = None,
+    bot_task_class: str | None = None,
+    bot_scope_paths: list[str] | None = None,
 ) -> DelegationResult:
     """Run one whole-worktree unattended session (ENG-AGENT-02-S5 runbooks).
 
@@ -502,6 +653,13 @@ def run_session(
     composed_prompt = _attach_graph_context(
         bundle.prompt, root=root, seeds=[], project_id=project_id, policy_manifest=policy_manifest
     )
+    session_scopes = [
+        validate_scope_path(raw, root).relative_to(root).as_posix() for raw in (bot_scope_paths or [])
+    ]
+    bot_plan, bot_policy_prompt = _plan_bots(
+        registry=registry, root=root, worker=worker, task_class=bot_task_class, scope_paths=session_scopes,
+        objective=prompt, contract_paths=contract_paths, policy_manifest=policy_manifest,
+    )
     command = worker.build_command(
         model=model, intensity=resolved_intensity, prompt=composed_prompt, permission_profile=permission_profile
     )
@@ -548,6 +706,8 @@ def run_session(
     if dry_run:
         record.result = RESULT_DRY_RUN
         record.notes.append("dry run: command was built and validated but not executed")
+        if bot_plan is not None:
+            record.notes.append(f"dry run: bot fan-out {'planned' if bot_plan.enabled else 'declined'}: {bot_plan.reason}")
         if not worker.cli_available():
             record.notes.append(f"note: CLI {worker.cli_bin!r} is not currently installed")
         return finish("[dry run: worker not executed]\n")
@@ -577,12 +737,25 @@ def run_session(
     before = worktree_snapshot(root)
     started = _time.monotonic()
     try:
-        with write_lock(worker, checkout_lock_dir):
-            exit_status, log_text = run_worker_process(command, root, timeout=timeout)
+        ran = _run_primary(
+            worker=worker, registry=registry, root=root, lock_dir=checkout_lock_dir, command=command,
+            rebuild=lambda section: worker.build_command(
+                model=model, intensity=resolved_intensity, prompt=composed_prompt + section,
+                permission_profile=permission_profile,
+            ),
+            timeout=timeout, record=record, plan=bot_plan, bot_policy_prompt=bot_policy_prompt, task=task,
+            objective=prompt, scope_paths=session_scopes, project_id=project_id, worker_dir=worker_dir,
+        )
     except WriteSafetyError as exc:
         record.result = RESULT_BLOCKED
         record.notes.append(f"write-safety block: {exc}")
         return finish("")
+    if ran is None:
+        record.duration_seconds = round(_time.monotonic() - started, 3)
+        after = worktree_snapshot(root)
+        record.files_changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+        return finish("")
+    exit_status, log_text = ran
     record.duration_seconds = round(_time.monotonic() - started, 3)
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
@@ -666,6 +839,7 @@ def _cmd_run(registry: Registry, args: argparse.Namespace) -> int:
             workflow=args.workflow,
             fallback_reason=args.fallback_reason,
             project_id=args.project_id,
+            bot_task_class=args.bot_task_class,
         )
     except (ValidationError, RegistryError, PolicyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -700,6 +874,8 @@ def _cmd_session(registry: Registry, args: argparse.Namespace) -> int:
             workflow=args.workflow,
             fallback_reason=args.fallback_reason,
             project_id=args.project_id,
+            bot_task_class=args.bot_task_class,
+            bot_scope_paths=args.bot_scope,
         )
     except (ValidationError, RegistryError, PolicyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -772,6 +948,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--fallback-reason", default=None, help="recorded fallback/escalation reason")
     p_run.add_argument("--project-id", default=None, help="selected managed project id (graph-context cache identity)")
     p_run.add_argument(
+        "--bot-task-class",
+        default=None,
+        choices=sorted(subagents.KNOWN_TASK_CLASSES),
+        help=(
+            "AO task class for a bot-enabled worker (grok-build-bots). Read-only bot fan-out happens only for "
+            "serious-integration, hard-debugging, or architecture-high-risk; anything else runs single-agent."
+        ),
+    )
+    p_run.add_argument(
         "prompt",
         nargs=argparse.REMAINDER,
         help="text passed verbatim to the worker after '--'",
@@ -796,6 +981,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_session.add_argument("--workflow", default=None, help="canonical workflow override")
     p_session.add_argument("--fallback-reason", default=None, help="recorded fallback/escalation reason")
     p_session.add_argument("--project-id", default=None, help="selected managed project id (graph-context cache identity)")
+    p_session.add_argument(
+        "--bot-task-class",
+        default=None,
+        choices=sorted(subagents.KNOWN_TASK_CLASSES),
+        help=(
+            "AO task class for a bot-enabled worker (grok-build-bots). Read-only bot fan-out happens only for "
+            "serious-integration, hard-debugging, or architecture-high-risk; anything else runs single-agent."
+        ),
+    )
+    p_session.add_argument(
+        "--bot-scope",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="repository path scope for a session's bot fan-out (validated; repeatable)",
+    )
     p_session.add_argument(
         "--permission-profile",
         default=PERMISSION_STANDARD,

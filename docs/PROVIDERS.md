@@ -22,6 +22,8 @@ metadata commands. It does not make live product-provider generation calls.
 | `codex-review` | Codex | same ChatGPT session | read-only review | not required | prohibited |
 | `grok-build` | Grok Build | configured CLI session | write (IMPLEMENTER) | required | prohibited |
 | `grok-build-review` | Grok Build | configured CLI session | read-only review (plan + sandbox) | not required | prohibited |
+| `grok-build-bots` | Grok Build | configured CLI session | write (IMPLEMENTER); explicit bot-enabled route, never automatic | required | prohibited |
+| `grok-build-bot` | Grok Build | configured CLI session | read-only, non-recursive bot (plan + sandbox); launched only by AO fan-out, not a reviewer | not required | prohibited |
 | `opencode2-gemini-flash-lite` | OpenCode | local OpenCode session | read-only tests/search | not required | prohibited |
 | `opencode2-gemini-flash-lite-review` | OpenCode | local OpenCode session | read-only review | not required | prohibited |
 | `antigravity-focused-tests` | Antigravity (`agy`) | local Antigravity session | read-only tests | not required | prohibited |
@@ -69,6 +71,16 @@ bundle: Claude Code, Codex, Gemini through OpenCode or Antigravity, native Grok 
 transport-neutral, so a model change never needs new Graphify code and never changes routing priority. It is
 local and deterministic (no API key, billing, or LLM enrichment), provider-native Graphify installers are not
 used, and provider policy files are never rewritten. Details: `scripts/agents/README.md`.
+
+## Controlled Grok bot fan-out
+
+`grok-build-bots` is an explicit, separate route for serious integration, hard debugging, architecture/high-risk
+investigation, and broad impact analysis. AO runs at most three one-level, read-only `grok-build-bot` workers in
+parallel with scoped Graphify slices; the primary Grok remains the only writer, keeps `--no-subagents`, and
+synthesizes their findings. Bot failures are recorded once (no retry, no stronger-model escalation, no API
+billing). Bot output is not independent review; provider-diverse review still applies. Normal `grok-build` and
+`grok-build-review` behavior and routing priority are unchanged. A future OpenCode/xAI transport can reuse the
+same orchestration through the `BotTransport` seam. Details: `scripts/agents/README.md`.
 
 ## Policy adapters
 
