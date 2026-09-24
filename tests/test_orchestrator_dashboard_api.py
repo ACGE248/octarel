@@ -5,6 +5,7 @@ from both the OctaScene app (port 8765) and any provider/model network call.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -989,8 +990,22 @@ def git_client(tmp_path: Path, monkeypatch) -> TestClient:
         state.upsert_provider_state(provider)
     supervisor = Supervisor(registry=registry, repo_root=repo, state=state)
 
+    def _unused_pid() -> int:
+        # A hard-coded PID can collide with a live process on the host (a browser renderer did), which makes
+        # stop_runbook correctly report STOPPING; use a PID that is provably not running.
+        for candidate in range(4_194_000, 4_193_000, -1):
+            try:
+                os.kill(candidate, 0)
+            except ProcessLookupError:
+                return candidate
+            except PermissionError:
+                continue
+        raise RuntimeError("no unused PID available for the fake process")
+
+    fake_pid = _unused_pid()
+
     class FakeProcess:
-        pid = 4321
+        pid = fake_pid
 
     monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FakeProcess())
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)

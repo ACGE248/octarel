@@ -193,6 +193,58 @@ AO -> grok-build-bots (primary, only writer, --no-subagents)
   (`grok-cli`) is the only transport today. A bot-capable OpenCode/xAI transport can `register_transport`
   and reuse planning, bounds, read-only verification, Graphify scoping, and evidence unchanged.
 
+## Dynamic OpenCode model catalog and free fallback (ENG-AO-03)
+
+`opencode-free-review` and `opencode-free-tests` are read-only workers whose model is **not** in `workers.json`: it is
+chosen per run from the installed OpenCode's *current* catalog by `scripts/agents/model_catalog.py`, so a model that
+appears or disappears in OpenCode needs no repository edit. Configured workers (the Gemini Flash Lite routes,
+Antigravity, native Grok, Codex, Claude) keep their identities and priority; the pool ranks (`free-dynamic`) behind the
+configured free/supplemental workers and ahead of metered/subscription ones, so it is only ever a fallback.
+
+```text
+opencode models --verbose + providers list  ->  classify cost/auth + capability  ->  bounded qualification (cached)
+      ->  eligible free pool  ->  run_delegation (model, evidence)   |   dispatch (cache-only admission)
+```
+
+- **Discovery** uses OpenCode's local machine-readable commands (`--version`, `models --verbose`, `providers list`,
+  `debug agent`); never the interactive UI, `auth.json`, a generation, or (unless `--remote`) the network. Absent,
+  unauthenticated, failing, empty, or unparseable OpenCode yields status `absent`/`unavailable`/`empty`/`unparseable`
+  and no candidates. The snapshot is cached under `<state>/opencode-models/catalog.json` (30 minute freshness; refresh
+  with `python -m scripts.agents.model_catalog refresh`; dispatch admission uses a snapshot up to 24 h old).
+- **Cost/auth classification** comes from OpenCode's own metadata, never a display name: `free-opencode` = OpenCode Zen
+  transport whose declared cost is zero on every price field (tier descriptors ignored); `subscription` = provider
+  authenticated by OAuth; `metered` = API-key credential or a priced Zen model; `unknown` = missing/incomplete cost,
+  unreadable credentials, or no reported credential. Only `free-opencode` can enter automatic free fallback.
+- **Capability filter**: `active` status, tool calling, text in/out, context >= 128k tokens.
+- **Qualification** (`qualify_model`) runs once per free, capable model and profile (`review` = diff/doc review with the
+  `reviewer` preset, `tests` = tests/search/research with the `tester` preset): the preset exists, `opencode debug
+  agent` shows edit/task (and bash for review) denied, the model launches with a scrubbed environment, no default-agent
+  substitution, no denied tool or billing/API-key signal, the probe workspace is unchanged, and the response satisfies
+  the strict review contract (`scripts/ci/review_contract.py`) or the tester instruction. Non-free models are never
+  launched. Results are cached in `qualifications.json`, keyed by OpenCode version, model identity (id, transport URL,
+  prices, context, status), profile, and preset content: 7 days when qualified, 1 hour when not. A run may probe at most
+  two unqualified candidates; dispatch and the dashboard only read the cache.
+- **Provider diversity**: a candidate whose provider/model/family names match the avoided vendor (for example `xAI` or
+  `grok`) is rejected even if free; `--avoid-provider` (set by the supervisor from the task) carries the constraint into
+  the run. If no diverse qualified model exists the stage blocks; nothing weaker is substituted.
+- **No silent escalation**: a quota/rate-limit/context/outage failure puts that model in a one-hour cooldown so the next
+  attempt takes another free model; no stronger, subscription, or paid model is used because of a failure, there is
+  no in-run retry, and no API-key billing, purchase, or top-up exists in this path. An explicit `--model` on a pool
+  worker goes through the same gate.
+- **Evidence** is the normal run manifest: `policy_manifest.model_selection` records the catalog version/refresh time and
+  fingerprint, every candidate (id, display name, provider, cost class and reason, qualification and reason,
+  selected/rejected and why), and the run's `actual_provider`/`actual_model` (`OpenCode Zen` / the discovered id).
+- **OpenCode + Grok/xAI (and any other provider)** is discovered by the same generic code (OAuth-authenticated xAI is
+  `subscription`). It is shown in the catalog but not auto-routed and never replaces native `grok-build`/
+  `grok-build-review`; a future explicit route or `BotTransport` can select it from the same catalog.
+- **Dashboard/API**: `GET /api/opencode-models` returns the cached inventory (per model: cost class, credential, context,
+  capability, per-profile state `qualified-free-fallback` / `free-untested` / `unqualified` / `cooling-down` /
+  `subscription-backed` / `metered-ineligible` / `unknown-cost-ineligible` / `incapable`) beside the configured
+  OpenCode workers (`configured-worker` vs `dynamic-pool-worker`). It never spawns a process.
+
+Deferred: promoting subscription-backed OpenCode models (for example OpenCode+xAI) to an automatic route needs its own
+explicit authorization mapping; discovered models are never write-capable.
+
 ## Worker registry (`workers.json`)
 
 Routing (cheapest capable worker first):
@@ -201,10 +253,10 @@ Routing (cheapest capable worker first):
 | --- | --- |
 | `primary-implementation` | `claude-code` → `codex-build` → `grok-build` (explicit/policy-gated fallback) |
 | `secondary-implementation` | `grok-build` → `claude-code` → `codex-build` (policy-gated) |
-| `mechanical-testing`, `focused-tests` | `opencode2-gemini-flash-lite` → `antigravity-focused-tests` |
-| `impact-search` | `antigravity-impact-search` → `opencode2-gemini-flash-lite` |
-| `doc-drift-review` | `antigravity-doc-drift` |
-| `diff-review` | `antigravity-diff-review` → `opencode2-gemini-flash-lite-review` → `grok-build-review` → `codex-review` |
+| `mechanical-testing`, `focused-tests` | `opencode2-gemini-flash-lite` → `antigravity-focused-tests` → `opencode-free-tests` (runtime free pool) |
+| `impact-search` | `antigravity-impact-search` → `opencode2-gemini-flash-lite` → `opencode-free-tests` (runtime free pool) |
+| `doc-drift-review` | `antigravity-doc-drift` → `opencode-free-review` (runtime free pool) |
+| `diff-review` | `antigravity-diff-review` → `opencode2-gemini-flash-lite-review` → `opencode-free-review` (runtime free pool) → `grok-build-review` → `codex-review` |
 | `overflow` | `deepseek-overflow` (disabled by default) |
 | `bot-implementation`, `bot-investigation` | `grok-build-bots`, `grok-build-bot` (explicit only; never in another route) |
 

@@ -175,6 +175,9 @@ class Worker:
     # ENG-AO-02: explicit, AO-orchestrated read-only bot fan-out policy for a write-capable primary
     # (empty for every ordinary worker, including ``grok-build``).  See ``scripts/agents/subagents.py``.
     subagents: dict[str, Any] = field(default_factory=dict)
+    # ENG-AO-03: name of a runtime model pool (``scripts/agents/model_catalog.py``) that supplies this read-only worker's
+    # model.  Empty for every configured worker, whose ``default_model`` stays authoritative.
+    model_pool: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -370,6 +373,8 @@ class Worker:
         """
 
         resolved_model = model or self.default_model
+        if self.model_pool and not model:
+            raise RegistryError(f"worker {self.name!r} draws its model from pool {self.model_pool!r}; resolve one first")
         if permission_profile == PERMISSION_STANDARD:
             template = self.cli_template
         else:
@@ -425,6 +430,7 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             launch_probe_args=tuple(launch_probe_raw.get("args", ())),
             launch_probe_success_pattern=launch_probe_raw.get("success_pattern"),
             subagents=dict(data.get("subagents") or {}),
+            model_pool=str(data.get("model_pool") or ""),
             raw=data,
         )
     except KeyError as exc:  # pragma: no cover - guarded by test_registry_is_well_formed
@@ -504,6 +510,8 @@ def load_registry(path: Path | None = None) -> Registry:
             raise RegistryError(f"write-capable worker {worker.name!r} must require worktree isolation")
         if worker.allow_api_billing:
             raise RegistryError(f"worker {worker.name!r} may not enable API billing")
+        if worker.model_pool and not worker.is_read_only:
+            raise RegistryError(f"dynamic-model worker {worker.name!r} must be read-only")
     from .subagents import validate_subagent_configs
 
     validate_subagent_configs(workers)

@@ -33,6 +33,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import model_catalog
 from ..redaction import redact_text
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .commands import CommandContext, CommandError, apply_command
@@ -580,6 +581,7 @@ def _provider_to_dict(provider: Any, *, registry: Any = None, tasks: list[Any] |
         "premium-subscription": "Subscription",
         "free-verified": "Free",
         "supplemental-configured": "Free",
+        "free-dynamic": "Free",
         "metered-configured": "API",
         "optional-overflow": "Disabled",
         "catalog-only": "Not Configured",
@@ -1401,6 +1403,30 @@ def create_app(
             ],
         }
 
+    @app.get("/api/opencode-models")
+    def opencode_models() -> dict[str, Any]:
+        """Cached OpenCode-discovered model inventory beside the configured OpenCode workers (ENG-AO-03).
+
+        Read-only: it never runs OpenCode, discovers, probes, or calls a model; refresh with
+        ``python -m scripts.agents.model_catalog refresh``.
+        """
+
+        body = model_catalog.inventory()
+        discovered = {row["id"] for row in body["models"]}
+        body["configured_workers"] = [
+            {
+                "worker": name,
+                "role_kind": "dynamic-pool-worker" if w.model_pool else "configured-worker",
+                "model": w.default_model or None,
+                "model_pool": w.model_pool or None,
+                "in_catalog": (w.default_model in discovered) if w.default_model else None,
+                "roles": list(w.roles),
+            }
+            for name, w in sorted(ctx.registry.workers.items())
+            if w.cli_bin == "opencode"
+        ]
+        return body
+
     @app.get("/api/models")
     def models() -> list[dict[str, Any]]:
         tasks_by_worker: dict[str, list[Any]] = {}
@@ -1414,6 +1440,7 @@ def create_app(
                 "execution_system": w.execution_system,
                 "provider": w.provider,
                 "default_model": w.default_model,
+                "model_pool": w.model_pool or None,
                 "default_intensity": w.default_intensity,
                 "capability": w.capability,
                 "cost_class": w.cost_class,

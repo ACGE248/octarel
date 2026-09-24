@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import subagents
+from . import model_catalog, subagents
 from .graph_context import build_graph_context
 from .manifest import (
     RESULT_BLOCKED,
@@ -299,6 +299,7 @@ def run_delegation(
     fallback_reason: str | None = None,
     project_id: str | None = None,
     bot_task_class: str | None = None,
+    avoid_provider: str | None = None,
 ) -> DelegationResult:
     """Execute (or plan) a single delegated worker run and persist its manifest."""
 
@@ -337,6 +338,16 @@ def run_delegation(
         raise ValidationError(
             f"invalid intensity {resolved_intensity!r}; expected one of {', '.join(registry.intensities)}"
         )
+    # ENG-AO-03: a runtime-model worker takes its model from the qualified free pool of the installed OpenCode's
+    # current catalog (read-only roles only, provider diversity honoured); an explicit --model must pass the same gate.
+    pool_selection = (
+        _resolve_pool_model(worker, role=role, requested_model=model, avoid_provider=avoid_provider, dry_run=dry_run)
+        if worker.model_pool
+        else None
+    )
+    if pool_selection is not None:
+        # An explicit --model never bypasses the gate: only the pool's own verdict decides which model runs.
+        model = pool_selection.model.id if pool_selection.model is not None else None
 
     user_prompt = " ".join(prompt_args).strip()
     if not user_prompt:
@@ -367,6 +378,8 @@ def run_delegation(
     policy_manifest["actual_provider"] = worker.provider
     policy_manifest["actual_model"] = model or worker.default_model
     policy_manifest["actual_intensity"] = resolved_intensity
+    if pool_selection is not None:
+        policy_manifest["model_selection"] = model_catalog.redacted_evidence(pool_selection.evidence)
     bounded_prompt = _attach_graph_context(
         bundle.prompt, root=root, seeds=resolved_scopes, project_id=project_id, policy_manifest=policy_manifest
     ) + task_prompt
@@ -439,8 +452,10 @@ def run_delegation(
         )
     else:
         candidate_tree_sha = None
+    unresolved_pool_model = pool_selection is not None and model is None
     command = worker.build_command(
-        model=model, intensity=resolved_intensity, prompt=bounded_prompt, permission_profile=permission_profile
+        model=model or ("<no-eligible-model>" if unresolved_pool_model else None), intensity=resolved_intensity,
+        prompt=bounded_prompt, permission_profile=permission_profile,
     )
     started_at = _now()
     timestamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -482,6 +497,21 @@ def run_delegation(
             RESULT_BLOCKED: EXIT_UNSUPPORTED_OR_BLOCKED,
         }[record.result]
         return DelegationResult(record=record, manifest=manifest, exit_code=exit_code)
+
+    if unresolved_pool_model:
+        # Never widen to a stronger, subscription, or paid model: the stage blocks with every rejection recorded.
+        record.result = RESULT_DRY_RUN if dry_run else RESULT_BLOCKED
+        record.notes.append(
+            f"no eligible free OpenCode model for {role}: {pool_selection.reason}. "
+            "No other model or worker was invoked and no paid/API fallback was attempted."
+        )
+        return finish("[dry run: worker not executed]\n" if dry_run else "")
+    if pool_selection is not None:
+        chosen = pool_selection.model
+        record.notes.append(
+            f"model pool {model_catalog.POOL_OPENCODE_FREE}: selected {chosen.id} ({chosen.display_name}; "
+            f"{chosen.cost_class}) for {role}"
+        )
 
     # Overflow / disabled workers are never used implicitly.
     if not worker.enabled and not allow_overflow:
@@ -575,7 +605,35 @@ def run_delegation(
         record.notes.append(failure_reason)
     else:
         record.result = RESULT_PASS if exit_status == 0 else RESULT_FAIL
+    if pool_selection is not None and record.result == RESULT_FAIL:
+        _cool_down_failed_pool_model(record, model, failure_reason or log_text[-2000:])
     return finish(log_text)
+
+
+def _resolve_pool_model(
+    worker, *, role: str, requested_model: str | None, avoid_provider: str | None, dry_run: bool
+) -> model_catalog.PoolSelection:
+    """Resolve a runtime-model worker's model; a dry run only reads cached data (no discovery, no probe)."""
+
+    if worker.model_pool != model_catalog.POOL_OPENCODE_FREE:
+        raise ValidationError(f"worker {worker.name!r} names unknown model pool {worker.model_pool!r}")
+    catalog = model_catalog.get_catalog(discover=not dry_run)
+    return model_catalog.select_pool_model(
+        catalog, role, avoid_provider=avoid_provider, only_model=requested_model, allow_probe=not dry_run,
+    )
+
+
+def _cool_down_failed_pool_model(record: RunRecord, model: str | None, failure_text: str) -> None:
+    """A quota/rate/context/outage failure cools this model down so the next attempt takes another free model."""
+
+    from .control_plane.usage_policy import classify_failure
+
+    category = classify_failure(failure_text)
+    if model and model_catalog.record_model_failure(model, category):
+        record.notes.append(
+            f"{model} cooled down after a {category} failure; the next attempt selects another qualified free "
+            "OpenCode model. No stronger, subscription, or paid model is used because of this failure."
+        )
 
 
 def run_session(
@@ -840,6 +898,7 @@ def _cmd_run(registry: Registry, args: argparse.Namespace) -> int:
             fallback_reason=args.fallback_reason,
             project_id=args.project_id,
             bot_task_class=args.bot_task_class,
+            avoid_provider=args.avoid_provider,
         )
     except (ValidationError, RegistryError, PolicyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -947,6 +1006,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--workflow", default=None, help="canonical workflow override")
     p_run.add_argument("--fallback-reason", default=None, help="recorded fallback/escalation reason")
     p_run.add_argument("--project-id", default=None, help="selected managed project id (graph-context cache identity)")
+    p_run.add_argument(
+        "--avoid-provider", default=None,
+        help="vendor a runtime-model (OpenCode pool) worker must not use, for provider-diverse independent review",
+    )
     p_run.add_argument(
         "--bot-task-class",
         default=None,

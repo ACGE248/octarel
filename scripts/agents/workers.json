@@ -8,11 +8,11 @@
   "routes": {
     "primary-implementation": ["claude-code", "codex-build", "grok-build"],
     "secondary-implementation": ["grok-build", "claude-code", "codex-build"],
-    "mechanical-testing": ["opencode2-gemini-flash-lite", "antigravity-focused-tests"],
-    "focused-tests": ["opencode2-gemini-flash-lite", "antigravity-focused-tests"],
-    "impact-search": ["antigravity-impact-search", "opencode2-gemini-flash-lite"],
-    "doc-drift-review": ["antigravity-doc-drift"],
-    "diff-review": ["antigravity-diff-review", "opencode2-gemini-flash-lite-review", "grok-build-review", "codex-review"],
+    "mechanical-testing": ["opencode2-gemini-flash-lite", "antigravity-focused-tests", "opencode-free-tests"],
+    "focused-tests": ["opencode2-gemini-flash-lite", "antigravity-focused-tests", "opencode-free-tests"],
+    "impact-search": ["antigravity-impact-search", "opencode2-gemini-flash-lite", "opencode-free-tests"],
+    "doc-drift-review": ["antigravity-doc-drift", "opencode-free-review"],
+    "diff-review": ["antigravity-diff-review", "opencode2-gemini-flash-lite-review", "opencode-free-review", "grok-build-review", "codex-review"],
     "overflow": ["deepseek-overflow"],
     "bot-implementation": ["grok-build-bots"],
     "bot-investigation": ["grok-build-bot"]
@@ -297,6 +297,56 @@
         "template": ["run", "--model", "{model}", "--agent", "reviewer"]
       },
       "notes": "Bounded read-only review route. It cannot edit and is selected only explicitly or after a recorded equivalent-role transport failure."
+    },
+    "opencode-free-review": {
+      "display_name": "OpenCode Free Review",
+      "description": "Read-only fallback reviewer using a currently qualified free OpenCode model.",
+      "best_for": ["Independent diff review fallback", "Documentation drift review"],
+      "execution_system": "OpenCode2",
+      "provider": "OpenCode Zen",
+      "default_model": "",
+      "default_intensity": "low",
+      "capability": "read-only",
+      "cost_class": "free-dynamic",
+      "allowed_policy_roles": ["REVIEWER"],
+      "provider_policy": ".agents/providers/OPENCODE.md",
+      "auth_mode": "opencode-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["diff-review", "doc-drift-review"],
+      "model_pool": "opencode-free",
+      "cli": {
+        "bin": "opencode",
+        "version_args": ["--version"],
+        "template": ["run", "--model", "{model}", "--agent", "reviewer"]
+      },
+      "notes": "ENG-AO-03 runtime-model worker: the model is chosen per run from the installed OpenCode's current catalog (scripts/agents/model_catalog.py), never from this file. Only a model OpenCode's own metadata proves free/no-charge and that passed the cached read-only qualification probe is eligible; unknown, subscription-backed and metered models and same-vendor candidates for a provider-diverse review are rejected. Read-only fallback behind the configured routes; never an implementer and never a paid/API fallback."
+    },
+    "opencode-free-tests": {
+      "display_name": "OpenCode Free Tests",
+      "description": "Read-only fallback tester/researcher using a currently qualified free OpenCode model.",
+      "best_for": ["Focused tests", "Impact search", "Bounded research"],
+      "execution_system": "OpenCode2",
+      "provider": "OpenCode Zen",
+      "default_model": "",
+      "default_intensity": "low",
+      "capability": "read-only",
+      "cost_class": "free-dynamic",
+      "allowed_policy_roles": ["TESTER", "RESEARCHER"],
+      "provider_policy": ".agents/providers/OPENCODE.md",
+      "auth_mode": "opencode-local-session",
+      "repository_data_authorization": "explicit-worker-selection",
+      "allow_api_billing": false,
+      "requires_isolated_worktree": false,
+      "roles": ["focused-tests", "mechanical-testing", "impact-search"],
+      "model_pool": "opencode-free",
+      "cli": {
+        "bin": "opencode",
+        "version_args": ["--version"],
+        "template": ["run", "--model", "{model}", "--agent", "tester"]
+      },
+      "notes": "ENG-AO-03 runtime-model worker: the model is chosen per run from the installed OpenCode's current catalog (scripts/agents/model_catalog.py), never from this file. Only a model OpenCode's own metadata proves free/no-charge and that passed the cached read-only qualification probe is eligible; unknown, subscription-backed and metered models and same-vendor candidates for a provider-diverse review are rejected. Read-only fallback behind the configured routes; never an implementer and never a paid/API fallback."
     },
     "antigravity-focused-tests": {
       "display_name": "Antigravity Focused Tests",

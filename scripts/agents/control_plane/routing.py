@@ -53,6 +53,7 @@ ROUTING_MODES = (
 _COST_CLASS_RANK = {
     "free-verified": 0,
     "supplemental-configured": 1,
+    "free-dynamic": 1,
     "metered-configured": 2,
     "premium-subscription": 3,
     "optional-overflow": 4,

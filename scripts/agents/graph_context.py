@@ -115,8 +115,8 @@ def is_sensitive_path(relative: str) -> bool:
     return lowered.endswith(_SECRET_SUFFIXES) or lowered_parts[-1].startswith("id_rsa")
 
 
-def graph_state_root() -> Path:
-    """Octarel-owned cache root; never inside a managed project unless it is ignored state."""
+def state_root() -> Path:
+    """Octarel-owned state root; never inside a managed project unless it is ignored state."""
 
     env_dir = os.environ.get("OCTAREL_STATE_DIR")
     if env_dir:
@@ -126,7 +126,11 @@ def graph_state_root() -> Path:
         base = Path(os.environ["OCTAREL_CODE_ROOT"]) / ".orchestrator-state"
     else:
         base = Path(__file__).resolve().parents[2] / ".orchestrator-state"
-    return base / GRAPH_DIRNAME
+    return base
+
+
+def graph_state_root() -> Path:
+    return state_root() / GRAPH_DIRNAME
 
 
 def _result(status: str, reason: str, *, text: str = "", **extra: Any) -> GraphContext:

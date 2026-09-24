@@ -26,6 +26,8 @@ metadata commands. It does not make live product-provider generation calls.
 | `grok-build-bot` | Grok Build | configured CLI session | read-only, non-recursive bot (plan + sandbox); launched only by AO fan-out, not a reviewer | not required | prohibited |
 | `opencode2-gemini-flash-lite` | OpenCode | local OpenCode session | read-only tests/search | not required | prohibited |
 | `opencode2-gemini-flash-lite-review` | OpenCode | local OpenCode session | read-only review | not required | prohibited |
+| `opencode-free-review` | OpenCode (runtime free pool) | proven-free OpenCode Zen model, qualified | read-only review fallback; model chosen per run | not required | prohibited |
+| `opencode-free-tests` | OpenCode (runtime free pool) | proven-free OpenCode Zen model, qualified | read-only tests/search fallback; model chosen per run | not required | prohibited |
 | `antigravity-focused-tests` | Antigravity (`agy`) | local Antigravity session | read-only tests | not required | prohibited |
 | `antigravity-impact-search` | Antigravity | local session | read-only search | not required | prohibited |
 | `antigravity-doc-drift` | Antigravity | local session | read-only docs review | not required | prohibited |
@@ -71,6 +73,17 @@ bundle: Claude Code, Codex, Gemini through OpenCode or Antigravity, native Grok 
 transport-neutral, so a model change never needs new Graphify code and never changes routing priority. It is
 local and deterministic (no API key, billing, or LLM enrichment), provider-native Graphify installers are not
 used, and provider policy files are never rewritten. Details: `scripts/agents/README.md`.
+
+## Dynamic OpenCode models (free fallback)
+
+`opencode-free-review` / `opencode-free-tests` take their model from the installed OpenCode's current catalog rather
+than `workers.json` (`python -m scripts.agents.model_catalog refresh|list|qualify`, `GET /api/opencode-models`). Only a
+model OpenCode's own metadata proves free (OpenCode Zen transport, zero declared cost) that also passed a cached,
+bounded read-only qualification probe can serve, and only after the configured workers; `subscription`, `metered`, and
+`unknown` models are catalogued but never auto-selected, same-vendor candidates are rejected when provider diversity is
+required, and quota/rate/context failures move to another free model instead of a stronger one. No API key, purchase,
+or top-up is ever involved. OpenCode+xAI appears in the same catalog without replacing native Grok. Details:
+`scripts/agents/README.md`, `.agents/providers/OPENCODE.md`.
 
 ## Controlled Grok bot fan-out
 
