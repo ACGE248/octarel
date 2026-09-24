@@ -98,6 +98,7 @@ _COST_CLASS_ROUTES: dict[str, str] = {
     "metered-configured": ROUTE_API,
     "free-verified": ROUTE_FREE,
     "supplemental-configured": ROUTE_FREE,
+    "free-dynamic": ROUTE_FREE,
     "optional-overflow": ROUTE_API,
     "catalog-only": ROUTE_UNKNOWN,
 }

@@ -199,7 +199,8 @@ def test_normal_grok_routes_keep_no_subagents_and_have_no_bot_mode():
     # Routing preference is untouched: the bot workers are on no pre-existing route.
     assert registry.route("primary-implementation") == ("claude-code", "codex-build", "grok-build")
     assert registry.route("secondary-implementation") == ("grok-build", "claude-code", "codex-build")
-    assert registry.route("diff-review") == (
+    # ENG-AO-03 adds the runtime free-model pool worker; every pre-existing worker keeps its relative order.
+    assert tuple(n for n in registry.route("diff-review") if n != "opencode-free-review") == (
         "antigravity-diff-review", "opencode2-gemini-flash-lite-review", "grok-build-review", "codex-review",
     )
     for role, names in registry.routes.items():

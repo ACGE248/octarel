@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .. import model_catalog
 from ..policy import PolicyError, compose_policy_bundle, validate_policy_preservation
 from ..registry import PERMISSION_STANDARD, Registry
 from .intake import IntakeCollision, check_and_claim
@@ -29,9 +30,12 @@ from .scheduler import Scheduler
 from .state import State
 from .usage_policy import classify_task, codex_allowed
 
+# ``free-dynamic`` (ENG-AO-03 runtime OpenCode pool) ranks behind every configured free/supplemental worker so a
+# dynamically discovered model is only ever a fallback, and ahead of any metered or subscription worker.
 _COST_RANK = {
     "free-verified": 0,
     "supplemental-configured": 1,
+    "free-dynamic": 1.5,
     "metered-configured": 2,
     "premium-subscription": 3,
 }
@@ -123,6 +127,11 @@ def _candidate_scores(*, state: State, registry: Registry, task: Task) -> tuple[
             reasons.append("repository-data authorization is not eligible")
         if task.avoid_provider and worker.provider == task.avoid_provider:
             reasons.append(f"provider diversity excludes {worker.provider}")
+        if worker.model_pool:
+            # Cached data only: no discovery, probe, or model call happens during scoring.
+            pool_reason = model_catalog.pool_block_reason(task.role, avoid_provider=task.avoid_provider)
+            if pool_reason:
+                reasons.append(f"no eligible free OpenCode model: {pool_reason}")
         if task.role == "diff-review" and provider and provider.consecutive_failures and provider.last_error:
             reasons.append("reviewer route has an unresolved failed adapter result")
         codex_pressure = 0.0
@@ -271,6 +280,9 @@ def managed_admit(
         except ValueError:
             route_candidates = ()
         refresh_stale_routable_candidates(state, registry, route_candidates)
+        if any(registry.workers[name].model_pool for name in route_candidates if name in registry.workers):
+            # Local, non-billable ``opencode models`` listing, only when the cached snapshot is stale.
+            model_catalog.get_catalog()
 
     eligible, scores, blocked = _candidate_scores(state=state, registry=registry, task=task)
     selected = None

@@ -227,6 +227,8 @@ class Supervisor:
         # `session` argv above. An ordinary delegated task's permission_profile is always
         # PERMISSION_STANDARD by construction, so this is not reached in practice today.
         argv += bot_argv
+        if task.avoid_provider:
+            argv += ["--avoid-provider", task.avoid_provider]
         if task.role == "diff-review":
             # ENG-AGENT-13 (issue #138): ``run_delegation`` itself requires
             # ``--include-diff`` for every diff-review role so the read-only

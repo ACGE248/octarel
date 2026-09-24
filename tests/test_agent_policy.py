@@ -40,7 +40,7 @@ def test_canonical_policy_tree_and_root_claude_bootstrap_are_minimal() -> None:
         ".agents/README.md",
         *{f".agents/core/{name}.md" for name in ("SECURITY", "GIT_WORKTREES", "TESTING", "DOCUMENTATION", "COST_AND_PROVIDER_SAFETY")},
         *{f".agents/roles/{name}.md" for name in ("ORCHESTRATOR", "IMPLEMENTER", "TESTER", "REVIEWER", "RESEARCHER")},
-        *{f".agents/providers/{name}.md" for name in ("CLAUDE", "CODEX_OPENAI", "GEMINI", "ANTIGRAVITY", "GROK", "DEEPSEEK")},
+        *{f".agents/providers/{name}.md" for name in ("CLAUDE", "CODEX_OPENAI", "GEMINI", "ANTIGRAVITY", "GROK", "DEEPSEEK", "OPENCODE")},
         *{f".agents/workflows/{name}.md" for name in ("IMPLEMENT", "TEST_AND_FIX", "REVIEW", "PROVIDER_INTEGRATION", "UI_AUDIT")},
     }
     assert all((ROOT / path).is_file() for path in required)
