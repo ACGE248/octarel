@@ -116,10 +116,10 @@ def _signature(record: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _base_record(runbook: Runbook) -> dict[str, Any]:
+def _base_record(runbook: Runbook | None, project_id: str | None = None) -> dict[str, Any]:
     return {
-        "runbook_id": runbook.id,
-        "project_id": runbook.project_id,
+        "runbook_id": runbook.id if runbook else None,
+        "project_id": runbook.project_id if runbook else project_id,
         "state": ADV_COMPLETED,
         "completed_task_id": None,
         "next_task": None,
@@ -285,14 +285,21 @@ def _route_gate(
 def _evaluate(
     *,
     state: State,
-    runbook: Runbook,
+    runbook: Runbook | None,
     registry: Registry | None,
     github_issue_fetcher: GithubIssueFetcher | None,
+    project_id: str | None = None,
 ) -> tuple[dict[str, Any], Any]:
-    """Recompute the outcome from current repository truth. Returns (record, quickstart option)."""
+    """Recompute the outcome from current repository truth. Returns (record, quickstart option).
 
-    record = _base_record(runbook)
-    problem = _acceptance_problem(runbook)
+    ``runbook`` is the accepted run being advanced from; ``None`` resolves the first
+    task of a continuous overnight session for ``project_id`` (ENG-AO-05) through
+    exactly the same gates.
+    """
+
+    record = _base_record(runbook, project_id)
+    project_id = runbook.project_id if runbook else project_id
+    problem = _acceptance_problem(runbook) if runbook else None
     if problem:
         return _stop(record, ADV_BLOCKED, f"acceptance not actually complete: {problem}", STOP_ACCEPTANCE_INCOMPLETE), None
 
@@ -300,15 +307,15 @@ def _evaluate(
     from .project_registry import UnknownProjectError, get_project
     from .quickstart import _repo_head_sha, resolve_quickstart_option
 
-    if not runbook.project_id:
+    if not project_id:
         return _stop(
             record, ADV_BLOCKED, "runbook has no managed project; refusing to guess a repository", STOP_STALE_REPOSITORY_STATE
         ), None
     try:
-        project = get_project(state, runbook.project_id)
+        project = get_project(state, project_id)
     except UnknownProjectError as exc:
         return _stop(record, ADV_BLOCKED, f"stale/inconsistent state: {exc}", STOP_STALE_REPOSITORY_STATE), None
-    row = state.get_project(runbook.project_id)
+    row = state.get_project(project_id)
     if row is not None and not row["enabled"]:
         return _stop(record, ADV_BLOCKED, f"project {project.project_id!r} is disabled", STOP_POLICY_BLOCKED), None
     try:
@@ -330,7 +337,7 @@ def _evaluate(
         "resolved_at": utc_now_iso(),
         "tasks_seen": len(tasks),
     }
-    record["completed_task_id"] = _completed_task_id(runbook, tasks)
+    record["completed_task_id"] = _completed_task_id(runbook, tasks) if runbook else None
     by_id = {task.task_id: task for task in tasks}
     nxt = next((task for task in tasks if task.eligible), None)
 
@@ -357,7 +364,7 @@ def _evaluate(
             ), None
 
     # Never replay accepted work (including the run that just completed).
-    if nxt.task_id == record["completed_task_id"] or nxt.task_id in _accepted_task_ids(state, runbook.project_id, tasks):
+    if nxt.task_id == record["completed_task_id"] or nxt.task_id in _accepted_task_ids(state, project_id, tasks):
         return _stop(
             record,
             ADV_BLOCKED,
@@ -397,8 +404,8 @@ def _evaluate(
         ), None
 
     # One write-capable owner per worktree; an already-active run of the same task is adopted, not duplicated.
-    for other in state.list_runbooks(project_id=runbook.project_id):
-        if other.id == runbook.id or other.status in RUNBOOK_TERMINAL_STATES or other.status == RUNBOOK_DRAFT:
+    for other in state.list_runbooks(project_id=project_id):
+        if (runbook is not None and other.id == runbook.id) or other.status in RUNBOOK_TERMINAL_STATES or other.status == RUNBOOK_DRAFT:
             continue
         if _mentions(other, nxt.task_id):
             record["started_runbook_id"] = other.id
@@ -408,8 +415,11 @@ def _evaluate(
             return _stop(
                 record, ADV_BLOCKED, f"worktree {option.worktree} is owned by active runbook {other.id}", STOP_ACTIVE_WRITER_CONFLICT
             ), None
-    for task in state.list_tasks(state="RUNNING", project_id=runbook.project_id):
-        if task.kind == "write" and option.worktree and task.worktree == option.worktree and task.id != runbook.task_id:
+    adopted_id = record["started_runbook_id"]
+    for task in state.list_tasks(state="RUNNING", project_id=project_id):
+        if adopted_id and (task.runbook_id == adopted_id or task.id.startswith(f"{adopted_id}-")):
+            continue  # the adopted run's own write task is not a conflicting writer
+        if task.kind == "write" and option.worktree and task.worktree == option.worktree and task.id != (runbook.task_id if runbook else None):
             return _stop(
                 record, ADV_BLOCKED, f"worktree {option.worktree} is owned by running write task {task.id}", STOP_ACTIVE_WRITER_CONFLICT
             ), None
@@ -429,6 +439,28 @@ def _evaluate(
             + "; no conflicting writer; provider route available"
         )
     return record, option
+
+
+def resolve_next_task(
+    *,
+    state: State,
+    project_id: str,
+    registry: Registry | None = None,
+    github_issue_fetcher: GithubIssueFetcher | None = None,
+) -> tuple[dict[str, Any], Any]:
+    """Resolve the current next eligible task of ``project_id`` from its live repository truth.
+
+    Read-only and never cached: the same dependency / owner-decision / stale-accepted /
+    active-writer / provider gates as :func:`advance_after_success`, but with no
+    predecessor run (the first task of a continuous session). Persists nothing; the
+    caller owns recording and starting.
+    """
+
+    with _ADVANCE_LOCK:
+        return _evaluate(
+            state=state, runbook=None, registry=registry,
+            github_issue_fetcher=github_issue_fetcher, project_id=project_id,
+        )
 
 
 def _default_starter(*, state: State, registry: Registry | None, supervisor: Any, scheduler: Any) -> Starter | None:

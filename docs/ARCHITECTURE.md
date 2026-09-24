@@ -65,6 +65,15 @@ cached under Octarel state keyed by project + worktree + content tree, never ins
 and never used by the exact-tree gate. Absent or stale Graphify degrades to normal repository inspection.
 See `scripts/agents/README.md` (Graphify repository intelligence) for the contract.
 
+## Continuous overnight advancement
+
+An overnight session (`control_plane/overnight.py`, table `overnight_sessions`) is a durable record the daemon advances
+once per poll: refresh the project's repository truth, resolve the current next eligible task through
+`advance_after_success` semantics, start it through Quick Start, wait for normal acceptance, verify the merge, repeat.
+It is bounded by duration and accepted-task count, allows one write-capable task at a time, never names a provider or
+enables paid/API fallback, and merges only with explicit per-session authorization plus the project's `overnight_merge`
+capability. The dashboard/API/CLI only create and control it. See `scripts/agents/README.md`.
+
 ## Runtime polling and process ownership
 
 The Control Center keeps active task/run state live while caching expensive

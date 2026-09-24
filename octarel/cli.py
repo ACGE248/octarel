@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--poll-interval", type=float, default=2.0)
     p_run.add_argument("--dry-run", action="store_true")
     sub.add_parser("status", help="print daemon/status summary")
+    p_ovn = sub.add_parser("overnight", help="continuous overnight advancement: start/status/pause/resume/stop-after-current/stop")
+    p_ovn.add_argument("rest", nargs=argparse.REMAINDER, help="e.g. start <project> --duration 10h --max-tasks 5")
     sub.add_parser("health", help="print code-root, state path, and selected project")
     p_mig = sub.add_parser("migrate", help="import Octages-hosted orchestration SQLite into Octarel state")
     p_mig.add_argument("--from", dest="source", required=True, help="source .orchestrator-state directory or orchestrator.db")
@@ -143,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(report.as_text())
         return 0 if report.ok else 1
+    if args.cmd == "overnight":
+        os.environ.setdefault("OCTAREL_CODE_ROOT", str(_octarel_root()))
+        from scripts.agents import orchestrator
+
+        return orchestrator.main(["overnight", *args.rest])
     if args.cmd in {"dashboard", "run", "status"}:
         os.environ.setdefault("OCTAREL_CODE_ROOT", str(_octarel_root()))
         from scripts.agents import orchestrator

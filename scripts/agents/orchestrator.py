@@ -32,6 +32,8 @@ from pathlib import Path
 
 from .control_plane.commands import CommandContext, CommandError, apply_command
 from .control_plane.dispatch import managed_admit
+from .control_plane.overnight import recover_on_restart as recover_overnight_on_restart
+from .control_plane.overnight import tick as overnight_tick
 from .control_plane.provider_state import reconcile_provider_states
 from .control_plane.recovery import run_recovery
 from .control_plane.remote_access import RemoteAccessConfig, RemoteAccessState
@@ -264,6 +266,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     ctx = _build_context(root, state_root=_standalone_state_root())
     _run_startup_recovery(ctx, root)
     recover_runbooks_on_restart(state=ctx.state)
+    recover_overnight_on_restart(ctx.state)
     print(f"orchestrator daemon started (state: {ctx.state.db_path})")
     try:
         while True:
@@ -275,6 +278,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 registry=ctx.registry,
                 supervisor=ctx.supervisor,
                 scheduler=ctx.scheduler,
+            )
+            # ENG-AO-05: the daemon (never the dashboard) advances durable overnight sessions.
+            overnight_tick(
+                state=ctx.state, registry=ctx.registry, supervisor=ctx.supervisor, scheduler=ctx.scheduler,
+                allow_launch=not ctx.stop_after_current,
             )
             if ctx.stop_after_current:
                 still_running = [t for t in ctx.state.list_tasks() if t.state == "RUNNING"]
@@ -375,6 +383,44 @@ def _cmd_generic(verb: str, args: argparse.Namespace) -> int:
         for key, value in vars(args).items()
         if key not in ("command", "func", "canonical_repo_root") and value is not None
     }
+    try:
+        result = apply_command(ctx, verb, **kwargs)
+    except CommandError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(result.message)
+    return EXIT_OK if result.ok else EXIT_COMMAND_FAILED
+
+
+def _cmd_overnight(args: argparse.Namespace) -> int:
+    """ENG-AO-05: create/control a durable overnight session. The daemon (``run``) advances it."""
+
+    import json
+
+    from .control_plane.overnight import list_views
+
+    root = _resolved_canonical_repo_root(args)
+    ctx = _build_context(root, state_root=_standalone_state_root())
+    action = args.overnight_cmd
+    if action == "status":
+        views = list_views(ctx.state, getattr(args, "project", None) or ctx.selected_project_id)
+        print(json.dumps(views[0] if views else None, indent=2, sort_keys=True, default=str))
+        return EXIT_OK
+    verb = {
+        "start": "overnight_start",
+        "pause": "overnight_pause",
+        "resume": "overnight_resume",
+        "stop-after-current": "overnight_stop_after_current",
+        "stop": "overnight_stop",
+    }[action]
+    if action == "start":
+        kwargs = {
+            "project_id": args.project, "duration": args.duration,
+            "max_tasks": args.max_tasks, "authorize_merge": args.authorize_merge,
+        }
+    else:
+        kwargs = {"session_id": args.session}
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
     try:
         result = apply_command(ctx, verb, **kwargs)
     except CommandError as exc:
@@ -496,6 +542,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_defer = sub.add_parser("defer", help="lower a task's priority so it yields to others")
     p_defer.add_argument("--id", dest="task_id", required=True)
     p_defer.set_defaults(func=lambda a: _cmd_generic("defer", a))
+
+    p_ovn = sub.add_parser(
+        "overnight",
+        help="continuous overnight advancement of a managed project (the daemon advances it)",
+    )
+    ovn = p_ovn.add_subparsers(dest="overnight_cmd", required=True)
+    p_ovn_start = ovn.add_parser("start", help="continue <project> overnight within explicit bounds")
+    p_ovn_start.add_argument("project", nargs="?", default=None, help="project id (default: the selected project)")
+    p_ovn_start.add_argument("--duration", required=True, help="maximum duration, e.g. 6h, 10h, 90m, 2h30m")
+    p_ovn_start.add_argument("--max-tasks", dest="max_tasks", type=int, default=None, help="stop after N accepted tasks")
+    p_ovn_start.add_argument(
+        "--authorize-merge", dest="authorize_merge", action="store_true",
+        help="explicitly authorise gated merges for THIS session (project must set capability overnight_merge)",
+    )
+    p_ovn_start.set_defaults(func=_cmd_overnight)
+    for name, help_text in (
+        ("status", "print the session state as JSON"),
+        ("pause", "hold advancement (the in-flight task keeps running)"),
+        ("resume", "resume a paused session or an owner-action stop"),
+        ("stop-after-current", "finish the current task, then stop"),
+        ("stop", "safe stop: cancel the current runbook through owned-process termination"),
+    ):
+        p_ovn_x = ovn.add_parser(name, help=help_text)
+        p_ovn_x.add_argument("--session", default=None, help="session id (default: the selected project's session)")
+        if name == "status":
+            p_ovn_x.add_argument("--project", default=None)
+        p_ovn_x.set_defaults(func=_cmd_overnight)
 
     p_rb_create = sub.add_parser("runbook-create", help="create a DRAFT runbook from a saved preset")
     p_rb_create.add_argument("--name", default="")

@@ -13,7 +13,8 @@ The directory is gitignored. Never commit SQLite, WAL, SHM, or reports.
 ## What is stored
 
 Orchestration records: tasks, runbooks, events, worktrees, provider state,
-operations, project registry. Not product databases, not managed-repo files.
+operations, project registry, advancement decisions, and overnight sessions
+(bounds, counters, current runbook pointer, stop reason; never a task list). Not product databases, not managed-repo files.
 
 Rows that belong to a project carry `project_id`. Switching projects does not
 rewrite another project's history.

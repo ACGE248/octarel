@@ -1424,6 +1424,9 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .prepared-run-kv { grid-template-columns: max-content 1fr; margin-bottom: 12px; }
 .prepared-run-kv div { overflow-wrap: anywhere; }
 .quickstart-unavailable { color: var(--warn, #f59e0b); margin: 4px 0 0; }
+#overnight-form input { width: 96px; min-height: 36px; }
+#overnight-form label { color: var(--muted); }
+#overnight-body { margin-bottom: 10px; }
 .prepared-run-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 
 /* Advanced Settings collapses the full manual runbook form by default —
