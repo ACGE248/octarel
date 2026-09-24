@@ -33,7 +33,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import model_catalog
+from .. import model_catalog, native_models
 from ..redaction import redact_text
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .commands import CommandContext, CommandError, apply_command
@@ -531,7 +531,7 @@ def _runbook_to_dict(runbook: Any, *, state: Any = None, registry: Any = None) -
                     "worker_name": str(worker.raw.get("display_name", worker_id)) if worker else worker_id,
                     "execution_system": worker.execution_system if worker else "UNKNOWN",
                     "provider": worker.provider if worker else str(attempt.get("provider") or "UNKNOWN"),
-                    "model": str(attempt.get("model") or (worker.default_model if worker else "UNKNOWN")),
+                    "model": str(attempt.get("model") or (worker.effective_model if worker else "UNKNOWN")),
                     "status": str(attempt.get("status") or "UNKNOWN"),
                     "automatic": bool(attempt.get("automatic", False)),
                     "from_worker": attempt.get("from_worker"),
@@ -622,7 +622,7 @@ def _provider_to_dict(provider: Any, *, registry: Any = None, tasks: list[Any] |
             "freshness": provider_state_freshness(provider),
             "reason": effective_reason,
         },
-        "model": worker.default_model if worker else None,
+        "model": worker.effective_model if worker else None,
         "intensity": worker.default_intensity if worker else None,
         "roles": list(worker.roles) if worker else [],
         "execution_route": execution_route_for_cost_class(provider.cost_class),
@@ -632,7 +632,7 @@ def _provider_to_dict(provider: Any, *, registry: Any = None, tasks: list[Any] |
         "description": raw.get("description") or f"{provider.provider} is visible for development routing but has no configured executable adapter.",
         "best_for": list(raw.get("best_for", [])),
         "agents": [raw.get("display_name", provider.name.replace("-", " ").title())] if worker else [],
-        "models": [worker.default_model] if worker and worker.default_model else [],
+        "models": [worker.effective_model] if worker and worker.effective_model else [],
         "quota_visibility": "Provider/session facts only when locally exposed; CLI installation is not quota proof.",
         "spend_safety": "No automatic paid fallback; explicit authorization and configured limits remain required.",
         "active_tasks": [task.id for task in active_tasks],
@@ -1213,7 +1213,7 @@ def create_app(
                     "worker": t.worker,
                     "execution_system": worker.execution_system if worker else None,
                     "provider": worker.provider if worker else None,
-                    "model": worker.default_model if worker else None,
+                    "model": worker.effective_model if worker else None,
                     "intensity": worker.default_intensity if worker else None,
                     "provider_state": provider.state if provider else None,
                     "worktree": t.worktree,
@@ -1344,7 +1344,7 @@ def create_app(
                     "worker": item.worker,
                     "execution_system": worker.execution_system if worker else None,
                     "provider": worker.provider if worker else None,
-                    "model": worker.default_model if worker else None,
+                    "model": worker.effective_model if worker else None,
                     "intensity": worker.default_intensity if worker else None,
                     "progress": None,
                     "current_action": None,
@@ -1427,6 +1427,15 @@ def create_app(
         ]
         return body
 
+    @app.get("/api/native-models")
+    def native_model_freshness() -> dict[str, Any]:
+        """Cached native Grok/Codex model freshness: configured vs verified/candidate model (ENG-AO-04).
+
+        Read-only: it never runs a CLI; refresh with ``python -m scripts.agents.native_models refresh``.
+        """
+
+        return native_models.inventory(ctx.registry)
+
     @app.get("/api/models")
     def models() -> list[dict[str, Any]]:
         tasks_by_worker: dict[str, list[Any]] = {}
@@ -1440,6 +1449,8 @@ def create_app(
                 "execution_system": w.execution_system,
                 "provider": w.provider,
                 "default_model": w.default_model,
+                "effective_model": w.effective_model,
+                "native_model_family": w.native_model_family or None,
                 "model_pool": w.model_pool or None,
                 "default_intensity": w.default_intensity,
                 "capability": w.capability,

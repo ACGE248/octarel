@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import model_catalog
+from .. import model_catalog, native_models
 from ..policy import PolicyError, compose_policy_bundle, validate_policy_preservation
 from ..registry import PERMISSION_STANDARD, Registry
 from .intake import IntakeCollision, check_and_claim
@@ -283,6 +283,10 @@ def managed_admit(
         if any(registry.workers[name].model_pool for name in route_candidates if name in registry.workers):
             # Local, non-billable ``opencode models`` listing, only when the cached snapshot is stale.
             model_catalog.get_catalog()
+        if any(registry.workers[name].native_model_family for name in route_candidates if name in registry.workers):
+            # Local, non-billable native CLI enumeration, only when the cached verification is stale (ENG-AO-04).
+            # Freshness never reorders candidates: routing priority is decided before and independently of it.
+            native_models.ensure_fresh(registry)
 
     eligible, scores, blocked = _candidate_scores(state=state, registry=registry, task=task)
     selected = None

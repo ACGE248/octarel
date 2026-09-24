@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import model_catalog, subagents
+from . import model_catalog, native_models, subagents
 from .graph_context import build_graph_context
 from .manifest import (
     RESULT_BLOCKED,
@@ -317,6 +317,9 @@ def run_delegation(
     ]
 
     worker = registry.get(worker_name)
+    _refresh_native_models(registry, worker, dry_run=dry_run)
+    if worker.native_model_family and not model:
+        model = worker.effective_model
     if role not in worker.roles:
         raise ValidationError(f"worker {worker_name!r} does not declare role {role!r}")
     if allow_write and not worker.is_write_capable:
@@ -376,8 +379,9 @@ def run_delegation(
     policy_manifest["actual_worker"] = worker.name
     policy_manifest["actual_execution_system"] = worker.execution_system
     policy_manifest["actual_provider"] = worker.provider
-    policy_manifest["actual_model"] = model or worker.default_model
+    policy_manifest["actual_model"] = model or worker.effective_model
     policy_manifest["actual_intensity"] = resolved_intensity
+    _record_native_freshness(policy_manifest, worker, model or worker.effective_model)
     if pool_selection is not None:
         policy_manifest["model_selection"] = model_catalog.redacted_evidence(pool_selection.evidence)
     bounded_prompt = _attach_graph_context(
@@ -473,7 +477,7 @@ def run_delegation(
         worker=worker_name,
         planned_execution_system=worker.execution_system,
         planned_provider=worker.provider,
-        planned_model=model or worker.default_model,
+        planned_model=model or worker.effective_model,
         planned_intensity=resolved_intensity,
         requested_command=command,
         why_this_worker=why,
@@ -583,7 +587,7 @@ def run_delegation(
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
     record.actual_provider = worker.provider
-    record.actual_model = structured_actual_model(log_text, model or worker.default_model)
+    record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
     record.actual_intensity = resolved_intensity
 
     after = worktree_snapshot(root)
@@ -608,6 +612,24 @@ def run_delegation(
     if pool_selection is not None and record.result == RESULT_FAIL:
         _cool_down_failed_pool_model(record, model, failure_reason or log_text[-2000:])
     return finish(log_text)
+
+
+def _refresh_native_models(registry, worker, *, dry_run: bool) -> None:
+    """ENG-AO-04: re-verify the native model family of a Grok/Codex worker before its model is resolved.
+
+    Local, non-billable CLI enumeration only; a dry run reads the cache and spawns nothing.  Never fails the run:
+    without a verification the configured default stays in force.
+    """
+
+    if dry_run or not worker.native_model_family:
+        return
+    native_models.ensure_fresh(registry, max_age_seconds=0)
+
+
+def _record_native_freshness(policy_manifest: dict, worker, used_model: str) -> None:
+    evidence = native_models.freshness_evidence(worker, used_model)
+    if evidence is not None:
+        policy_manifest["model_freshness"] = model_catalog.redacted_evidence(evidence)
 
 
 def _resolve_pool_model(
@@ -673,6 +695,9 @@ def run_session(
 
     validate_task_id(task)
     worker = registry.get(worker_name)
+    _refresh_native_models(registry, worker, dry_run=dry_run)
+    if worker.native_model_family and not model:
+        model = worker.effective_model
     if role not in worker.roles:
         raise ValidationError(f"worker {worker_name!r} does not declare role {role!r}")
     resolved_intensity = intensity or worker.default_intensity
@@ -706,8 +731,9 @@ def run_session(
     policy_manifest["actual_worker"] = worker.name
     policy_manifest["actual_execution_system"] = worker.execution_system
     policy_manifest["actual_provider"] = worker.provider
-    policy_manifest["actual_model"] = model or worker.default_model
+    policy_manifest["actual_model"] = model or worker.effective_model
     policy_manifest["actual_intensity"] = resolved_intensity
+    _record_native_freshness(policy_manifest, worker, model or worker.effective_model)
     composed_prompt = _attach_graph_context(
         bundle.prompt, root=root, seeds=[], project_id=project_id, policy_manifest=policy_manifest
     )
@@ -737,7 +763,7 @@ def run_session(
         worker=worker_name,
         planned_execution_system=worker.execution_system,
         planned_provider=worker.provider,
-        planned_model=model or worker.default_model,
+        planned_model=model or worker.effective_model,
         planned_intensity=resolved_intensity,
         requested_command=command,
         why_this_worker=why,
@@ -818,7 +844,7 @@ def run_session(
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
     record.actual_provider = worker.provider
-    record.actual_model = structured_actual_model(log_text, model or worker.default_model)
+    record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
     record.actual_intensity = resolved_intensity
 
     after = worktree_snapshot(root)

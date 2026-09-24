@@ -158,7 +158,7 @@ def failure_attribution(
         "worker_id": worker.name if worker else None,
         "execution_system": worker.execution_system if worker else None,
         "provider": worker.provider if worker else None,
-        "model": worker.default_model if worker else None,
+        "model": worker.effective_model if worker else None,
         "category": category,
         "reason": clean or None,
         "reset": reset,
