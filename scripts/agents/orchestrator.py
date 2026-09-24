@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -263,6 +264,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             print(f"  - would start {task.id} ({task.task_ref}/{task.role} via {task.worker})")
         return EXIT_OK
 
+    # ENG-AO-06: a daemon launched from (or left attached to) a terminal must never be suspended by
+    # that terminal's job control. Reads/writes on the tty fail with EIO instead of stopping us.
+    for name in ("SIGTTIN", "SIGTTOU"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), signal.SIG_IGN)
     ctx = _build_context(root, state_root=_standalone_state_root())
     _run_startup_recovery(ctx, root)
     recover_runbooks_on_restart(state=ctx.state)

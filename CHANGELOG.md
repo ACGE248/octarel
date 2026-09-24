@@ -23,6 +23,7 @@ All notable changes to Octarel are documented in this file.
 
 ### Fixed
 
+- ENG-AO-06: unattended daemon launch and non-blocking provider probes. `octarel daemon start|status|stop` launches `octarel run` detached (own session, no stdin/terminal, unbuffered log, pid file, duplicate/non-canonical refusal, `SUSPENDED` detection); `octarel run` ignores SIGTTIN/SIGTTOU; every provider CLI probe now runs with closed stdin, its own session and a hard timeout via `scripts/agents/probe.py`.
 - Write the launchd dashboard pid file under `~/Library/Application Support/Octarel/` (boot volume). launchd cannot write onto an external-volume state directory; loopback health remains the listener authority.
 
 ### Security

@@ -14,6 +14,7 @@ import plistlib
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -295,3 +296,127 @@ def canonicalize_state_dir(
         dry_run=dry_run,
         replace_unmigrated_destination=replace_unmigrated,
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# ENG-AO-06 (issue #15): unattended orchestrator daemon (``octarel run``) launch.
+#
+# Starting the daemon with ``nohup … &`` from an interactive terminal leaves it in that terminal's
+# session: the shell's job control can suspend it (SIGTTIN/SIGTTOU/SIGTSTP) and it then silently
+# stops advancing every durable overnight session. ``octarel daemon start`` instead launches it in
+# its own session, with no stdin and no controlling terminal, logging unbuffered to a file.
+# --------------------------------------------------------------------------------------------------
+
+DAEMON_PID_FILENAME = "daemon.pid"
+DAEMON_LOG_FILENAME = "daemon.log"
+_DAEMON_MARKER = "octarel run"
+
+
+class DaemonError(RuntimeError):
+    """The daemon could not be launched/stopped safely."""
+
+
+def daemon_pid_path(state_dir: Path) -> Path:
+    return state_dir / DAEMON_PID_FILENAME
+
+
+def daemon_log_path(state_dir: Path) -> Path:
+    return state_dir / DAEMON_LOG_FILENAME
+
+
+def _ps_field(pid: int, field: str) -> str:
+    from scripts.agents.probe import run_probe
+
+    try:
+        result = run_probe(["ps", "-o", f"{field}=", "-p", str(pid)], timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (result.stdout or "").strip()
+
+
+def daemon_status(state_dir: Path) -> dict[str, object]:
+    """Truthful daemon state from the pid file: ``RUNNING``, ``SUSPENDED`` (job-control stopped), ``NOT_RUNNING``."""
+
+    pid = None
+    try:
+        pid = int(daemon_pid_path(state_dir).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pass
+    if pid is None:
+        return {"state": "NOT_RUNNING", "pid": None}
+    stat = _ps_field(pid, "stat")
+    command = _ps_field(pid, "command")
+    if not stat or _DAEMON_MARKER not in " ".join(command.split()).replace("-m octarel run", _DAEMON_MARKER):
+        return {"state": "NOT_RUNNING", "pid": pid, "note": "pid file is stale (process gone or not the Octarel daemon)"}
+    state = "SUSPENDED" if stat.startswith("T") else "RUNNING"
+    return {"state": state, "pid": pid, "stat": stat}
+
+
+def start_daemon(
+    code_root: Path,
+    state_dir: Path,
+    *,
+    argv: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    settle_seconds: float = 1.0,
+) -> int:
+    """Launch ``octarel run`` detached from the caller's terminal/session. Returns its pid."""
+
+    if not state_dir_is_canonical(code_root, state_dir):
+        raise DaemonError(
+            f"refusing to start: state dir {state_dir} is not the canonical Octarel state "
+            f"({canonical_state_dir(code_root)}); run the daemon only from canonical Octarel main"
+        )
+    current = daemon_status(state_dir)
+    if current["state"] != "NOT_RUNNING":
+        raise DaemonError(
+            f"the Octarel daemon is already {current['state']} (pid {current['pid']}); "
+            "run `octarel daemon stop` first"
+        )
+    if argv is None:
+        try:
+            interpreter = str(resolve_cli_python(Path(sys.executable).parent))
+        except FileNotFoundError:
+            interpreter = sys.executable
+        argv = [interpreter, "-u", "-m", "octarel", "run"]
+    child_env = dict(os.environ if env is None else env)
+    child_env.setdefault("OCTAREL_CODE_ROOT", str(code_root))
+    child_env["PYTHONUNBUFFERED"] = "1"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with daemon_log_path(state_dir).open("ab") as log:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv, never shell-interpreted
+            argv,
+            cwd=str(code_root),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=child_env,
+            start_new_session=True,
+        )
+    write_daemon_pid(state_dir, process.pid)
+    time.sleep(settle_seconds)
+    if process.poll() is not None:
+        daemon_pid_path(state_dir).unlink(missing_ok=True)
+        raise DaemonError(f"the daemon exited immediately (code {process.returncode}); see {daemon_log_path(state_dir)}")
+    return process.pid
+
+
+def write_daemon_pid(state_dir: Path, pid: int) -> None:
+    daemon_pid_path(state_dir).write_text(f"{pid}\n", encoding="utf-8")
+
+
+def stop_daemon(state_dir: Path) -> int | None:
+    """Stop the recorded daemon (resuming it first if suspended) and clear the pid file."""
+
+    current = daemon_status(state_dir)
+    pid = current["pid"]
+    if current["state"] == "NOT_RUNNING":
+        daemon_pid_path(state_dir).unlink(missing_ok=True)
+        return None
+    try:
+        os.kill(int(pid), signal.SIGCONT)  # a stopped process only handles SIGTERM after it continues
+    except ProcessLookupError:
+        pass
+    stop_pid(int(pid))
+    daemon_pid_path(state_dir).unlink(missing_ok=True)
+    return int(pid)
