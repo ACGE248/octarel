@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -67,6 +68,16 @@ _SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx"
 # Provider credentials must never reach Graphify: it then has no paid/LLM path to take.
 _SCRUBBED_ENV_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 _SCRUBBED_ENV_NAMES = frozenset({"ANTHROPIC_AUTH_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"})
+
+# ENG-AO-02: per-bot scoped slices of the same graph.  ``None`` keeps the unfocused, full section.
+FOCUS_DEPENDENCY = "dependency"
+FOCUS_TESTS = "tests"
+FOCUS_IMPACT = "impact"
+FOCUSES = (FOCUS_DEPENDENCY, FOCUS_TESTS, FOCUS_IMPACT)
+_IMPACT_DIRS = frozenset({"docs", "doc", "frontend", "ui", "web", "api", "dashboard", "static", "templates", "routes"})
+_IMPACT_STEMS = frozenset({"api", "routes", "dashboard"})
+_IMPACT_SUFFIXES = (".md", ".html", ".css", ".tsx", ".jsx", ".vue", ".svelte")
+_LABELLED_PATH = re.compile(r"\(([^()]+)\)")
 
 PRECEDENCE_NOTE = (
     "Advisory only. Truth precedence: 1) current source tree, 2) project AGENTS/policy and maintained docs, "
@@ -352,8 +363,49 @@ def _summarize(graph: dict[str, Any], seeds: list[str], snapshot_paths: set[str]
     }
 
 
-def _render(summary: dict[str, Any], seeds: list[str]) -> tuple[str, bool]:
+def is_impact_path(relative: str) -> bool:
+    """UI, API, or documentation surface (used to scope the impact-focused bot slice).
+
+    Matches whole path segments, never substrings, so ``src/capital.py`` is not an "api" file.
+    """
+
+    path = PurePosixPath(relative.replace("\\", "/").lower())
+    return (
+        path.suffix in _IMPACT_SUFFIXES
+        or path.stem in _IMPACT_STEMS
+        or any(part in _IMPACT_DIRS for part in path.parts[:-1])
+    )
+
+
+def _labelled_path_is_impact(item: str) -> bool:
+    """``label (path) -> label`` caller/callee rows are matched on their file path, not the whole label."""
+
+    return any(is_impact_path(path) for path in _LABELLED_PATH.findall(item))
+
+
+def _focused_summary(summary: dict[str, Any], focus: str | None) -> dict[str, Any]:
+    if focus is None:
+        return summary
+    empty: dict[str, Any] = {**summary, "symbols": {}, "imports": [], "dependents": [], "calls": [], "called_by": [], "tests": []}
+    if focus == FOCUS_DEPENDENCY:
+        keep = ("symbols", "imports", "dependents", "calls", "called_by")
+        return {**empty, **{key: summary[key] for key in keep}}
+    if focus == FOCUS_TESTS:
+        return {**empty, "symbols": summary["symbols"], "tests": summary["tests"]}
+    if focus == FOCUS_IMPACT:
+        return {
+            **empty,
+            "dependents": [path for path in summary["dependents"] if is_impact_path(path)],
+            "called_by": [item for item in summary["called_by"] if _labelled_path_is_impact(item)],
+        }
+    raise ValueError(f"unknown graph focus {focus!r}")
+
+
+def _render(summary: dict[str, Any], seeds: list[str], focus: str | None = None) -> tuple[str, bool]:
+    summary = _focused_summary(summary, focus)
     lines = ["Seed files: " + ", ".join(seeds)]
+    if focus is not None:
+        lines.insert(0, f"Scope focus: {focus} (a bounded slice; do not assume it is the whole picture)")
     truncated = False
 
     def add(title: str, items: list[str]) -> None:
@@ -386,13 +438,65 @@ def build_graph_context(
 ) -> GraphContext:
     """Return advisory graph context for the selected checkout ``root``; never raises."""
 
+    return build_graph_contexts(root, seed_paths, (None,), project_id=project_id, state_root=state_root)[None]
+
+
+def build_graph_contexts(
+    root: Path,
+    seed_paths: Iterable[str],
+    focuses: Iterable[str | None],
+    *,
+    project_id: str | None = None,
+    state_root: Path | None = None,
+) -> dict[str | None, GraphContext]:
+    """One graph preparation, one bounded advisory section per requested focus; never raises.
+
+    ENG-AO-02 gives each read-only bot a small, differently-scoped slice of the same tree-matched
+    graph instead of the broad section.  ``None`` is the ordinary full section.
+    """
+
+    wanted = list(dict.fromkeys(focuses))
     try:
-        return _build(Path(root), list(seed_paths), project_id, state_root)
+        return _build(Path(root), list(seed_paths), project_id, state_root, wanted)
     except Exception as exc:  # noqa: BLE001 - graph context must never break a worker launch
-        return _result(STATUS_FAILED_SAFE, f"graph context failed safely: {type(exc).__name__}")
+        failed = _result(STATUS_FAILED_SAFE, f"graph context failed safely: {type(exc).__name__}")
+        return {focus: failed for focus in wanted}
 
 
-def _build(root: Path, seed_paths: list[str], project_id: str | None, state_root: Path | None) -> GraphContext:
+def _build(
+    root: Path, seed_paths: list[str], project_id: str | None, state_root: Path | None, focuses: list[str | None]
+) -> dict[str | None, GraphContext]:
+    prepared = _prepare(root, seed_paths, project_id, state_root)
+    if isinstance(prepared, GraphContext):
+        return {focus: prepared for focus in focuses}
+    graph, seeds, snapshot_paths, status, reason, base = prepared
+    summary = _summarize(graph, seeds, snapshot_paths)
+    results: dict[str | None, GraphContext] = {}
+    for focus in focuses:
+        body, truncated = _render(summary, seeds, focus)
+        text = (
+            "\n--- ADVISORY GRAPH CONTEXT (Graphify-derived; NOT authoritative) ---\n"
+            f"{PRECEDENCE_NOTE}\n{body}\n"
+        )
+        extra = {"focus": focus} if focus is not None else {}
+        results[focus] = _result(
+            status,
+            reason,
+            text=text,
+            seed_files=seeds,
+            graph_nodes=summary["graph_nodes"],
+            graph_edges=summary["graph_edges"],
+            context_characters=len(text),
+            truncated=truncated,
+            **base,
+            **extra,
+        )
+    return results
+
+
+def _prepare(root: Path, seed_paths: list[str], project_id: str | None, state_root: Path | None):
+    """A validated ``(graph, seeds, snapshot_paths, status, reason, base)`` or a terminal :class:`GraphContext`."""
+
     if os.environ.get(ENV_MODE, "").strip().lower() in {"0", "off", "false", "disabled"}:
         return _result(STATUS_SKIPPED, f"disabled by {ENV_MODE}")
     binary = os.environ.get(ENV_BIN) or shutil.which("graphify")
@@ -442,20 +546,4 @@ def _build(root: Path, seed_paths: list[str], project_id: str | None, state_root
     seeds = _seed_files(seed_paths, snapshot_paths)
     if not seeds:
         return _result(STATUS_SKIPPED, "no indexed (non-sensitive) files within the task scope", **base)
-    summary = _summarize(graph, seeds, snapshot_paths)
-    body, truncated = _render(summary, seeds)
-    text = (
-        "\n--- ADVISORY GRAPH CONTEXT (Graphify-derived; NOT authoritative) ---\n"
-        f"{PRECEDENCE_NOTE}\n{body}\n"
-    )
-    return _result(
-        status,
-        reason,
-        text=text,
-        seed_files=seeds,
-        graph_nodes=summary["graph_nodes"],
-        graph_edges=summary["graph_edges"],
-        context_characters=len(text),
-        truncated=truncated,
-        **base,
-    )
+    return graph, seeds, snapshot_paths, status, reason, base

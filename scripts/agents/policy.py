@@ -61,6 +61,9 @@ _ROUTE_CONTRACT = {
     "diff-review": (ROLE_REVIEWER, WORKFLOW_REVIEW),
     "doc-drift-review": (ROLE_REVIEWER, WORKFLOW_REVIEW),
     "impact-search": (ROLE_RESEARCHER, None),
+    # ENG-AO-02: explicit bot-enabled primary and its read-only, one-level investigation bots.
+    "bot-implementation": (ROLE_IMPLEMENTER, WORKFLOW_IMPLEMENT),
+    "bot-investigation": (ROLE_RESEARCHER, None),
 }
 _SENSITIVE_PARTS = frozenset({"data", ".env", "credentials", "secrets"})
 

@@ -4,6 +4,7 @@ from both the OctaScene app (port 8765) and any provider/model network call.
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -232,6 +233,36 @@ def test_workflow_endpoint_only_promotes_persisted_tasks_to_stages(client):
     assert stage["current_action"] is None
     assert stage["current_file"] is None
     assert stage["subagents"] == []
+
+
+def test_workflow_stage_surfaces_bot_activity_for_a_bot_enabled_worker(client, ctx, tmp_path):
+    # ENG-AO-02: bot activity reuses the existing stage ``subagents`` field, read from the run manifest.
+    run_dir = tmp_path / ".agent-output" / "ENG-AO-02" / "grok-build-bots" / "run-1"
+    run_dir.mkdir(parents=True)
+    bots = [
+        {"id": "bot-1-dependency", "role": "dependency", "scope": ["src/app.py"], "result": "PASS",
+         "worker": "grok-build-bot", "provider": "xAI", "model": "grok-4.6",
+         "graph_context": {"supplied": True}},
+        {"id": "bot-2-tests", "role": "tests", "scope": ["src/app.py"], "result": "FAIL",
+         "failure_reason": "exit status 3", "graph_context": {"supplied": False}},
+        {"id": "bot-3-impact", "role": "impact", "scope": [], "result": "TIMEOUT",
+         "failure_reason": "timed out after 10s"},
+    ]
+    (run_dir / "manifest.json").write_text(json.dumps({
+        "result": "PASS", "started_at": "2026-09-24T00:00:00+00:00", "policy_manifest": {"bot_fanout": {"bots": bots}},
+    }))
+    ctx.state.delete_task("t1")
+    ctx.state.upsert_task(Task(
+        id="t-bots", task_ref="ENG-AO-02", role="bot-implementation", worker="grok-build-bots",
+        state="RUNNING", worktree=str(tmp_path),
+    ))
+    stage = client.get("/api/workflow").json()["stages"][0]
+    assert stage["worker"] == "grok-build-bots"
+    assert [(row["role"], row["state"], row["read_only"]) for row in stage["subagents"]] == [
+        ("dependency", "COMPLETED", True), ("tests", "FAILED", True), ("impact", "FAILED", True),
+    ]
+    assert stage["subagents"][0]["graph_context_supplied"] is True
+    assert stage["subagents"][1]["failure_reason"] == "exit status 3"
 
 
 def test_workflow_uses_latest_linked_runbook_state_after_successful_fallback(client, ctx, tmp_path):

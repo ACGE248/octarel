@@ -104,7 +104,7 @@ See [`docs/engineering/ENG-AGENT-10.md`](../../docs/engineering/ENG-AGENT-10.md)
   `data/`, `.env`, or any secret-bearing file. Scope is a prompt/context bound,
   not a filesystem read jail; the wrapper also uses each CLI's safe sandbox,
   minimal environment, and post-run worktree fingerprint.
-- **Git-worktree safety.** Write-capable workers (`claude-code`, `codex-build`, `grok-build`)
+- **Git-worktree safety.** Write-capable workers (`claude-code`, `codex-build`, `grok-build`, `grok-build-bots`)
   require `--allow-write`, refuse to run on `main`/`master`, and take a
   checkout-wide atomic lock so two write workers never share a checkout; a lock
   with a verifiably dead local PID is recovered on the next run.
@@ -147,6 +147,52 @@ task status, policy, roadmap, ADRs, validation, or exact-tree acceptance. Truth 
 - **Exact-tree acceptance** (`scripts/ci/local_gate.py`) never reads graph data; it verifies the real
   candidate tree.
 
+## Controlled Grok bot fan-out (ENG-AO-02)
+
+Normal Grok is unchanged: `grok-build` (write) and `grok-build-review` (read-only) keep `--no-subagents`,
+their roles, and their routing priority. Bot mode is a **separate, explicit** route that AO chooses; it is
+never automatic and never changes provider routing preference.
+
+```text
+AO -> grok-build-bots (primary, only writer, --no-subagents)
+        <- concise findings <- 2-3 read-only grok-build-bot workers, in parallel, one level only
+```
+
+- **When AO may use it.** Only for `--worker grok-build-bots --bot-task-class <class>` with a class from
+  `serious-integration`, `hard-debugging`, or `architecture-high-risk` (the existing usage-policy task
+  classes). `mechanical`, `routine`, or no class declines deterministically and runs the ordinary single-agent
+  primary; the decline is recorded. The control plane passes the decision as a `bot-class:<class>` task
+  command entry. `--scope` (or `--bot-scope` for `session`) bounds every bot.
+- **AO owns the fan-out.** The native Grok CLI has no bound on subagents, so AO runs the bots itself as
+  registry worker `grok-build-bot` (read-only, `--permission-mode plan --sandbox read-only --no-subagents
+  --disable-web-search`). Count is `min(max_bots, 3, applicable roles)`: `dependency` (blast radius),
+  `tests` (regression risk), and `impact` (UI/API/docs, matched on whole path segments, only when such a surface is in scope). Registry
+  loading fails closed if a `subagents` block allows more than 3 bots, more than one level, a non-read-only
+  or itself fan-out-capable bot, API billing, or a mechanical/routine class.
+- **One writer.** Bots run inside the primary's checkout write lock and finish (and are verified) before the
+  primary starts, so they never overlap the writer. A working-tree/index/HEAD change during the fan-out is a
+  contract violation: findings are discarded and the primary is `BLOCKED`. Bots never commit, push, merge, or
+  touch branches, receive no provider/API credentials (minimal worker environment), and inherit path/secret
+  filtering: scope paths and graph slices are filtered with the same sensitive-path rules.
+- **Graphify.** Each bot gets its own bounded slice of the ENG-AO-01 graph (`dependency`, `tests`, or
+  `impact` focus) instead of the broad section. If Graphify is unavailable/stale the bots still run with only
+  their non-sensitive scope paths (recorded as `graph_context.supplied: false` with the reason). Graphify stays
+  advisory below the source tree, policy, and task contracts.
+- **Failure handling.** Each bot gets exactly one attempt and a bounded timeout (`bot_timeout_seconds`,
+  capped at one third of the run timeout, with a join deadline: a bot that outlives its bound is recorded as `TIMEOUT` and the run fails closed (`BLOCKED`, primary not launched, lock released) rather than starting the writer beside a possibly-live bot. Each bot leads its own process group, which is killed on timeout, on a leftover child, and on that fail-closed path; the primary's budget is reduced by fan-out time). A failed/timed-out bot is
+  recorded (with a failure category such as `quota`) and never retried, never re-run on a stronger model, and
+  never falls back to an API key. If no bot yields findings the primary continues single-agent.
+- **Evidence.** `policy_manifest.bot_fanout` in the normal run manifest records the decision and reason, task
+  class, bot count and roles/scopes, provider/model, start/finish/result, failure reason, Graphify status per
+  bot, token usage when the transport reports it, and per-bot logs under `bots/` in the primary's evidence
+  directory. The dashboard reuses the existing stage `subagents` field and attempt details. No second
+  history system exists.
+- **Not review.** Bot findings are unverified assistance to the primary. `independent_review` is always
+  `false`; provider-diverse independent review and exact-tree acceptance are separate, unchanged stages.
+- **Transport seam.** `scripts/agents/subagents.py` keeps launch/parse behind `BotTransport`; native Grok
+  (`grok-cli`) is the only transport today. A bot-capable OpenCode/xAI transport can `register_transport`
+  and reuse planning, bounds, read-only verification, Graphify scoping, and evidence unchanged.
+
 ## Worker registry (`workers.json`)
 
 Routing (cheapest capable worker first):
@@ -160,6 +206,7 @@ Routing (cheapest capable worker first):
 | `doc-drift-review` | `antigravity-doc-drift` |
 | `diff-review` | `antigravity-diff-review` → `opencode2-gemini-flash-lite-review` → `grok-build-review` → `codex-review` |
 | `overflow` | `deepseek-overflow` (disabled by default) |
+| `bot-implementation`, `bot-investigation` | `grok-build-bots`, `grok-build-bot` (explicit only; never in another route) |
 
 The existing **OpenCode2 + Gemini 3.5 Flash Lite** focused-test path is preserved
 and remains first choice for mechanical testing. Antigravity supplements

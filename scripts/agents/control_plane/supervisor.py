@@ -161,8 +161,12 @@ class Supervisor:
         prompt = [
             c.removeprefix("literal:") if c.startswith(("literal:scope:", "literal:base:")) else c
             for c in task.command
-            if not (c.startswith("scope:") or c.startswith("base:"))
+            if not (c.startswith("scope:") or c.startswith("base:") or c.startswith("bot-class:"))
         ]
+        # ENG-AO-02: AO's explicit, never-automatic decision to allow bounded read-only bot fan-out for a
+        # bot-enabled worker (``grok-build-bots``); ``orchestrate`` still validates worker and class.
+        bot_classes = [c.removeprefix("bot-class:") for c in task.command if c.startswith("bot-class:")]
+        bot_argv = ["--bot-task-class", bot_classes[-1]] if bot_classes else []
         if task.launch_mode == LAUNCH_SESSION:
             # A runbook session covers the whole worktree by design (issue
             # #93): ``orchestrate run``'s mandatory --scope narrowing does not
@@ -190,6 +194,10 @@ class Supervisor:
                 argv += ["--permission-profile", task.permission_profile]
             if task.fallback_reason:
                 argv += ["--fallback-reason", task.fallback_reason]
+            if bot_argv:
+                argv += bot_argv
+                for scope in [c for c in task.command if c.startswith("scope:")]:
+                    argv += ["--bot-scope", scope.removeprefix("scope:")]
             if dry_run:
                 argv.append("--dry-run")
             if prompt:
@@ -218,6 +226,7 @@ class Supervisor:
         # #94): the unattended profile is only reachable through a LAUNCH_SESSION task's
         # `session` argv above. An ordinary delegated task's permission_profile is always
         # PERMISSION_STANDARD by construction, so this is not reached in practice today.
+        argv += bot_argv
         if task.role == "diff-review":
             # ENG-AGENT-13 (issue #138): ``run_delegation`` itself requires
             # ``--include-diff`` for every diff-review role so the read-only

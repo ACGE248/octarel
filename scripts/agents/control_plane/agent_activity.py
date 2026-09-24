@@ -115,6 +115,48 @@ def list_attempts(repo_root: Path, task_id: str, worker: str) -> list[dict[str, 
     return [a.to_dict() for a in attempts]
 
 
+def _subagent_rows(manifest_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Bot activity (ENG-AO-02) already recorded in a run manifest, in the dashboard ``subagents`` shape."""
+
+    fanout = (manifest_data.get("policy_manifest") or {}).get("bot_fanout") or {}
+    rows = []
+    for bot in fanout.get("bots") or []:
+        if not isinstance(bot, dict):
+            continue
+        state = {"PASS": "COMPLETED", "FAIL": "FAILED", "TIMEOUT": "FAILED"}.get(str(bot.get("result")), "UNKNOWN")
+        rows.append(
+            {
+                "id": str(bot.get("id", "")),
+                "role": str(bot.get("role", "")),
+                "scope": [redact_text(str(path)) for path in bot.get("scope") or []],
+                "state": state,
+                "result": bot.get("result"),
+                "worker": bot.get("worker"),
+                "provider": bot.get("provider"),
+                "model": bot.get("model"),
+                "started_at": bot.get("started_at"),
+                "finished_at": bot.get("finished_at"),
+                "graph_context_supplied": bool((bot.get("graph_context") or {}).get("supplied")),
+                "failure_reason": redact_text(str(bot["failure_reason"]))[:400] if bot.get("failure_reason") else None,
+                "read_only": True,
+            }
+        )
+    return rows
+
+
+def latest_subagents(repo_root: Path, task_id: str, worker: str) -> list[dict[str, Any]]:
+    """Bot rows of the most recent recorded attempt for a worker card; ``[]`` when none/unreadable."""
+
+    attempts = list_attempts(repo_root, task_id, worker)
+    if not attempts:
+        return []
+    manifest_path = _run_dir(Path(repo_root), task_id, worker, attempts[0]["run_id"]) / "manifest.json"
+    try:
+        return _subagent_rows(json.loads(manifest_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return []
+
+
 def _tail_text(path: Path, *, max_bytes: int) -> tuple[str, bool]:
     """Read up to the last ``max_bytes`` of a text file. Returns (text, truncated)."""
 
@@ -193,6 +235,7 @@ def read_attempt(repo_root: Path, task_id: str, worker: str, run_id: str) -> dic
             # as defense in depth in case an older manifest predates a redaction
             # rule, or a future writer regresses it.
             "notes": [redact_text(str(n)) for n in (manifest_data.get("notes") or [])],
+            "subagents": _subagent_rows(manifest_data),
         }
 
     summary_text: str | None = None

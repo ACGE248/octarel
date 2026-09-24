@@ -11,11 +11,12 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
 from .registry import Worker
 
@@ -241,6 +242,19 @@ def write_lock(worker: Worker, lock_dir: Path) -> Iterator[None]:
             pass
 
 
+_ALLOWED_ENV_NAMES = {"HOME", "PATH", "SHELL", "TMPDIR", "USER", "LOGNAME", "LANG", "TERM", "COLORTERM", "NO_COLOR"}
+
+
+def _worker_environment() -> dict[str, str]:
+    """Minimal environment allowlist so unrelated credentials cannot cross the worker boundary."""
+
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _ALLOWED_ENV_NAMES or key.startswith("LC_") or key.startswith("XDG_")
+    }
+
+
 def run_worker_process(command: list[str], root: Path, *, timeout: float | None) -> tuple[int, str]:
     """Run ``command`` from ``root`` and return ``(exit_code, combined_output)``.
 
@@ -249,13 +263,6 @@ def run_worker_process(command: list[str], root: Path, *, timeout: float | None)
     allowlist so unrelated credentials cannot cross the worker boundary.
     """
 
-    allowed_names = {"HOME", "PATH", "SHELL", "TMPDIR", "USER", "LOGNAME", "LANG", "TERM", "COLORTERM", "NO_COLOR"}
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key in allowed_names or key.startswith("LC_") or key.startswith("XDG_")
-    }
-
     try:
         completed = subprocess.run(
             command,
@@ -263,13 +270,56 @@ def run_worker_process(command: list[str], root: Path, *, timeout: float | None)
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=env,
+            env=_worker_environment(),
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
         partial = (exc.stdout or "") + (exc.stderr or "")
         return 124, partial + f"\n[timed out after {timeout}s]\n"
     return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
+
+
+def run_worker_process_group(
+    command: list[str], root: Path, *, timeout: float | None, on_group: Callable[[int | None], None] | None = None
+) -> tuple[int, str]:
+    """Like :func:`run_worker_process`, but the worker leads its own process group that is reaped on timeout.
+
+    ENG-AO-02 read-only bots use this so a bot that spawned children can neither outlive its bound nor keep
+    the output pipes open: on timeout the whole group is killed. ``on_group`` receives the group id when it
+    starts and ``None`` when the process has finished, so a caller can reap stragglers.
+    """
+
+    process = subprocess.Popen(
+        command,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_worker_environment(),
+        start_new_session=True,
+    )
+    if on_group is not None:
+        on_group(process.pid)
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_process_group(process.pid)
+            stdout, stderr = process.communicate()
+            return 124, (stdout or "") + (stderr or "") + f"\n[timed out after {timeout}s]\n"
+        return process.returncode, (stdout or "") + (stderr or "")
+    finally:
+        # Any leftover member of the group (a child that outlived a clean exit) is reaped too.
+        kill_process_group(process.pid)
+        if on_group is not None:
+            on_group(None)
+
+
+def kill_process_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 
 def _first_json_object(output: str) -> dict[str, object] | None:

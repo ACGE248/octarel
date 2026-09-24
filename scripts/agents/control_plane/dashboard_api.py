@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..redaction import redact_text
-from .agent_activity import list_attempts, read_attempt
+from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .commands import CommandContext, CommandError, apply_command
 from .operations import (
     AppLifecycleManager,
@@ -1322,6 +1322,14 @@ def create_app(
                 results.append({"task_id": item.id, "kind": "result", "text": redact_text(item.result)[:800]})
             if item.last_error:
                 results.append({"task_id": item.id, "kind": "error", "text": redact_text(item.last_error)[:800]})
+            subagents: list[dict[str, Any]] = []
+            if worker and worker.subagents:  # only a bot-enabled worker (ENG-AO-02) can have bot activity
+                try:
+                    subagents = latest_subagents(
+                        Path(item.worktree) if item.worktree else ctx.repo_root, item.task_ref, item.worker
+                    )
+                except (ValueError, OSError):
+                    subagents = []
             attempts = []
             if runbook and runbook.task_id == item.id and runbook.recovery_note:
                 attempts.append({"state": "FAILED", "summary": redact_text(runbook.recovery_note)[:800]})
@@ -1342,7 +1350,7 @@ def create_app(
                     "started_at": item.created_at if item.state == "RUNNING" else None,
                     "updated_at": item.updated_at,
                     "worktree": item.worktree,
-                    "subagents": [],
+                    "subagents": subagents,
                     "attempts": attempts,
                 }
             )
