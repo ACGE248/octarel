@@ -21,6 +21,7 @@ const ALL_SECTIONS = [
   'view-overview',
   'view-runs',
   'view-flow',
+  'view-priority',
   'view-tasks',
   'view-agents',
   'view-providers',
@@ -101,7 +102,7 @@ test('sidebar renders every primary section with Overview active', async ({ page
   // view-steering so routes/bindings are unchanged), and Roadmap is now a real
   // navigation destination rather than a hidden alias reachable only from the
   // mobile "More" sheet.
-  const labels = ['Overview', 'Runs', 'Flow', 'Tasks', 'Agents', 'Providers', 'Manager', 'History', 'Worktrees', 'System', 'Terminal', 'Settings', 'Roadmap'];
+  const labels = ['Overview', 'Runs', 'Flow', 'Priority', 'Tasks', 'Agents', 'Providers', 'Manager', 'History', 'Worktrees', 'System', 'Terminal', 'Settings', 'Roadmap'];
   const tabs = page.locator('#tabbar .tab');
   await expect(tabs).toHaveCount(labels.length);
   for (const label of labels) {

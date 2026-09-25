@@ -396,6 +396,66 @@ def test_routing_endpoint_rejects_unknown_role(client):
     assert resp.status_code == 400
 
 
+def test_priority_matrix_reports_every_role_in_configured_route_order(client, ctx):
+    """OCTAREL-UI-04 (issue #23): the Priority & Fallback Matrix read model.
+
+    It must present the registry's own route order rather than a ranking
+    invented for display, and must not change routing semantics.
+    """
+
+    body = client.get("/api/priority-matrix").json()
+    roles = {role["role"]: role for role in body["roles"]}
+
+    # Every configured route is represented, none invented.
+    assert set(roles) == set(ctx.registry.routes)
+
+    for name, role in roles.items():
+        configured = list(ctx.registry.route(name))
+        # Priority is position in the configured route, in order, 1-based.
+        assert [c["worker"] for c in role["candidates"]] == configured
+        assert [c["priority"] for c in role["candidates"]] == list(range(1, len(configured) + 1))
+        assert role["candidate_count"] == len(configured)
+        assert role["routable_count"] == sum(1 for c in role["candidates"] if c["routable"])
+
+
+def test_priority_matrix_keeps_unroutable_candidates_with_a_reason(client):
+    """A candidate the router cannot use stays visible and explains why."""
+
+    body = client.get("/api/priority-matrix").json()
+    candidates = [c for role in body["roles"] for c in role["candidates"]]
+    excluded = [c for c in candidates if not c["routable"]]
+
+    # The fixture registry seeds non-routable provider states.
+    assert excluded, "expected at least one non-routable candidate in the fixture"
+    for candidate in excluded:
+        assert candidate["excluded_reason"], candidate["worker"]
+        assert candidate["share_percent"] is None
+
+
+def test_priority_matrix_single_primary_gives_one_candidate_all_traffic(client):
+    body = client.get("/api/priority-matrix", params={"mode": "A"}).json()
+    assert body["mode"] == "A"
+    for role in body["roles"]:
+        with_share = [c for c in role["candidates"] if c["share_percent"] is not None]
+        if role["routable_count"]:
+            assert len(with_share) == 1
+            assert with_share[0]["share_percent"] == 100.0
+        else:
+            assert with_share == []
+
+
+def test_priority_matrix_distinguishes_provider_agent_and_model(client):
+    """The design specification requires provider and agent to stay distinct."""
+
+    body = client.get("/api/priority-matrix").json()
+    impl = next(r for r in body["roles"] if r["role"] == "primary-implementation")
+    claude = next(c for c in impl["candidates"] if c["worker"] == "claude-code")
+    assert claude["provider"] == "Anthropic"
+    assert claude["execution_system"] == "Claude Code"
+    assert claude["model"]
+    assert claude["capability"] == "write"
+
+
 def test_models_endpoint_reflects_workers_json(client):
     models = client.get("/api/models").json()
     names = {m["worker"] for m in models}

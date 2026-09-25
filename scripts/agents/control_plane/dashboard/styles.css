@@ -2769,3 +2769,76 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
 @media (prefers-reduced-motion: no-preference) {
   .main-column, .sidebar { transition: width var(--t-fast) ease; }
 }
+
+/* -- Priority & Fallback Matrix ------------------------------------------
+   Role columns of ordered candidate cards, per the design specification's
+   priority screen. Columns scroll horizontally on narrow viewports rather
+   than squeezing cards to an unreadable width; the page itself never scrolls
+   sideways. */
+.priority-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(280px, 1fr);
+  gap: 16px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 8px;
+}
+.priority-column { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.priority-column-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 2px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.priority-column-head h3 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.priority-card { display: grid; gap: 10px; }
+.priority-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.priority-agent { flex: 1 1 auto; min-width: 0; font-size: 14px; }
+
+/* The tier flag is the candidate's real position in the configured route. */
+.priority-tier {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.priority-card.is-active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.priority-card.is-active .priority-tier { color: var(--accent-text); background: var(--accent); border-color: transparent; }
+
+/* An excluded candidate stays legible and keeps its reason — it is real
+   configuration, not an error to hide. */
+.priority-card.is-excluded { opacity: 0.78; border-style: dashed; }
+.priority-reason { margin: 0; font-size: 12px; color: var(--warn); }
+
+.priority-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; margin: 0; }
+.priority-facts > div { min-width: 0; }
+.priority-facts dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.priority-facts dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+
+@media (max-width: 767px) {
+  .priority-columns { grid-auto-flow: row; grid-auto-columns: auto; }
+}
+.priority-note-warn { color: var(--warn); }

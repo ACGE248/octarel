@@ -1416,6 +1416,87 @@ def create_app(
             ],
         }
 
+    @app.get("/api/priority-matrix")
+    def priority_matrix(mode: str = MODE_SINGLE_PRIMARY) -> dict[str, Any]:
+        """Every configured role's ordered fallback chain, for the Priority & Fallback Matrix.
+
+        OCTAREL-UI-04 (issue #23). Strictly a read model: it reuses
+        ``registry.route()`` and the stored provider states that ``/api/routing``
+        already uses, and computes nothing new. Routing semantics, preference
+        order and eligibility rules are unchanged -- this endpoint only presents
+        them for every role in one request instead of one request per role.
+
+        Priority is the candidate's position in its role's configured route
+        (P1, P2, P3, ...), which is the actual fallback order rather than a
+        ranking invented for display. A candidate the router cannot currently
+        use is reported with ``routable: false`` and the reason, not hidden.
+        """
+
+        provider_map = {p.name: p for p in ctx.state.list_provider_states()}
+        roles: list[dict[str, Any]] = []
+
+        for role in sorted(ctx.registry.routes):
+            try:
+                order = ctx.registry.route(role)
+            except Exception:  # noqa: BLE001 - a misconfigured role must not break the page
+                continue
+            result = compute_routing(mode, provider_map, order)
+            shares = dict(result.percentages)
+            selected = set(result.order)
+
+            candidates: list[dict[str, Any]] = []
+            for position, name in enumerate(order, start=1):
+                worker = ctx.registry.workers.get(name)
+                provider_state = provider_map.get(name)
+                state = provider_state.state if provider_state else "UNKNOWN"
+                routable = name in selected or name in shares
+                candidates.append(
+                    {
+                        "priority": position,
+                        "worker": name,
+                        "display_name": (
+                            worker.raw.get("display_name", name.replace("-", " ").title())
+                            if worker
+                            else name
+                        ),
+                        # A provider and an agent are distinct concepts and the
+                        # design specification requires showing both.
+                        "provider": worker.provider if worker else "UNKNOWN",
+                        "execution_system": worker.execution_system if worker else "UNKNOWN",
+                        "model": (worker.effective_model or worker.default_model) if worker else None,
+                        "capability": worker.capability if worker else "UNKNOWN",
+                        "cost_class": worker.cost_class if worker else "UNKNOWN",
+                        "auth_mode": worker.auth_mode if worker else None,
+                        "enabled": worker.enabled if worker else None,
+                        "cli_available": worker.cli_available() if worker else None,
+                        "provider_state": state,
+                        "routable": routable,
+                        "share_percent": shares.get(name),
+                        "excluded_reason": (
+                            None
+                            if routable
+                            else (
+                                f"provider state {state}"
+                                if state in NON_ROUTABLE_STATES
+                                else "not the selected candidate for this mode"
+                                if provider_state
+                                else "no provider state recorded"
+                            )
+                        ),
+                    }
+                )
+
+            roles.append(
+                {
+                    "role": role,
+                    "candidate_count": len(candidates),
+                    "routable_count": sum(1 for c in candidates if c["routable"]),
+                    "candidates": candidates,
+                }
+            )
+
+        return {"mode": mode, "roles": roles}
+
     @app.get("/api/opencode-models")
     def opencode_models() -> dict[str, Any]:
         """Cached OpenCode-discovered model inventory beside the configured OpenCode workers (ENG-AO-03).

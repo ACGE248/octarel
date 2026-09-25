@@ -469,6 +469,145 @@
     }
   }
 
+  // -------------------------------------------------- priority & fallback matrix
+
+  /* OCTAREL-UI-04 (issue #23). Renders /api/priority-matrix, which is a read
+     model over the registry's configured routes. Nothing here re-derives or
+     re-orders routing: priority is the position the server reports, and a
+     candidate the router cannot use keeps its recorded reason rather than
+     being dropped. There is deliberately no drag-to-reorder — no backend
+     contract exists for mutating route order, and a draggable control that
+     silently did nothing would be a lie. */
+
+  const ROUTING_MODE_LABELS = {
+    A: "Single primary — all traffic to the first routable candidate",
+    B: "Even split — equal weight across every routable candidate",
+    C: "Cost-weighted — cheapest cost class receives the largest share",
+    D: "Capability-priority — share decays by position in the route",
+    E: "Failover chain — single primary, full ordered chain returned",
+  };
+
+  let priorityMode = "A";
+
+  function priorityCandidateCard(candidate) {
+    const active = candidate.share_percent != null;
+    const classes = ["entity-card", "priority-card"];
+    if (!candidate.routable) classes.push("is-excluded");
+    if (active) classes.push("is-active");
+
+    // Status text always accompanies the colour; never colour alone.
+    const stateText = active
+      ? `Active · ${candidate.share_percent}%`
+      : candidate.routable
+        ? "Eligible"
+        : "Excluded";
+    const stateClass = active ? "st-running" : candidate.routable ? "st-available" : "st-paused";
+
+    /* A provider and an agent are distinct concepts and the design
+       specification requires showing both, alongside the effective model. */
+    const facts = [
+      ["Provider", candidate.provider],
+      ["Agent", candidate.execution_system],
+      ["Model", candidate.model || "UNKNOWN"],
+      ["Capability", candidate.capability],
+      ["Cost class", candidate.cost_class],
+      ["Provider state", candidate.provider_state],
+    ]
+      .filter(([, value]) => value != null && value !== "")
+      .map(([label, value]) =>
+        el("div", {}, [
+          el("dt", { text: label }),
+          el("dd", { text: String(value) }),
+        ]),
+      );
+
+    return el("article", { class: classes.join(" ") }, [
+      el("header", { class: "priority-card-head" }, [
+        el("span", { class: "priority-tier", text: `P${candidate.priority}` }),
+        el("strong", { class: "priority-agent", text: candidate.display_name }),
+        el("span", { class: `status-pill ${stateClass}`, text: stateText }),
+      ]),
+      el("dl", { class: "priority-facts" }, facts),
+      candidate.excluded_reason
+        ? el("p", { class: "priority-reason", text: `Excluded: ${candidate.excluded_reason}` })
+        : null,
+    ]);
+  }
+
+  function renderPriorityMatrix(body) {
+    const root = document.getElementById("priority-columns");
+    if (!root) return;
+    const roles = (body && body.roles) || [];
+    root.innerHTML = "";
+
+    if (!roles.length) {
+      root.appendChild(el("p", { class: "hint", text: "No routes are configured for the selected project." }));
+      return;
+    }
+
+    roles.forEach((role) => {
+      root.appendChild(
+        el("section", { class: "priority-column" }, [
+          el("div", { class: "priority-column-head" }, [
+            el("h3", { text: role.role }),
+            el("span", {
+              class: "hint",
+              text: `${role.routable_count} of ${role.candidate_count} routable`,
+            }),
+          ]),
+          ...role.candidates.map(priorityCandidateCard),
+        ]),
+      );
+    });
+  }
+
+  async function refreshPriorityMatrix() {
+    const root = document.getElementById("priority-columns");
+    if (!root) return;
+    try {
+      const body = await getJSON(`/api/priority-matrix?mode=${encodeURIComponent(priorityMode)}`);
+      renderPriorityMatrix(body);
+      const note = document.getElementById("priority-mode-note");
+      if (note) {
+        // The selector already names the mode, so this line carries the
+        // aggregate instead of repeating it: how much of the configured
+        // fallback capacity is actually usable right now.
+        const roles = body.roles || [];
+        const candidates = roles.reduce((sum, role) => sum + role.candidate_count, 0);
+        const routable = roles.reduce((sum, role) => sum + role.routable_count, 0);
+        const starved = roles.filter((role) => role.routable_count === 0).length;
+        note.textContent =
+          `${roles.length} configured roles \u00b7 ${routable} of ${candidates} candidates routable` +
+          (starved ? ` \u00b7 ${starved} with no routable candidate` : "");
+        note.classList.toggle("priority-note-warn", starved > 0);
+      }
+    } catch (err) {
+      root.innerHTML = "";
+      root.appendChild(
+        el("p", {
+          class: "hint",
+          text: "Routing could not be read. The matrix is left empty rather than guessed.",
+        }),
+      );
+    }
+  }
+
+  function initPriorityMatrix() {
+    const select = document.getElementById("priority-mode");
+    if (!select) return;
+    Object.entries(ROUTING_MODE_LABELS).forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    });
+    select.value = priorityMode;
+    select.addEventListener("change", () => {
+      priorityMode = select.value;
+      refreshPriorityMatrix();
+    });
+  }
+
   // ----------------------------------------------------------------- nav rail
 
   /* Collapsed/expanded state for the desktop navigation rail. Stored in this
@@ -4134,6 +4273,7 @@
         refreshEvents,
         refreshRunEvidence,
         refreshRoadmap,
+        refreshPriorityMatrix,
         refreshTelemetry,
         refreshUsageRouting,
       ];
@@ -4514,6 +4654,7 @@
 
   initTheme();
   initRail();
+  initPriorityMatrix();
   initNav();
   initProjectSwitcher();
   initMoreSheet();

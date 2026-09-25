@@ -13,6 +13,7 @@ import { expect } from '@playwright/test';
 export const VIEWS_IN_MORE_SHEET = new Set([
   'view-runs',
   'view-flow',
+  'view-priority',
   'view-providers',
   'view-history',
   'view-worktrees',
@@ -24,9 +25,10 @@ export const VIEWS_IN_MORE_SHEET = new Set([
 
 /** Every top-level view, in navigation order. */
 export const ALL_VIEWS = [
-  'view-overview', 'view-runs', 'view-flow', 'view-tasks', 'view-agents',
-  'view-providers', 'view-steering', 'view-history', 'view-worktrees',
-  'view-system', 'view-terminal', 'view-settings', 'view-roadmap',
+  'view-overview', 'view-runs', 'view-flow', 'view-priority', 'view-tasks',
+  'view-agents', 'view-providers', 'view-steering', 'view-history',
+  'view-worktrees', 'view-system', 'view-terminal', 'view-settings',
+  'view-roadmap',
 ];
 
 /**
@@ -38,8 +40,15 @@ export async function navTo(page, viewId) {
   // The sidebar/bottom-nav swap on a CSS transition (transform + visibility),
   // so a resize can leave the target control mid-transition for a moment;
   // retry briefly instead of failing on a single instantaneous count() check.
+  //
+  // A view that lives behind the mobile "More" sheet has no directly visible
+  // control at small viewports *by design*, so it gets only a short probe
+  // before falling through to the sheet. Waiting the full retry budget for
+  // each of those is pure dead time, and with enough such views it pushed the
+  // whole test past its timeout.
+  const inSheet = VIEWS_IN_MORE_SHEET.has(viewId);
   const direct = page.locator(`[data-view="${viewId}"]:visible`);
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + (inSheet ? 500 : 3000);
   while (Date.now() < deadline) {
     if (await direct.count()) {
       try {
@@ -52,7 +61,7 @@ export async function navTo(page, viewId) {
     }
     await page.waitForTimeout(100);
   }
-  if (!VIEWS_IN_MORE_SHEET.has(viewId)) {
+  if (!inSheet) {
     throw new Error(`no visible nav control for ${viewId}`);
   }
   await page.locator('#more-tab').click();

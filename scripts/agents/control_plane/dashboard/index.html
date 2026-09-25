@@ -71,6 +71,12 @@
         </span>
         <span class="tab-label">Flow</span>
       </button>
+      <button role="tab" aria-selected="false" data-view="view-priority" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="4" width="6" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="4" width="6" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </span>
+        <span class="tab-label">Priority</span>
+      </button>
       <div class="nav-group-label">Work</div>
       <button role="tab" aria-selected="false" data-view="view-tasks" class="tab">
         <span class="nav-icon" aria-hidden="true">
@@ -558,6 +564,29 @@
         </div>
       </section>
 
+      <!-- OCTAREL-UI-04 (issue #23): Priority & Fallback Matrix. The routing
+           order it renders has always existed in the registry and been computed
+           by the API; until now no screen showed it. Columns are Octarel's real
+           configured roles, not the four illustrative roles in the Stitch
+           mock-up — inventing a role taxonomy to match a mock-up would
+           misrepresent how this orchestrator actually routes. -->
+      <section class="view" id="view-priority" role="tabpanel" hidden>
+        <div class="card wide" id="card-priority-matrix">
+          <div class="card-head">
+            <div>
+              <h2>Priority &amp; Fallback Matrix</h2>
+              <p class="hint">Every configured role and the ordered chain the router falls back through. Priority is the candidate's real position in that role's route, not a display ranking. A candidate the router cannot currently use stays visible with its reason.</p>
+            </div>
+            <div class="card-head-actions">
+              <label class="sr-only" for="priority-mode">Routing mode</label>
+              <select id="priority-mode" aria-label="Routing mode"></select>
+            </div>
+          </div>
+          <p class="hint" id="priority-mode-note"></p>
+          <div id="priority-columns" class="priority-columns">Loading…</div>
+        </div>
+      </section>
+
       <section class="view" id="view-tasks" role="tabpanel" hidden>
         <div class="card wide" id="card-tasks-table">
           <h2>Active Tasks</h2>
@@ -964,6 +993,7 @@
   <div class="more-list">
     <button data-view="view-runs" class="more-item">Runs</button>
     <button data-view="view-flow" class="more-item">Flow</button>
+    <button data-view="view-priority" class="more-item">Priority</button>
     <button data-view="view-providers" class="more-item">Providers</button>
     <button data-view="view-history" class="more-item">History</button>
     <button data-view="view-worktrees" class="more-item">Worktrees</button>

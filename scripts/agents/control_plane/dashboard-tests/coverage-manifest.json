@@ -69,6 +69,9 @@
     "ENG-CI-#/focused-testsGrok Build (grok-build)focused-testsG…",
     "V#-#/primary-implementationClaude Code (claude-code)primary…"
   ],
+  "view-priority": [
+    "Routing mode"
+  ],
   "view-tasks": [
     "Pause fx-rb-fallback-session",
     "Pause fx-rb-running-session",
