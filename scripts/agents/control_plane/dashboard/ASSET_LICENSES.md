@@ -19,3 +19,20 @@ not carry a redistributable official asset for them.
 `@xterm/xterm` 6.0.0. xterm.js is MIT licensed; the unmodified license is
 vendored as `vendor/xterm/LICENSE`. The npm package remains a pinned development
 dependency so the cached runtime files have a reproducible source.
+
+## Typography
+
+`vendor/fonts/plus-jakarta-sans-latin-{400,500,600,700}-normal.woff2` and
+`vendor/fonts/jetbrains-mono-latin-{400,500,600}-normal.woff2` are copied from
+the `@fontsource/plus-jakarta-sans` and `@fontsource/jetbrains-mono` 5.3.0 npm
+packages. Both families are licensed under the SIL Open Font License 1.1; the
+unmodified licenses are vendored as `vendor/fonts/LICENSE-plus-jakarta-sans`
+and `vendor/fonts/LICENSE-jetbrains-mono`. The npm packages remain pinned
+development dependencies so the cached runtime files have a reproducible
+source.
+
+They are served locally for the same reason as every other asset here: the
+Control Center's Content-Security-Policy is `default-src 'self'` with no
+external hosts, so a hosted webfont would require weakening it. Only the latin
+subset is vendored, which is what the interface renders.
+

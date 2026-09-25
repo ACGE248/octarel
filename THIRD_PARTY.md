@@ -34,6 +34,8 @@ These are **development-only**. Octarel is not published to npm
 | @axe-core/playwright | accessibility audit helper | MPL-2.0 |
 | @xterm/xterm | terminal widget (vendored copy served locally) | MIT |
 | simple-icons | provider marks (vendored SVG, CC0) | CC0-1.0 |
+| @fontsource/plus-jakarta-sans | interface typeface (vendored woff2 served locally) | OFL-1.1 |
+| @fontsource/jetbrains-mono | monospace/label typeface (vendored woff2 served locally) | OFL-1.1 |
 
 MPL-2.0 (`@axe-core/playwright`) applies to the devDependency as used by
 Playwright tests. It is not shipped as a runtime dashboard asset.

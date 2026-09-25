@@ -429,10 +429,19 @@
 
   // --------------------------------------------------------------------- theme
 
+  /* Surfaces that cannot read CSS custom properties themselves (the xterm
+     canvas today) register here so a theme change repaints them too. CSS-driven
+     surfaces need no hook, and the SVG charts repaint on the next poll. */
+  const themeListeners = [];
+  function onThemeChange(fn) { themeListeners.push(fn); }
+
   function applyTheme(value) {
     const root = document.documentElement;
     if (value === "system") root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", value);
+    themeListeners.forEach((fn) => {
+      try { fn(); } catch (err) { /* a repaint failure must never break theming */ }
+    });
   }
 
   function initTheme() {
@@ -801,44 +810,57 @@
     return wrap.innerHTML;
   }
 
+  /* SVG chart strokes are presentation attributes, so unlike a CSS `color`
+     declaration they cannot resolve a custom property themselves. Read the
+     themed tokens from the document once per render instead of pinning a
+     palette here, so the rings and donut follow the active theme (and the
+     design system's status colours) rather than drifting from it. */
+  function themeColors() {
+    const s = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => (s.getPropertyValue(name).trim() || fallback);
+    return {
+      ok: read("--ok", "#18a875"),
+      info: read("--info", "#6d63d9"),
+      completed: read("--purple", read("--info", "#6d63d9")),
+      err: read("--err", "#d84d45"),
+      track: read("--border-strong", "rgba(55,48,39,.17)"),
+    };
+  }
+
   function renderStatusRings(counts) {
     const total = Math.max(counts.total, 1);
+    const tone = themeColors();
     const map = [
-      ["ring-running", "status-running", counts.running, "rgb(var(--ok-rgb))"],
-      ["ring-queued", "status-queued", counts.queued, "rgb(var(--info-rgb))"],
-      ["ring-completed", "status-completed", counts.completed, "rgb(var(--purple-rgb))"],
-      ["ring-blocked", "status-blocked", counts.blocked, "rgb(var(--err-rgb))"],
+      ["ring-running", "status-running", counts.running, tone.ok],
+      ["ring-queued", "status-queued", counts.queued, tone.info],
+      ["ring-completed", "status-completed", counts.completed, tone.completed],
+      ["ring-blocked", "status-blocked", counts.blocked, tone.err],
     ];
-    const colors = {
-      "ring-running": "#12b76a",
-      "ring-queued": "#2e90fa",
-      "ring-completed": "#9b6bff",
-      "ring-blocked": "#f04438",
-    };
-    map.forEach(([ringId, countId, value]) => {
+    map.forEach(([ringId, countId, value, color]) => {
       const countEl = document.getElementById(countId);
       if (countEl) countEl.textContent = String(value);
       const ring = document.getElementById(ringId);
-      if (ring) ring.innerHTML = ringSVG(colors[ringId], value / total);
+      if (ring) ring.innerHTML = ringSVG(color, value / total);
     });
   }
 
   function renderDonut(counts) {
     const root = document.getElementById("donut-chart");
     if (!root) return;
+    const tone = themeColors();
     const slices = [
-      { key: "Running", value: counts.running, color: "#12b76a" },
-      { key: "Queued", value: counts.queued, color: "#2e90fa" },
-      { key: "Completed", value: counts.completed, color: "#9b6bff" },
-      { key: "Blocked", value: counts.blocked, color: "#f04438" },
+      { key: "Running", value: counts.running, color: tone.ok },
+      { key: "Queued", value: counts.queued, color: tone.info },
+      { key: "Completed", value: counts.completed, color: tone.completed },
+      { key: "Blocked", value: counts.blocked, color: tone.err },
     ];
     const total = slices.reduce((sum, s) => sum + s.value, 0);
     const svg = svgEl("svg", { viewBox: "0 0 42 42", width: "140", height: "140", role: "img", "aria-label": "Task status donut" });
     const r = 15.5;
     const c = 2 * Math.PI * r;
-    svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: "rgba(148,163,184,0.18)", "stroke-width": "4" }));
+    svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: tone.track, "stroke-width": "4" }));
     if (total === 0) {
-      svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: "rgba(148,163,184,0.28)", "stroke-width": "4" }));
+      svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: tone.track, "stroke-width": "4" }));
     } else {
       let offset = 0;
       slices.forEach((slice) => {
@@ -1849,7 +1871,7 @@
       // discard an in-flight selection. Signature-compare instead, and set
       // `.value` separately so a pure selection change never touches the DOM
       // structure.
-      const signature = enabled.map((p) => `${p.project_id} ${projectLabel(p)}`).join("");
+      const signature = enabled.map((p) => `${p.project_id}\u0000${projectLabel(p)}`).join("\u0001");
       if (select.dataset.signature !== signature) {
         select.dataset.signature = signature;
         select.innerHTML = "";
@@ -4332,6 +4354,22 @@
     });
   }
 
+  /* xterm paints its own canvas and cannot read CSS custom properties, so the
+     themed console tokens are resolved here and handed to it. Keeps the
+     terminal on the same warm near-black material as the surrounding shell
+     instead of the cool slate it used to hard-code. */
+  function terminalTheme() {
+    const s = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => (s.getPropertyValue(name).trim() || fallback);
+    const accent = read("--accent", "#ed7a12");
+    return {
+      background: read("--console-bg", "#131210"),
+      foreground: read("--console-text", "#f0ebe1"),
+      cursor: accent,
+      selectionBackground: "rgba(237, 122, 18, 0.32)",
+    };
+  }
+
   function initTerminal() {
     const host = document.getElementById("terminal");
     const statePill = document.getElementById("terminal-state");
@@ -4341,10 +4379,11 @@
       convertEol: true,
       scrollback: 5000,
       fontSize: 13,
-      fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
-      theme: { background: "#090d18", foreground: "#e6edf7", cursor: "#9b8cff", selectionBackground: "#5b4fd966" },
+      fontFamily: '"JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace',
+      theme: terminalTheme(),
     });
     terminal.open(host);
+    onThemeChange(() => { terminal.options.theme = terminalTheme(); });
     let socket = null;
     const frame = document.getElementById("terminal-frame");
     const overlayTitle = document.getElementById("terminal-overlay-title");
