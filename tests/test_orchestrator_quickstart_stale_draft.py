@@ -106,7 +106,7 @@ def test_without_state_the_legacy_behaviour_is_unchanged(repo):
 def test_start_provisions_the_fresh_worktree_from_current_main_and_leaves_the_draft_alone(repo, state, monkeypatch):
     from scripts.agents.control_plane.supervisor import Supervisor
 
-    monkeypatch.setattr(Supervisor, "_spawn", lambda self, argv, cwd: type("P", (), {"pid": 4242})())  # noqa: ARG005
+    monkeypatch.setattr(Supervisor, "_spawn", lambda self, argv, cwd, env=None: type("P", (), {"pid": 4242})())  # noqa: ARG005
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
     draft = add_draft(repo)
     draft_head = git(draft, "rev-parse", "HEAD")

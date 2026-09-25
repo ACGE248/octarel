@@ -133,7 +133,7 @@ def test_start_dry_run_never_reaches_a_real_worker_cli(ctx, monkeypatch):
         prompt=["run tests"],
     )
     spawned = []
-    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd: spawned.append(argv) or _FakeProcess())
+    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd, env=None: spawned.append(argv) or _FakeProcess())
     result = apply_command(ctx, "start", task_id="t1", dry_run=True)
     assert result.ok is True
     assert spawned and "--dry-run" in spawned[0]
@@ -418,7 +418,7 @@ def test_runbook_create_start_pause_resume_stop_round_trip(tmp_path, monkeypatch
     class FakeProcess:
         pid = 999
 
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FakeProcess())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
     # The fake worker is not a process this Supervisor owns, and it is genuinely live: stop must report
     # STOPPING, not CANCELLED (a dead/no-PID task is cancelled immediately, see stop_runbook).

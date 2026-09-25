@@ -69,7 +69,7 @@ class _FakeProcess:
 
 
 def _fake_running_supervisor(monkeypatch) -> None:
-    monkeypatch.setattr(Supervisor, "_spawn", lambda self, argv, cwd: _FakeProcess())  # noqa: ARG005
+    monkeypatch.setattr(Supervisor, "_spawn", lambda self, argv, cwd, env=None: _FakeProcess())  # noqa: ARG005
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
 
 
@@ -183,7 +183,7 @@ def test_start_quickstart_option_dry_run_never_spawns_the_real_worker_cli(tmp_pa
     _write_ledger(repo_root)
     spawned_argv = []
     monkeypatch.setattr(
-        Supervisor, "_spawn", lambda self, argv, cwd: (spawned_argv.append(argv), _FakeProcess())[1]  # noqa: ARG005
+        Supervisor, "_spawn", lambda self, argv, cwd, env=None: (spawned_argv.append(argv), _FakeProcess())[1]  # noqa: ARG005
     )
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
 
@@ -277,7 +277,7 @@ def _quickstart_http_context(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Supervisor,
         "_spawn",
-        lambda self, argv, cwd: (spawned.append((argv, cwd)), FakeProcess())[1],  # noqa: ARG005
+        lambda self, argv, cwd, env=None: (spawned.append((argv, cwd)), FakeProcess())[1],  # noqa: ARG005
     )
     monkeypatch.setattr(
         "scripts.agents.registry.Worker.availability_reason",

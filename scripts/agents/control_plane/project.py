@@ -25,7 +25,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..runner import run_worker_process
+from ..runner import run_worker_process, worker_environment
 
 
 class ProjectRootError(ValueError):
@@ -186,4 +186,34 @@ def run_project_validation(
         raise ProjectValidationError(
             f"project {project.project_id!r} validation target does not exist or is not a directory: {target!r}"
         )
-    return run_worker_process(list(project.validation_command), target, timeout=timeout)
+    return run_worker_process(
+        list(project.validation_command), target, timeout=timeout, env=_validation_environment(project, target)
+    )
+
+
+def _validation_environment(project: ProjectContract, target: Path) -> dict[str, str]:
+    """ENG-AO-09: the declared command runs under the managed project's Python, never Octarel's.
+
+    A resolvable project environment leads ``PATH``; a project with no Python environment simply has Octarel's
+    active environment removed. A declared or worktree environment that is present but unusable fails closed
+    -- the command is not started.
+    """
+
+    from .managed_environment import (
+        KIND_NOT_FOUND,
+        ManagedEnvironmentError,
+        is_octarel_own_project,
+        isolated_environment,
+        resolve_managed_environment,
+    )
+
+    base = worker_environment()
+    if is_octarel_own_project(project):
+        return base
+    try:
+        environment = resolve_managed_environment(project, worktree=target)
+    except ManagedEnvironmentError as exc:
+        if exc.kind != KIND_NOT_FOUND:
+            raise ProjectValidationError(exc.reason) from exc
+        environment = None
+    return isolated_environment(base, environment)

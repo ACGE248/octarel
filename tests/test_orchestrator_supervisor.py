@@ -47,7 +47,7 @@ def test_launch_task_refuses_a_second_write_worker_holding_the_real_lock_file(tm
     (lock_dir / ".write-lock").write_text(f"other-worker pid={os.getpid()} at=0", encoding="utf-8")
 
     spawned = []
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: spawned.append(argv) or object())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: spawned.append(argv) or object())
 
     task = _write_task(repo)
     result = supervisor.launch_task(task)
@@ -65,7 +65,7 @@ def test_launch_task_allows_a_write_worker_when_no_lock_is_held(tmp_path, monkey
     class FakeProcess:
         pid = 424242
 
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FakeProcess())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
     # current_branch would fail without a real git repo at tmp_path; the write
     # safety pre-check only calls it when a lock exists in this refusal-first
     # implementation, but guard against environment surprises regardless.
@@ -180,7 +180,7 @@ def test_poll_once_marks_success_and_failure_from_exit_code(tmp_path, monkeypatc
     fail_task.id = "fail"
 
     processes = iter([FakeProcess(0), FakeProcess(1)])
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: next(processes))
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: next(processes))
 
     supervisor.launch_task(ok_task)
     supervisor.launch_task(fail_task)
@@ -204,7 +204,7 @@ def test_poll_once_preserves_operator_cancellation(tmp_path, monkeypatch):
         def poll(self):
             return 0
 
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FakeProcess())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
     task = _write_task(tmp_path)
     supervisor.launch_task(task)
     task.state = TASK_CANCELLED
@@ -321,7 +321,7 @@ def test_poll_once_never_raises_even_if_state_write_fails(tmp_path, monkeypatch)
         def poll(self):
             return 0
 
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FakeProcess())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
     task = _write_task(tmp_path)
     supervisor.launch_task(task)
 

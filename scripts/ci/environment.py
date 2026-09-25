@@ -342,9 +342,14 @@ def bootstrap_dependencies(root: Path, *, require_frontend: bool, require_browse
 def prepare_worktree(
     root: Path, *, require_python: bool = True, require_frontend: bool = False,
     require_browser: bool = False, require_ffmpeg: bool = False, create_local_dirs: bool = False,
-    hydrate_offline: bool = False,
+    hydrate_offline: bool = False, python: str | None = None,
 ) -> dict[str, Any]:
-    """Return READY/BLOCKED without network access or secret inspection."""
+    """Return READY/BLOCKED without network access or secret inspection.
+
+    ``python`` names the interpreter to inspect. Octarel passes a managed project's resolved interpreter here
+    (ENG-AO-09) so a managed worktree's readiness never describes Octarel's own environment; the default keeps
+    :func:`resolve_python` (a worktree ``.venv``, else the running interpreter) for Octarel's own worktrees.
+    """
 
     root = root.resolve()
     # ENG-AGENT-16 (issue #146): idempotently register these directories in
@@ -357,7 +362,7 @@ def prepare_worktree(
     if create_local_dirs:
         for name in CP_RUNTIME_DIRNAMES:
             (root / name).mkdir(exist_ok=True)
-    python = resolve_python(root)
+    python = python or resolve_python(root)
     py_ok, py_version = _run([python, "--version"], root)
     python_packages: dict[str, bool] = {}
     if require_python and py_ok:

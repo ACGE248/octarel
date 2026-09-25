@@ -144,6 +144,13 @@ def _evidence(status: str, reason: str, **extra: Any) -> dict[str, Any]:
     return {"status": status, "reason": reason, "recorded_at": utc_now_iso(), **extra}
 
 
+def _managed_environment_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    """ENG-AO-09: record which managed-project Python environment the gate ran (or failed to resolve) under."""
+
+    environment = result.get("managed_environment")
+    return {"managed_environment": environment} if environment else {}
+
+
 def _run(argv: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
 
@@ -419,12 +426,16 @@ def _advance_test_and_review(
     if result.get("result") == "pass":
         evidence[STAGE_TEST] = _evidence(
             EVIDENCE_PASS, "exact-tree local gate passed", tree_sha=tree, evidence_path=result.get("evidence_path"),
+            **_managed_environment_evidence(result),
         )
         runbook.acceptance_stage = STAGE_CHECKPOINT
         runbook.status = RUNBOOK_ACCEPTANCE_PENDING
     else:
         reason = "; ".join(result.get("prerequisite_failures") or []) or "the exact-tree local gate did not pass"
-        evidence[STAGE_TEST] = _evidence(EVIDENCE_FAIL, reason, tree_sha=tree, evidence_path=result.get("evidence_path"))
+        evidence[STAGE_TEST] = _evidence(
+            EVIDENCE_FAIL, reason, tree_sha=tree, evidence_path=result.get("evidence_path"),
+            **_managed_environment_evidence(result),
+        )
         # ENG-AGENT-13 independent-review finding: acceptance_stage may still
         # read "review" here (set when review was dispatched/pending, then
         # left untouched on the same-tick fall-through once review passed).

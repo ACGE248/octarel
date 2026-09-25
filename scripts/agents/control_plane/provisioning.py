@@ -171,7 +171,43 @@ def provision_review_worktree(
     )
 
 
-def provision_worktree(*, repo_root: Path, worktree: str, branch: str, base_ref: str = "main") -> ProvisionResult:
+def _inspect_managed_worktree(worktree_path: Path, project: object | None, **kwargs) -> dict[str, object]:
+    """Worktree readiness, inspecting the managed project's Python instead of Octarel's (ENG-AO-09).
+
+    A managed project whose environment cannot be resolved is reported ``BLOCKED`` with the reason and probe
+    facts; Octarel's own interpreter is never silently inspected on the project's behalf.
+    """
+
+    from scripts.ci.environment import environment_fingerprint
+
+    from .managed_environment import (
+        ManagedEnvironmentError,
+        is_octarel_own_project,
+        resolve_managed_environment,
+    )
+    from .octascene_project import OCTASCENE_GATE_PYTHON_MODULES
+
+    if project is None or is_octarel_own_project(project):
+        return inspect_worktree(worktree_path, **kwargs)
+    try:
+        environment = resolve_managed_environment(
+            project, worktree=worktree_path, required_modules=OCTASCENE_GATE_PYTHON_MODULES
+        )
+    except ManagedEnvironmentError as exc:
+        readiness = inspect_worktree(worktree_path, **{**kwargs, "require_python": False})
+        readiness["failures"] = [*readiness["failures"], f"managed-project Python environment: {exc.reason}"]
+        readiness["status"] = "BLOCKED"
+        readiness["managed_environment"] = exc.evidence
+        readiness["fingerprint"] = environment_fingerprint({k: v for k, v in readiness.items() if k != "fingerprint"})
+        return readiness
+    readiness = inspect_worktree(worktree_path, python=str(environment.interpreter), **kwargs)
+    readiness["managed_environment"] = environment.as_evidence()
+    return readiness
+
+
+def provision_worktree(
+    *, repo_root: Path, worktree: str, branch: str, base_ref: str = "main", project: object | None = None
+) -> ProvisionResult:
     """Create ``worktree`` on a new ``branch`` off ``base_ref``.
 
     Raises :class:`ProvisioningError` (never a raw ``subprocess`` failure or
@@ -206,8 +242,8 @@ def provision_worktree(*, repo_root: Path, worktree: str, branch: str, base_ref:
         raise ProvisioningError(f"git worktree add failed: {detail}")
 
     has_frontend = (worktree_path / "package-lock.json").is_file()
-    readiness = inspect_worktree(
-        worktree_path, require_frontend=has_frontend, require_browser=has_frontend,
+    readiness = _inspect_managed_worktree(
+        worktree_path, project, require_frontend=has_frontend, require_browser=has_frontend,
         create_local_dirs=True, hydrate_offline=True,
     )
     return ProvisionResult(path=str(worktree_path), branch=branch, base_ref=base_ref, readiness=readiness)

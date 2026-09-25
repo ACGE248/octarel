@@ -129,18 +129,53 @@ def next_eligible_octascene_task(project: ProjectContract | None = None, repo_ro
     return next_eligible_video_editor_task(Path(root))
 
 
-def run_octascene_exact_tree_gate(worktree: Path | str, **gate_kwargs):
+#: Modules the OctaScene exact-tree gate's Python phases need in the managed interpreter (its own
+#: ``scripts/ci/environment.py`` preflight requires the same two).
+OCTASCENE_GATE_PYTHON_MODULES: tuple[str, ...] = ("pytest", "ruff")
+
+
+def run_octascene_exact_tree_gate(worktree: Path | str, *, project: ProjectContract, **gate_kwargs):
     """OctaScene compatibility: run the selected checkout's own local gate.
 
     Standalone Octarel must not import Octages ``scripts.ci.local_gate`` as a
     library. The OctaScene ``validation_command`` is executed in ``worktree``.
+
+    ENG-AO-09 (issue #21): the gate runs under the *managed project's* Python environment
+    (:mod:`managed_environment`), never Octarel's active interpreter -- a fresh sibling worktree needs no
+    ``.venv`` link, and OctaScene's own ``resolve_python`` then lands on that interpreter. When the
+    environment is unavailable or inconsistent the gate is not started and the result fails closed with the
+    reason in ``prerequisite_failures`` and the probe facts in ``managed_environment``.
     """
 
     import subprocess
-    import sys
+
+    from .managed_environment import (
+        ManagedEnvironmentError,
+        isolated_environment,
+        resolve_managed_environment,
+    )
 
     target = Path(worktree)
+    try:
+        environment = resolve_managed_environment(
+            project, worktree=target, required_modules=OCTASCENE_GATE_PYTHON_MODULES
+        )
+    except ManagedEnvironmentError as exc:
+        return {
+            "result": "fail",
+            "exit_code": None,
+            "output": exc.reason,
+            "ready": False,
+            "adapter": "exact_tree_local_gate",
+            "worktree": str(target),
+            "python": None,
+            "evidence_path": None,
+            "prerequisite_failures": [f"managed-project Python environment: {exc.reason}"],
+            "managed_environment": exc.evidence,
+        }
     argv = list(OCTASCENE_VALIDATION_COMMAND)
+    if argv and argv[0] in {"python", "python3"}:
+        argv[0] = str(environment.interpreter)
     if gate_kwargs.get("docs_reviewed", True) and "--docs-reviewed" not in argv:
         argv.append("--docs-reviewed")
     provider = gate_kwargs.get("review_provider")
@@ -151,7 +186,14 @@ def run_octascene_exact_tree_gate(worktree: Path | str, **gate_kwargs):
         argv.extend(["--independent-review-evidence", str(evidence)])
     if gate_kwargs.get("dry_run"):
         argv.append("--dry-run")
-    result = subprocess.run(argv, cwd=str(target), capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        argv,
+        cwd=str(target),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=isolated_environment(os.environ, environment),
+    )
     stdout = result.stdout or ""
     passed = result.returncode == 0
     return {
@@ -161,5 +203,6 @@ def run_octascene_exact_tree_gate(worktree: Path | str, **gate_kwargs):
         "ready": passed,
         "adapter": "exact_tree_local_gate",
         "worktree": str(target),
-        "python": sys.executable,
+        "python": str(environment.interpreter),
+        "managed_environment": environment.as_evidence(),
     }

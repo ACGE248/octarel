@@ -108,7 +108,7 @@ def test_supervisor_persists_sanitized_wrapper_failure_reason(tmp_path, monkeypa
         def communicate(timeout=0):
             return "", "ModuleNotFoundError: No module named 'scripts.agents'\n"
 
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FailedProcess())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FailedProcess())
     task = Task(
         id="failed",
         task_ref="V1-01",
@@ -163,7 +163,7 @@ def test_supervisor_prefers_sanitized_manifest_reason(tmp_path, monkeypatch):
         def communicate(timeout=0):
             return "MANIFEST: .agent-output/V1-01/claude-code/attempt/manifest.json\n", ""
 
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FailedProcess())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FailedProcess())
     task = Task(
         id="failed",
         task_ref="V1-01",

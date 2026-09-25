@@ -934,7 +934,7 @@ def start_quickstart_option(
         and not option.continues_existing_worktree
     ):
         try:
-            provision_worktree(repo_root=repo_root, worktree=option.worktree, branch=option.branch)
+            provision_worktree(repo_root=repo_root, worktree=option.worktree, branch=option.branch, project=project)
         except ProvisioningError as exc:
             raise QuickStartError(f"could not provision a worktree for {key!r}: {exc}") from None
         option = resolve_quickstart_option(repo_root, key, project=project, state=state, registry=registry)
