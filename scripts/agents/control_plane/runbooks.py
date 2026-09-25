@@ -12,6 +12,7 @@ deadline-aware status reconciliation on top of that unchanged foundation.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import re
 import time
@@ -31,6 +32,7 @@ from .acceptance import (
     start_acceptance,
 )
 from .advancement import advance_after_success
+from .advancement_lease import advancement_lease
 from .dispatch import managed_admit
 from .models import (
     DEFAULT_SAFETY_PROFILE,
@@ -1532,16 +1534,26 @@ def reconcile_runbooks(
     finalized = 0
     deadline_flagged = 0
     auto_fallbacks = 0
+    skipped_not_owner = 0
     # ENG-AGENT-15 (issue #142): computed once per tick, not per runbook -- a
     # long-running process that was never restarted after a merge must never
     # silently finalize an acceptance-applicable runbook SUCCEEDED using stale
     # in-memory acceptance logic. See ``check_runtime_freshness`` for why.
     runtime_staleness = check_runtime_freshness(repo_root=repo_root)
     now = _dt.datetime.now(_dt.timezone.utc)
-    for runbook in state.list_runbooks():
-        if not runbook.task_id:
+    for listed in state.list_runbooks():
+        if not listed.task_id:
             continue
+        # ENG-AO-07 (issue #17): exactly one process may advance a runbook. A non-owner observes and
+        # skips; the owner re-reads under the lease so a concurrent winner's work is never repeated.
+        lease = contextlib.ExitStack()
         try:
+            if not lease.enter_context(advancement_lease(state, listed.id, holder="reconcile_runbooks")):
+                skipped_not_owner += 1
+                continue
+            runbook = state.get_runbook(listed.id)
+            if runbook is None or not runbook.task_id:
+                continue
             task = state.get_task(runbook.task_id)
             if task is None:
                 continue
@@ -1806,9 +1818,16 @@ def reconcile_runbooks(
                     deadline_flagged += 1
         except Exception as exc:  # noqa: BLE001 - a bad reconcile must never kill the daemon
             state.record_event(
-                category="runbook", level="error", message=f"reconcile error for runbook {runbook.id}: {exc}"
+                category="runbook", level="error", message=f"reconcile error for runbook {listed.id}: {exc}"
             )
-    return {"finalized": finalized, "deadline_flagged": deadline_flagged, "auto_fallbacks": auto_fallbacks}
+        finally:
+            lease.close()
+    return {
+        "finalized": finalized,
+        "deadline_flagged": deadline_flagged,
+        "auto_fallbacks": auto_fallbacks,
+        "skipped_not_owner": skipped_not_owner,
+    }
 
 
 def recover_runbooks_on_restart(*, state: State) -> dict[str, int]:

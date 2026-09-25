@@ -48,6 +48,7 @@ from .advancement import (
     advance_after_success,
     resolve_next_task,
 )
+from .advancement_lease import advancement_lease
 from .models import (
     RUNBOOK_CANCELLED,
     RUNBOOK_DRAFT,
@@ -791,10 +792,15 @@ def _launch_next(
         return launched
 
     if after is not None:
-        record = advance_after_success(
-            state=state, runbook=after, registry=registry, supervisor=supervisor, scheduler=scheduler,
-            starter=guarded, auto_start=True, github_issue_fetcher=github_issue_fetcher,
-        )
+        # ENG-AO-07: successor advancement of an accepted runbook is single-writer like reconcile.
+        with advancement_lease(state, after.id, holder="overnight_tick") as owner:
+            if not owner:
+                _event(state, session, f"advancement of {after.id} withheld: another Octarel process owns it; retrying next tick")
+                return
+            record = advance_after_success(
+                state=state, runbook=after, registry=registry, supervisor=supervisor, scheduler=scheduler,
+                starter=guarded, auto_start=True, github_issue_fetcher=github_issue_fetcher,
+            )
     else:
         record, option = resolve_next_task(
             state=state, project_id=project.project_id, registry=registry, github_issue_fetcher=github_issue_fetcher

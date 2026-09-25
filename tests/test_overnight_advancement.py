@@ -316,6 +316,40 @@ def test_accept_merge_refresh_then_new_repository_truth_picks_the_next_task(stat
     assert "accepted via rb-1-a-01" in text and "merge/reconciliation of rb-1-a-01 verified" in text
 
 
+def test_overnight_successor_advancement_defers_to_another_runbook_owner_then_recovers(state, alpha, tmp_path):
+    """ENG-AO-07: the overnight path shares the per-runbook single-writer lease with reconcile."""
+
+    import subprocess
+    import sys
+
+    register(state, "alpha", alpha, overnight_merge="true")
+    start(state, merge_authorized=True)
+    h = Harness(state)
+    h.tick()
+    accept(state, "rb-1-a-01")
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys,time\n"
+         "from scripts.agents.control_plane.advancement_lease import advancement_lease\n"
+         "from scripts.agents.control_plane.state import State\n"
+         "with advancement_lease(State(sys.argv[1]), sys.argv[2]) as o:\n"
+         "    assert o; print('READY', flush=True); time.sleep(600)\n",
+         str(state.db_path), "rb-1-a-01"],
+        cwd=str(Path(__file__).resolve().parents[1]), stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "READY"
+        h.tick(T0 + dt.timedelta(hours=1))
+        assert h.starter.calls == ["A-01"]  # withheld: not started while another process owns rb-1-a-01
+        assert any("withheld" in line for line in events(state))
+    finally:
+        holder.kill()
+        holder.wait()
+    write_ledger(alpha, [("A-01", "complete", ""), ("A-02", "pending", ""), ("A-03", "pending", "")])
+    h.tick(T0 + dt.timedelta(hours=2))  # owner gone (crashed): the next tick advances normally
+    assert h.starter.calls == ["A-01", "A-02"]
+
+
 def test_no_eligible_task_completes_cleanly(state, alpha):
     register(state, "alpha", alpha)
     write_ledger(alpha, [("A-01", "complete", ""), ("A-02", "complete", "")])

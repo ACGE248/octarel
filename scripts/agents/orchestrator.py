@@ -31,6 +31,10 @@ import sys
 import time
 from pathlib import Path
 
+from .control_plane.advancement_lease import (
+    claim_daemon_authority,
+    release_daemon_authority,
+)
 from .control_plane.commands import CommandContext, CommandError, apply_command
 from .control_plane.dispatch import managed_admit
 from .control_plane.overnight import recover_on_restart as recover_overnight_on_restart
@@ -270,6 +274,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), signal.SIG_IGN)
     ctx = _build_context(root, state_root=_standalone_state_root())
+    # ENG-AO-07: the daemon is the authoritative advancement owner; dashboards observe while it lives.
+    if not args.once and not claim_daemon_authority(ctx.state):
+        print("another live Octarel daemon already holds advancement authority for this state; exiting")
+        return EXIT_COMMAND_FAILED
     _run_startup_recovery(ctx, root)
     recover_runbooks_on_restart(state=ctx.state)
     recover_overnight_on_restart(ctx.state)
@@ -321,6 +329,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("\norchestrator daemon stopping (KeyboardInterrupt)")
         return EXIT_OK
     finally:
+        release_daemon_authority(ctx.state)
         ctx.supervisor.shutdown_all()
 
 
