@@ -1953,6 +1953,39 @@
             ["Attempt", attemptIndex === -1 ? null : `${attempts.length - attemptIndex} of ${attempts.length}`],
           ])),
         ]);
+
+        /* OCTAREL-UI-07 (issue #26): recorded Graphify status. Graphify is
+           derived, advisory repository intelligence that ranks below the source
+           tree, managed-project policy and task contracts, so it is labelled as
+           advisory here and never presented as authority. Every state is shown
+           honestly, including the ones where no context was injected. */
+        const graph = d.graph_context;
+        if (graph) {
+          const injected = graph.injected;
+          const chipKind = injected ? "complete" : graph.status === "failed-safe" ? "failed" : "running";
+          panel.appendChild(
+            el("section", { class: "agent-activity-section" }, [
+              el("h4", { text: "Graphify context" }),
+              el("p", { class: "agent-activity-outcome" }, [
+                el("span", {
+                  class: `agent-activity-chip ${chipKind}`,
+                  text: `${injected ? "✓" : "○"} ${String(graph.status).toUpperCase()}`,
+                }),
+                el("span", {
+                  class: "hint",
+                  text: injected ? "context was supplied to this attempt" : "no context supplied",
+                }),
+              ]),
+              graph.reason ? el("p", { class: "hint", text: graph.reason }) : null,
+              el("p", {
+                class: "hint",
+                text: graph.authoritative
+                  ? "Recorded as authoritative."
+                  : "Advisory only — ranks below the source tree, project policy and task contracts.",
+              }),
+            ]),
+          );
+        }
         return panel;
       }
 

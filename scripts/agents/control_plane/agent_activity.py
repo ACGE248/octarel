@@ -144,6 +144,44 @@ def _subagent_rows(manifest_data: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _graph_context_row(manifest_data: dict[str, Any]) -> dict[str, Any]:
+    """Recorded Graphify status for an attempt (ENG-AO-01), in a display shape.
+
+    OCTAREL-UI-07 (issue #26). Reads only what ``orchestrate.py`` already wrote
+    into the run manifest; it never runs Graphify, reads a graph snapshot, or
+    touches the managed repository. Only the status record is exposed -- never
+    the derived context text, file lists, or any path -- so no repository or
+    secret-bearing material can reach the dashboard through this field.
+
+    An attempt written before Graphify existed, or one whose record is
+    unreadable, reports ``not-recorded`` rather than implying it was skipped.
+    """
+
+    recorded = (manifest_data.get("policy_manifest") or {}).get("graph_context")
+    if not isinstance(recorded, dict) or not recorded:
+        return {
+            "status": "not-recorded",
+            "reason": "this attempt recorded no Graphify status",
+            "injected": False,
+            "authoritative": False,
+            "precedence": None,
+            "llm_enrichment": False,
+            "api_billing": False,
+        }
+    return {
+        "status": str(recorded.get("status") or "unknown"),
+        "reason": (redact_text(str(recorded.get("reason") or ""))[:400] or None),
+        "injected": bool(recorded.get("injected")),
+        # Graphify is derived, advisory intelligence ranking below the source
+        # tree, managed-project policy and task contracts. The UI must present
+        # it that way, so the precedence record travels with the status.
+        "authoritative": bool(recorded.get("authoritative")),
+        "precedence": recorded.get("precedence"),
+        "llm_enrichment": bool(recorded.get("llm_enrichment")),
+        "api_billing": bool(recorded.get("api_billing")),
+    }
+
+
 def latest_subagents(repo_root: Path, task_id: str, worker: str) -> list[dict[str, Any]]:
     """Bot rows of the most recent recorded attempt for a worker card; ``[]`` when none/unreadable."""
 
@@ -236,6 +274,8 @@ def read_attempt(repo_root: Path, task_id: str, worker: str, run_id: str) -> dic
             # rule, or a future writer regresses it.
             "notes": [redact_text(str(n)) for n in (manifest_data.get("notes") or [])],
             "subagents": _subagent_rows(manifest_data),
+            # OCTAREL-UI-07 (issue #26): recorded Graphify status only.
+            "graph_context": _graph_context_row(manifest_data),
         }
 
     summary_text: str | None = None
