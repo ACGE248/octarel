@@ -355,7 +355,7 @@ def _fake_running_supervisor(monkeypatch, *, pid: int = 4242):
         def __init__(self):
             self.pid = pid
 
-    def _spawn(self, argv, cwd):  # noqa: ARG001
+    def _spawn(self, argv, cwd, env=None):  # noqa: ARG001
         return FakeProcess()
 
     monkeypatch.setattr(Supervisor, "_spawn", _spawn)
@@ -1106,7 +1106,7 @@ def test_repo_configured_auto_still_blocked_by_a_real_write_lock_held_by_another
     (lock_dir / ".write-lock").write_text(f"other-worker pid={os.getpid()} at=0", encoding="utf-8")
 
     spawned = []
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: spawned.append(argv) or object())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: spawned.append(argv) or object())
 
     rb = runbooks.create_runbook(
         state=state,

@@ -44,3 +44,15 @@ advancement; the lock also covers non-runbook callers). Tracked source is hashed
 change fails the repair; a failed or still-incomplete repair fails gate preflight. Per-root results
 (`install_state`, `reason`, `health`, `source_tree_unchanged`) are recorded in the existing gate evidence
 (`environment.bootstrap`).
+
+## Managed-project gates use the managed project's Python
+
+Octarel is normally launched from its own `.venv`, which has none of a managed project's dependencies. The
+exact-tree gate for a managed project (`run_octascene_exact_tree_gate`) and declared `validation_command`s
+therefore run under the interpreter resolved by `scripts/agents/control_plane/managed_environment.py`
+(declared `python_interpreter`, else the worktree's `.venv`, else the project checkout's `.venv`), probed for
+the gate's required modules and never Octarel's own environment. An unavailable or inconsistent environment
+fails the test stage closed *before* the gate starts, with the searched paths and probe facts recorded as
+`managed_environment` in the acceptance evidence (also on success: interpreter, source, prefix, version).
+Regression coverage is `tests/test_managed_environment_isolation.py`, which runs a real gate subprocess for a
+fresh sibling worktree while a simulated Octarel venv is active. See `docs/PROJECTS.md` ("Python environment").

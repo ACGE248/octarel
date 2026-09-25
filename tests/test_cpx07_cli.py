@@ -48,6 +48,22 @@ def test_project_cli_add_select_remove(tmp_path: Path, monkeypatch: pytest.Monke
     assert octarel_main(["project", "remove", "proj", "--confirm"]) == 0
 
 
+def test_project_cli_add_declares_the_managed_python_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.agents.control_plane.project_registry import get_project
+    from scripts.agents.control_plane.state import State as CpState
+
+    monkeypatch.setenv("OCTAREL_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("OCTAREL_OCTASCENE_ROOT", raising=False)
+    repo = _init_repo(tmp_path / "proj")
+    interpreter = tmp_path / "envs" / "bin" / "python"
+    assert octarel_main(["project", "add", "--id", "proj", "--path", str(repo), "--python", str(interpreter)]) == 0
+    assert octarel_main(["project", "add", "--id", "plain", "--path", str(_init_repo(tmp_path / "plain"))]) == 0
+
+    state = CpState(tmp_path / "state" / "orchestrator.db")
+    assert get_project(state, "proj").capabilities["python_interpreter"] == str(interpreter)
+    assert "python_interpreter" not in get_project(state, "plain").capabilities
+
+
 def test_providers_status_is_local_and_never_enables_billing(capsys: pytest.CaptureFixture[str]) -> None:
     assert octarel_main(["providers"]) == 0
     out = capsys.readouterr().out

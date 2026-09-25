@@ -161,6 +161,11 @@ def _terminal_child_env(repo_root: Path) -> dict[str, str]:
     allowed = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "TMPDIR")
     env = {key: os.environ[key] for key in allowed if os.environ.get(key)}
     env.update({"TERM": "xterm-256color", "SHELL": shutil.which("zsh") or "/bin/zsh"})
+    # ENG-AO-09: the shell opens in the selected project's checkout; Octarel's own active virtual environment
+    # must not leak onto its PATH (only the project's own .venv, below, may lead it).
+    from .managed_environment import isolated_environment
+
+    env = isolated_environment(env, None)
     venv = repo_root.resolve() / ".venv"
     if (venv / "bin" / "python").is_file():
         env["VIRTUAL_ENV"] = str(venv)

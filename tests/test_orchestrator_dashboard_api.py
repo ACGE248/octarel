@@ -575,7 +575,7 @@ def test_dashboard_root_serves_static_index(client):
 
 def test_enqueue_and_start_dry_run_through_the_http_api(client, ctx, monkeypatch):
     spawned = []
-    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd: spawned.append(argv) or _FakeProcess())
+    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd, env=None: spawned.append(argv) or _FakeProcess())
 
     resp = client.post(
         "/api/commands/enqueue",
@@ -772,7 +772,7 @@ def test_dashboard_reconciles_a_dashboard_launched_task_that_exits_zero(ctx, roa
     dashboard's lifespan reconciliation loop must call ``poll_once()`` on its
     own Supervisor even though nothing schedules queued work for it."""
 
-    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd: _FakeExitedProcess(0))
+    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd, env=None: _FakeExitedProcess(0))
     app = create_app(ctx, roadmap_path=roadmap_file)
 
     with TestClient(app) as client:
@@ -789,7 +789,7 @@ def test_dashboard_reconciles_a_dashboard_launched_task_that_exits_zero(ctx, roa
 
 
 def test_dashboard_reconciles_a_dashboard_launched_task_that_exits_nonzero(ctx, roadmap_file, monkeypatch):
-    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd: _FakeExitedProcess(1))
+    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd, env=None: _FakeExitedProcess(1))
     app = create_app(ctx, roadmap_path=roadmap_file)
 
     with TestClient(app) as client:
@@ -815,10 +815,10 @@ def test_dashboard_reconciliation_loop_only_polls_its_own_supervisor(ctx, roadma
     other_supervisor = Supervisor(registry=other_registry, repo_root=tmp_path, state=other_state)
     other_task = Task(id="other1", task_ref="X", role="focused-tests", worker="opencode2-gemini-flash-lite")
     other_state.upsert_task(other_task)
-    monkeypatch.setattr(other_supervisor, "_spawn", lambda argv, cwd: _FakeExitedProcess(0))
+    monkeypatch.setattr(other_supervisor, "_spawn", lambda argv, cwd, env=None: _FakeExitedProcess(0))
     other_supervisor.launch_task(other_task, dry_run=True)
 
-    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd: _FakeExitedProcess(0))
+    monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd, env=None: _FakeExitedProcess(0))
     app = create_app(ctx, roadmap_path=roadmap_file)
 
     with TestClient(app) as client:
@@ -1007,7 +1007,7 @@ def git_client(tmp_path: Path, monkeypatch) -> TestClient:
     class FakeProcess:
         pid = fake_pid
 
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd: FakeProcess())
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
 
     ctx = CommandContext(state=state, registry=registry, scheduler=Scheduler(), supervisor=supervisor, repo_root=repo)

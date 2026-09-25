@@ -68,7 +68,7 @@ def run_selected_project_validation(
     if name == ADAPTER_EXACT_TREE_LOCAL_GATE:
         from .octascene_project import run_octascene_exact_tree_gate
 
-        raw = run_octascene_exact_tree_gate(target, **(gate_kwargs or {}))
+        raw = run_octascene_exact_tree_gate(target, project=project, **(gate_kwargs or {}))
         result = dict(raw)
         result.setdefault("result", "pass" if result.get("result") == "pass" or result.get("ready") else "fail")
         return result

@@ -660,6 +660,31 @@ class AppLifecycleManager:
             raise OperationError(f"project {project.project_id!r} app_lifecycle_port is not an integer: {port_raw!r}") from exc
         return command.split(), port, project.local_repo_root, project.display_name
 
+    def _child_environment(self) -> dict[str, str]:
+        """ENG-AO-09: the managed app runs under its own project's Python, never Octarel's active one.
+
+        An unresolvable project environment does not block starting the app (this is not a gate); Octarel's
+        active virtual environment is still removed so the app cannot silently import from it.
+        """
+
+        from .managed_environment import (
+            ManagedEnvironmentError,
+            is_octarel_own_project,
+            isolated_environment,
+            resolve_managed_environment,
+        )
+
+        project = getattr(self.ctx, "selected_project", None)
+        if project is not None and is_octarel_own_project(project):
+            return dict(os.environ)
+        environment = None
+        if project is not None:
+            try:
+                environment = resolve_managed_environment(project)
+            except ManagedEnvironmentError:
+                environment = None
+        return isolated_environment(os.environ, environment)
+
     def _persist(self, pid: int | None, create_time: float | None = None) -> None:
         self.ctx.state.set_control_setting("app_pid", str(pid or ""))
         self.ctx.state.set_control_setting("app_started_at", self.started_at or "")
@@ -743,7 +768,7 @@ class AppLifecycleManager:
             pass
         log_path = self.ctx.state.db_path.parent / "managed-app.log"
         stream = log_path.open("a", encoding="utf-8")
-        self.process = subprocess.Popen(argv, cwd=launch_root, stdout=stream, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        self.process = subprocess.Popen(argv, cwd=launch_root, stdout=stream, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=self._child_environment())
         stream.close()
         self.started_at = utc_now_iso()
         create_time = None

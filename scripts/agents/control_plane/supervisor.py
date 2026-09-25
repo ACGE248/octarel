@@ -68,7 +68,48 @@ class Supervisor:
         self._processes: dict[str, subprocess.Popen] = {}
         self._owned_process_groups: set[int] = set()
 
-    def _spawn(self, argv: list[str], *, cwd: Path) -> subprocess.Popen:
+    def _child_environment(self, task: Task) -> dict[str, str]:
+        """ENG-AO-09: the launched worker's environment for ``task``.
+
+        A task of a managed project (not Octarel's own checkout) runs with that project's Python environment
+        leading ``PATH`` and Octarel's active virtual environment removed, so an implementer's ``python3`` /
+        ``pytest`` never resolve inside Octarel's ``.venv``. The wrapper itself still runs under Octarel's own
+        interpreter (``sys.executable`` in argv is absolute). An unresolved environment does not block the
+        worker -- the exact-tree gate is the fail-closed authority -- but Octarel's environment is still removed
+        and the reason is recorded.
+        """
+
+        env = sanitized_subprocess_env()
+        if not task.project_id:
+            return env
+        from .managed_environment import (
+            ManagedEnvironmentError,
+            is_octarel_own_project,
+            isolated_environment,
+            resolve_managed_environment,
+        )
+        from .project_registry import UnknownProjectError, get_project
+
+        try:
+            project = get_project(self.state, task.project_id)
+        except UnknownProjectError:
+            return env
+        if is_octarel_own_project(project):
+            return env
+        environment = None
+        try:
+            environment = resolve_managed_environment(
+                project, worktree=Path(task.worktree) if task.worktree else None, timeout=10.0
+            )
+        except ManagedEnvironmentError as exc:
+            self.state.record_event(
+                category="supervisor", task_id=task.id, level="warning",
+                message=f"managed Python environment unavailable for worker launch: {exc.reason}; "
+                "launching with Octarel's own environment removed from PATH",
+            )
+        return isolated_environment(env, environment)
+
+    def _spawn(self, argv: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
         """Isolated so tests can substitute a fake process without a real CLI.
 
         ENG-CP-02 (issue #165): this subprocess acts on ``cwd`` -- a task's
@@ -91,7 +132,7 @@ class Supervisor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=sanitized_subprocess_env(),
+            env=sanitized_subprocess_env() if env is None else env,
             start_new_session=True,
         )
 
@@ -285,7 +326,7 @@ class Supervisor:
         # Execute the wrapper from the Octarel/Control Center code checkout so
         # ``scripts.agents`` exists even when the selected project worktree is
         # a different repository. ``--repo-root`` still targets the task worktree.
-        process = self._spawn(argv, cwd=cp_code_root())
+        process = self._spawn(argv, cwd=cp_code_root(), env=self._child_environment(task))
         try:
             if os.getpgid(process.pid) == process.pid:
                 self._owned_process_groups.add(process.pid)

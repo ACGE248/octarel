@@ -96,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--policy", action="append", default=[])
     p_add.add_argument("--tasks", action="append", default=[])
     p_add.add_argument("--validate", nargs="+", default=[])
+    p_add.add_argument(
+        "--python", dest="python_interpreter", default=None,
+        help="the project's Python interpreter (default: <path>/.venv/bin/python); never Octarel's own",
+    )
     p_sel = proj_sub.add_parser("select", help="select a registered project")
     p_sel.add_argument("project_id")
     p_rm = proj_sub.add_parser("remove", help="unregister a project (repository is untouched)")
@@ -398,6 +402,8 @@ def _cmd_project(args: argparse.Namespace) -> int:
         if args.validate:
             payload["validation_command"] = args.validate
             payload.setdefault("capabilities", {})["validation_adapter"] = "declared_command"
+        if args.python_interpreter:
+            payload.setdefault("capabilities", {})["python_interpreter"] = args.python_interpreter
         contract = register_project(state, payload)
         print(f"registered={contract.project_id}")
         print(f"local_repo_root={contract.local_repo_root}")

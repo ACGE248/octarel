@@ -255,12 +255,19 @@ def _worker_environment() -> dict[str, str]:
     }
 
 
-def run_worker_process(command: list[str], root: Path, *, timeout: float | None) -> tuple[int, str]:
+worker_environment = _worker_environment
+
+
+def run_worker_process(
+    command: list[str], root: Path, *, timeout: float | None, env: dict[str, str] | None = None
+) -> tuple[int, str]:
     """Run ``command`` from ``root`` and return ``(exit_code, combined_output)``.
 
     Never raises for a non-zero exit; a timeout returns exit code ``124`` and the
     partial output captured so far. The subprocess inherits a minimal environment
-    allowlist so unrelated credentials cannot cross the worker boundary.
+    allowlist so unrelated credentials cannot cross the worker boundary. A caller
+    that must control the interpreter environment (ENG-AO-09) passes an explicit
+    ``env`` derived from :func:`worker_environment`.
     """
 
     try:
@@ -270,7 +277,7 @@ def run_worker_process(command: list[str], root: Path, *, timeout: float | None)
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=_worker_environment(),
+            env=_worker_environment() if env is None else env,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
