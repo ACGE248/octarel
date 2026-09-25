@@ -12,6 +12,7 @@
   const POLL_MS = 2000;
   const THEME_KEY = "octages-orchestrator-theme";
   const NOTIF_KEY = "octages-orchestrator-notifications";
+  const RAIL_KEY = "octages-orchestrator-rail";
   const SESSION_START_KEY = "octages-orchestrator-session-start";
   const COMPLETED_STATES = ["SUCCEEDED", "READY_LOCAL", "READY_BUT_UNMERGED"];
   const QUEUED_STATES = ["QUEUED", "PENDING", "PAUSED"];
@@ -466,6 +467,49 @@
         }
       });
     }
+  }
+
+  // ----------------------------------------------------------------- nav rail
+
+  /* Collapsed/expanded state for the desktop navigation rail. Stored in this
+     browser only, like the theme — it is a display preference, not
+     orchestrator state, so it never round-trips to the server. */
+  function applyRail(collapsed) {
+    const root = document.documentElement;
+    if (collapsed) root.setAttribute("data-rail", "collapsed");
+    else root.removeAttribute("data-rail");
+    const btn = document.getElementById("rail-toggle");
+    if (btn) {
+      btn.setAttribute("aria-pressed", collapsed ? "true" : "false");
+      const label = btn.querySelector(".rail-toggle-label");
+      // The accessible name has to describe the action in both states, and the
+      // visible label is hidden while collapsed, so set both.
+      const text = collapsed ? "Expand menu" : "Collapse menu";
+      if (label) label.textContent = text;
+      btn.setAttribute("aria-label", text);
+    }
+  }
+
+  function initRail() {
+    let collapsed = false;
+    try {
+      collapsed = localStorage.getItem(RAIL_KEY) === "collapsed";
+    } catch (err) {
+      collapsed = false;
+    }
+    applyRail(collapsed);
+    const btn = document.getElementById("rail-toggle");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      collapsed = !collapsed;
+      applyRail(collapsed);
+      try {
+        localStorage.setItem(RAIL_KEY, collapsed ? "collapsed" : "expanded");
+      } catch (err) {
+        /* A browser that refuses storage still gets the toggle, just not the
+           memory of it; nothing else depends on the write succeeding. */
+      }
+    });
   }
 
   // --------------------------------------------------------------------- view switching
@@ -4469,6 +4513,7 @@
   // --------------------------------------------------------------------- boot
 
   initTheme();
+  initRail();
   initNav();
   initProjectSwitcher();
   initMoreSheet();

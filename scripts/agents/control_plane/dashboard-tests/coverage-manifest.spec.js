@@ -34,8 +34,10 @@ const ALL_SECTIONS = [
   'view-system', 'view-terminal', 'view-settings',
 ];
 
+// OCTAREL-UI-04: Manager (view-steering) is a mobile dock item; History moved
+// into the "More" sheet alongside the other secondary surfaces.
 const VIEWS_IN_MORE_SHEET = new Set([
-  'view-runs', 'view-flow', 'view-providers', 'view-steering', 'view-worktrees',
+  'view-runs', 'view-flow', 'view-providers', 'view-history', 'view-worktrees',
   'view-system', 'view-terminal', 'view-settings', 'view-roadmap',
 ]);
 

@@ -2702,3 +2702,70 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
   background: linear-gradient(var(--accent), var(--ok), var(--border-strong));
 }
 .workflow-mobile .workflow-result-card::before { background: var(--ok); }
+
+/* -- collapsible navigation rail ------------------------------------------
+   Desktop only. `html[data-rail="collapsed"]` narrows the sidebar to an icon
+   rail: labels, the project switcher body and the identity copy collapse, the
+   icons centre, and the main column reclaims the width. Every control keeps
+   its accessible name (labels are visually hidden, not removed) so the rail
+   stays navigable by keyboard and screen reader in both states. */
+.rail-toggle {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  justify-content: flex-start;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.rail-toggle:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
+.rail-toggle-icon { display: inline-grid; place-items: center; flex: none; }
+
+@media (min-width: 768px) {
+  .rail-toggle { display: flex; }
+
+  html[data-rail="collapsed"] { --sidebar-width: 72px; }
+  html[data-rail="collapsed"] .sidebar { padding-left: 10px; padding-right: 10px; }
+  html[data-rail="collapsed"] .brand-copy,
+  html[data-rail="collapsed"] .nav-group-label,
+  html[data-rail="collapsed"] .tab-label,
+  html[data-rail="collapsed"] .rail-toggle-label,
+  html[data-rail="collapsed"] .project-switcher-label,
+  html[data-rail="collapsed"] .project-select,
+  html[data-rail="collapsed"] .project-identity,
+  html[data-rail="collapsed"] .project-add-btn,
+  html[data-rail="collapsed"] .identity-copy,
+  html[data-rail="collapsed"] .task-pill > :not(.task-pill-dot),
+  html[data-rail="collapsed"] .remote-badge > :not(.remote-badge-dot) {
+    /* Visually collapsed but still in the accessibility tree, so each control
+       keeps the name it had when expanded. */
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  html[data-rail="collapsed"] .brand,
+  html[data-rail="collapsed"] .tab,
+  html[data-rail="collapsed"] .rail-toggle,
+  html[data-rail="collapsed"] .task-pill,
+  html[data-rail="collapsed"] .identity-card,
+  html[data-rail="collapsed"] .remote-badge { justify-content: center; }
+  html[data-rail="collapsed"] .project-switcher { padding: 0; border: none; background: none; }
+  html[data-rail="collapsed"] .nav-badge {
+    position: absolute;
+    top: 4px; right: 8px;
+    min-width: 16px;
+    padding: 0 4px;
+  }
+  html[data-rail="collapsed"] .tab { position: relative; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .main-column, .sidebar { transition: width var(--t-fast) ease; }
+}
