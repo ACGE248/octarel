@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +102,138 @@ def _store_fingerprint(dependency_root: Path, fingerprint: str) -> None:
         pass
 
 
+def _declared_packages(dependency_root: Path) -> list[str]:
+    """Packages the managed project itself declares (its own bootstrap contract), never a Octarel-side list."""
+
+    try:
+        manifest = json.loads((dependency_root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    names: set[str] = set()
+    for section in ("dependencies", "devDependencies"):
+        declared = manifest.get(section)
+        if isinstance(declared, dict):
+            names.update(str(name) for name in declared)
+    return sorted(names)
+
+
+def _package_bins(package_name: str, manifest: dict[str, Any]) -> list[str]:
+    bin_field = manifest.get("bin")
+    if isinstance(bin_field, str):
+        return [package_name.rsplit("/", 1)[-1]]
+    if isinstance(bin_field, dict):
+        return sorted(str(name) for name in bin_field)
+    return []
+
+
+def dependency_health(dependency_root: Path) -> list[str]:
+    """ENG-AO-08 (issue #19): why an existing ``node_modules`` is NOT a complete install (empty = healthy).
+
+    A lockfile fingerprint only proves which lockfile an install *started* from; an interrupted or
+    concurrently-clobbered ``npm ci`` leaves it behind on a broken tree. The contract is derived from the
+    managed project's own ``package.json`` -- every declared dependency must be installed and every
+    executable it declares must be linked in ``node_modules/.bin`` -- plus npm's own completed-install record,
+    so a missing ``tsc``/``vite`` is caught without Octarel naming either.
+    """
+
+    modules = dependency_root / "node_modules"
+    if not modules.is_dir():
+        return ["node_modules is missing"]
+    problems: list[str] = []
+    declared = _declared_packages(dependency_root)
+    if declared and not (modules / ".bin").is_dir():
+        problems.append("node_modules/.bin is missing")
+    if not (modules / ".package-lock.json").is_file():
+        problems.append("npm's completed-install record node_modules/.package-lock.json is missing (interrupted install)")
+    for name in declared:
+        manifest_path = modules / name / "package.json"
+        if not manifest_path.is_file():
+            problems.append(f"declared package {name} is not installed")
+            continue
+        try:
+            installed = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            problems.append(f"installed package {name} has an unreadable package.json")
+            continue
+        for executable in _package_bins(name, installed if isinstance(installed, dict) else {}):
+            if not (modules / ".bin" / executable).exists():  # follows the link: a dangling link is missing too
+                problems.append(f"executable {executable} declared by {name} is missing from node_modules/.bin")
+    return problems
+
+
+def _tracked_snapshot(dependency_root: Path) -> str | None:
+    """Digest of tracked source state (index + working-tree diff vs HEAD); ``None`` outside a usable Git repo."""
+
+    digest = hashlib.sha256()
+    for argv in (["git", "ls-files", "-s"], ["git", "diff", "HEAD", "--binary"]):
+        try:
+            result = subprocess.run(argv, cwd=dependency_root, capture_output=True, timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        digest.update(result.stdout)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+@contextlib.contextmanager
+def _install_lock(dependency_root: Path) -> Iterator[None]:
+    """Cross-process lock so two Octarel processes never install into one worktree at once.
+
+    Complements (never replaces) ENG-AO-07's per-runbook advancement lease: it also covers non-runbook
+    callers. Kernel-released on crash. Lives in the worktree's git dir so it never appears as source.
+    """
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--absolute-git-dir"], cwd=dependency_root, capture_output=True, text=True,
+            timeout=30, check=False,
+        )
+        base = Path(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        base = None
+    if base is None:
+        base = Path(tempfile.gettempdir()) / "octarel-dependency-locks"
+        base.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(str(dependency_root.resolve()).encode()).hexdigest()[:16]
+    fd = os.open(base / f"octarel-dependency-install-{key}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # wait: the holder's repair is what we want to observe
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _reuse_decision(dependency_root: Path, current_fingerprint: str | None) -> tuple[bool, str, str, list[str]]:
+    """(reusable, install_state, reason, health_problems). Fingerprint match alone is never enough."""
+
+    if not (dependency_root / "node_modules").is_dir():
+        return False, "missing", "no node_modules present", ["node_modules is missing"]
+    stored = _stored_fingerprint(dependency_root)
+    if current_fingerprint is None or stored != current_fingerprint:
+        return (
+            False, "fingerprint_mismatch",
+            f"node_modules fingerprint {stored!r} does not match the current lockfile", dependency_health(dependency_root),
+        )
+    problems = dependency_health(dependency_root)
+    if problems:
+        return (
+            False, "stale_incomplete",
+            "reuse rejected: lockfile fingerprint matched but the install is incomplete (" + "; ".join(problems) + ")",
+            problems,
+        )
+    return (
+        True, "reused_healthy",
+        f"node_modules already installed from the current package-lock.json (sha256 {current_fingerprint[:12]}) and passed the dependency health check",
+        [],
+    )
+
+
 def bootstrap_dependencies(root: Path, *, require_frontend: bool, require_browser: bool,
                             allow_network: bool = True, timeout: float = 300) -> dict[str, Any]:
     """Install Node/Playwright dependencies only when actually needed (ENG-AGENT-14, issue #140).
@@ -122,33 +258,52 @@ def bootstrap_dependencies(root: Path, *, require_frontend: bool, require_browse
     for dependency_root in dependency_roots:
         rel = dependency_root.relative_to(root).as_posix() or "."
         current_fingerprint = _lockfile_fingerprint(dependency_root)
-        node_modules_present = (dependency_root / "node_modules").is_dir()
-        stored_fingerprint = _stored_fingerprint(dependency_root) if node_modules_present else None
-        if node_modules_present and current_fingerprint is not None and stored_fingerprint == current_fingerprint:
-            projects.append({
-                "path": rel, "status": DEPENDENCIES_REUSED,
-                "reason": f"node_modules already installed from the current package-lock.json (sha256 {current_fingerprint[:12]})",
-                "fingerprint": current_fingerprint,
-            })
-            continue
         if current_fingerprint is None:
             projects.append({
-                "path": rel, "status": DEPENDENCIES_REUSED,
+                "path": rel, "status": DEPENDENCIES_REUSED, "install_state": "no_lockfile",
                 "reason": "no package-lock.json at this path; nothing to install", "fingerprint": None,
             })
             continue
-        reason = (
-            "no node_modules present" if not node_modules_present
-            else f"node_modules fingerprint {stored_fingerprint!r} does not match the current lockfile"
-        )
-        argv = ["npm", "ci", "--ignore-scripts"] + ([] if allow_network else ["--offline"])
-        ok, detail = _run(argv, dependency_root, timeout=timeout)
-        if ok:
-            _store_fingerprint(dependency_root, current_fingerprint)
-        projects.append({
-            "path": rel, "status": DEPENDENCIES_INSTALLED if ok else DEPENDENCIES_FAILED,
-            "reason": reason, "detail": detail, "fingerprint": current_fingerprint,
-        })
+        reusable, state, reason, _problems = _reuse_decision(dependency_root, current_fingerprint)
+        if reusable:
+            projects.append({
+                "path": rel, "status": DEPENDENCIES_REUSED, "install_state": state, "reason": reason,
+                "fingerprint": current_fingerprint, "health": {"ok": True, "problems": []},
+            })
+            continue
+        with _install_lock(dependency_root):
+            # Another process may have repaired it while we waited: re-decide instead of reinstalling.
+            reusable, state, reason_now, problems_now = _reuse_decision(dependency_root, current_fingerprint)
+            if reusable:
+                projects.append({
+                    "path": rel, "status": DEPENDENCIES_REUSED, "install_state": "reused_after_concurrent_repair",
+                    "reason": "another process completed a healthy install while this one waited for the install lock",
+                    "fingerprint": current_fingerprint, "health": {"ok": True, "problems": []},
+                })
+                continue
+            before = _tracked_snapshot(dependency_root)
+            # An interrupted install must never look fingerprinted: drop the marker before touching the tree.
+            with contextlib.suppress(OSError):
+                (dependency_root / "node_modules" / _FINGERPRINT_MARKER).unlink()
+            argv = ["npm", "ci", "--ignore-scripts"] + ([] if allow_network else ["--offline"])
+            ok, detail = _run(argv, dependency_root, timeout=timeout)
+            after = _tracked_snapshot(dependency_root)
+            source_unchanged = None if before is None or after is None else before == after
+            problems_after = dependency_health(dependency_root) if ok else []
+            if ok and problems_after:
+                ok, detail = False, "install finished but the result is still incomplete: " + "; ".join(problems_after)
+            if ok and source_unchanged is False:
+                ok, detail = False, "dependency installation changed tracked managed-project source files"
+            if ok:
+                _store_fingerprint(dependency_root, current_fingerprint)
+            projects.append({
+                "path": rel, "status": DEPENDENCIES_INSTALLED if ok else DEPENDENCIES_FAILED,
+                "install_state": "installed" if ok else "install_failed",
+                "reason": reason_now, "detail": detail, "fingerprint": current_fingerprint,
+                "reuse_rejected": True,
+                "health": {"ok": ok and not problems_after, "problems_before": problems_now, "problems_after": problems_after},
+                "source_tree_unchanged": source_unchanged,
+            })
 
     browser_result: dict[str, Any]
     if not require_browser:
