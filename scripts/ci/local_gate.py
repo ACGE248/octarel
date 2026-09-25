@@ -429,6 +429,10 @@ def preflight(root: Path, risk: ChangeRisk, paths: list[str], python: str,
     )
     if bootstrap_result is not None:
         readiness["bootstrap"] = bootstrap_result
+        # ENG-AO-08: a failed/unverified dependency repair is a preflight failure, never a silent reuse.
+        for project in bootstrap_result.get("dependencies", []):
+            if project.get("status") == "DEPENDENCIES_FAILED":
+                failures.append(f"dependency install for {project.get('path')} failed: {project.get('detail')}")
     failures.extend(readiness["failures"])
     if risk.run_ui_audit and risk.ui_audit_scope == "none":
         failures.append("UI audit was selected without a path-relevant audit scope")
