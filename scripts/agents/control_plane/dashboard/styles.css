@@ -2842,3 +2842,118 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
   .priority-columns { grid-auto-flow: row; grid-auto-columns: auto; }
 }
 .priority-note-warn { color: var(--warn); }
+
+/* -- command palette -------------------------------------------------------
+   A modal dialog over the whole shell. Tier 3 glass, like the other sheets. */
+.palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  color: var(--muted);
+  min-height: 36px;
+}
+.palette-trigger:hover { color: var(--text); }
+.palette-trigger .key-hint { font-size: 10px; }
+
+.palette {
+  position: fixed;
+  left: 50%;
+  top: 12vh;
+  transform: translateX(-50%);
+  width: min(640px, 94vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  z-index: 51;
+  background: var(--surface-strong);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-pop);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  overflow: hidden;
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .palette { background: var(--surface-solid); }
+}
+
+.palette-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+.palette-field input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-size: 15px;
+  color: var(--text);
+  padding: 4px 0;
+}
+.palette-field input:focus { outline: none; border: none; }
+
+.palette-results { overflow-y: auto; overscroll-behavior: contain; padding: 8px; }
+.palette-empty { padding: 18px; margin: 0; text-align: center; }
+
+.palette-row {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1.2fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  min-height: 0;
+}
+.palette-row:hover { background: var(--surface-2); border-color: transparent; }
+/* Keyboard selection is shown with a border and surface, not colour alone. */
+.palette-row.is-active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 38%, transparent); }
+
+.palette-kind {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.palette-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.palette-detail {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.palette-foot {
+  display: flex;
+  gap: 14px;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+.palette-foot kbd {
+  font-size: 10px;
+  padding: 1px 5px;
+  margin-right: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+}
+
+@media (max-width: 767px) {
+  .palette { top: 6vh; max-height: 80vh; }
+  .palette-row { grid-template-columns: 70px minmax(0, 1fr); }
+  .palette-detail { display: none; }
+}

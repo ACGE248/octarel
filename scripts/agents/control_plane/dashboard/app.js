@@ -469,6 +469,296 @@
     }
   }
 
+  // --------------------------------------------------------- command palette
+
+  /* OCTAREL-UI-04 (issue #23). A real cross-entity palette, not a filter over
+     the current view: it indexes the entities this dashboard already serves
+     and jumps to any of them.
+
+     Safety: the palette navigates and selects. It never executes a destructive
+     verb. Choosing a command places it in the Manager input for review, so
+     execution still goes through the existing parse/confirm path and the
+     server's own destructiveness check — the palette cannot become a way to
+     bypass a confirmation gate. */
+
+  const PALETTE_VIEWS = [
+    ["view-overview", "Overview"],
+    ["view-runs", "Runs"],
+    ["view-flow", "Flow"],
+    ["view-priority", "Priority & Fallback Matrix"],
+    ["view-tasks", "Tasks"],
+    ["view-agents", "Agents"],
+    ["view-providers", "Providers"],
+    ["view-steering", "Manager"],
+    ["view-history", "History"],
+    ["view-worktrees", "Worktrees"],
+    ["view-system", "System"],
+    ["view-terminal", "Terminal"],
+    ["view-settings", "Settings"],
+    ["view-roadmap", "Roadmap"],
+  ];
+
+  /* The deterministic Manager grammar, mirrored from the help panel. The
+     confirm flag marks a verb the server refuses without explicit
+     confirmation; the palette says so up front rather than implying a
+     one-keystroke action. */
+  const PALETTE_COMMANDS = [
+    ["/start [TASK_ID]", false],
+    ["/pause TASK_ID", false],
+    ["/resume TASK_ID", false],
+    ["/stop TASK_ID", true],
+    ["/stop-after-current", true],
+    ["/stop-all", true],
+    ["/enable PROVIDER", false],
+    ["/disable PROVIDER", true],
+    ["/drain PROVIDER", true],
+    ["/probe PROVIDER", false],
+    ["/cost-block PROVIDER [reason]", true],
+    ["/cost-clear PROVIDER", false],
+    ["/priority TASK_ID NUMBER", false],
+    ["/defer TASK_ID", false],
+    ["/set-max-writers NUMBER", false],
+    ["/dry-run TASK_ID", false],
+  ];
+
+  let paletteEntries = [];
+  let paletteMatches = [];
+  let paletteActiveIndex = 0;
+  let paletteLastFocus = null;
+
+  async function buildPaletteIndex() {
+    /* Read when the palette opens rather than mirrored into a second always-on
+       cache: it is user-initiated and infrequent, and reading on open
+       guarantees it never offers a stale entity. Every source is an endpoint
+       the dashboard already polls, and allSettled means one failing endpoint
+       costs only its own group. */
+    const entries = [];
+
+    PALETTE_VIEWS.forEach(([viewId, label]) => {
+      entries.push({
+        kind: "View",
+        label,
+        detail: "Go to view",
+        haystack: `${label} ${viewId}`,
+        run: () => showView(viewId),
+      });
+    });
+
+    const [projects, tasks, runbooks, agents, providerRows, worktreeRows] = await Promise.allSettled([
+      getJSON("/api/projects"),
+      getJSON("/api/tasks"),
+      getJSON("/api/runbooks"),
+      getJSON("/api/models"),
+      getJSON("/api/providers"),
+      getJSON("/api/worktrees"),
+    ]);
+    const ok = (settled, fallback) => (settled.status === "fulfilled" ? settled.value : fallback);
+
+    (ok(projects, {}).projects || []).forEach((project) => {
+      entries.push({
+        kind: "Project",
+        label: project.display_name || project.project_id,
+        detail: project.github_remote || project.project_id,
+        haystack: `${project.display_name || ""} ${project.project_id} ${project.github_remote || ""}`,
+        run: () => selectProject(project.project_id),
+      });
+    });
+
+    (ok(tasks, []) || []).forEach((task) => {
+      entries.push({
+        kind: "Task",
+        label: task.id,
+        detail: [task.state, task.worker].filter(Boolean).join(" · "),
+        haystack: `${task.id} ${task.task_ref || ""} ${task.state || ""} ${task.worker || ""} ${task.role || ""}`,
+        run: () => showView("view-tasks"),
+      });
+    });
+
+    (ok(runbooks, []) || []).forEach((run) => {
+      entries.push({
+        kind: "Run",
+        label: run.name || run.id,
+        detail: [run.status, run.branch].filter(Boolean).join(" · "),
+        haystack: `${run.id} ${run.name || ""} ${run.status || ""} ${run.branch || ""} ${run.preset || ""}`,
+        run: () => showView("view-runs"),
+      });
+    });
+
+    (ok(agents, []) || []).forEach((agent) => {
+      entries.push({
+        kind: "Agent",
+        label: agent.display_name || agent.worker,
+        detail: [agent.provider, agent.effective_model].filter(Boolean).join(" · "),
+        haystack: `${agent.worker} ${agent.display_name || ""} ${agent.provider || ""} ${agent.effective_model || ""}`,
+        run: () => showView("view-agents"),
+      });
+    });
+
+    (ok(providerRows, []) || []).forEach((provider) => {
+      entries.push({
+        kind: "Provider",
+        label: provider.display_name || provider.name,
+        detail: [provider.provider, provider.display_state || provider.state].filter(Boolean).join(" · "),
+        haystack: `${provider.name} ${provider.display_name || ""} ${provider.provider || ""} ${provider.state || ""}`,
+        run: () => showView("view-providers"),
+      });
+    });
+
+    (ok(worktreeRows, []) || []).forEach((tree) => {
+      const label = tree.display_name || tree.branch || tree.path;
+      if (!label) return;
+      entries.push({
+        kind: "Worktree",
+        label,
+        detail: tree.branch && tree.branch !== label ? tree.branch : tree.path || "",
+        haystack: `${tree.display_name || ""} ${tree.branch || ""} ${tree.path || ""}`,
+        run: () => showView("view-worktrees"),
+      });
+    });
+
+    PALETTE_COMMANDS.forEach(([command, needsConfirm]) => {
+      entries.push({
+        kind: "Command",
+        label: command,
+        detail: needsConfirm
+          ? "Opens in Manager · requires confirmation"
+          : "Opens in Manager for review",
+        haystack: command,
+        run: () => {
+          showView("view-steering");
+          const input = document.getElementById("steering-input");
+          if (input) {
+            input.value = command;
+            input.focus();
+          }
+        },
+      });
+    });
+
+    return entries;
+  }
+
+  function renderPaletteResults(query) {
+    const root = document.getElementById("palette-results");
+    if (!root) return;
+    const q = String(query || "").trim().toLowerCase();
+    const matches = (q
+      ? paletteEntries.filter((entry) => entry.haystack.toLowerCase().includes(q))
+      : paletteEntries
+    ).slice(0, 50);
+
+    paletteMatches = matches;
+    if (paletteActiveIndex > matches.length - 1) paletteActiveIndex = Math.max(matches.length - 1, 0);
+    root.innerHTML = "";
+
+    if (!matches.length) {
+      root.appendChild(el("p", { class: "hint palette-empty", text: "Nothing matches that search." }));
+      return;
+    }
+
+    matches.forEach((entry, index) => {
+      const active = index === paletteActiveIndex;
+      const row = el(
+        "button",
+        {
+          type: "button",
+          class: `palette-row${active ? " is-active" : ""}`,
+          role: "option",
+          "aria-selected": active ? "true" : "false",
+        },
+        [
+          el("span", { class: "palette-kind", text: entry.kind }),
+          el("span", { class: "palette-label", text: entry.label }),
+          entry.detail ? el("span", { class: "palette-detail", text: entry.detail }) : null,
+        ],
+      );
+      row.addEventListener("click", () => runPaletteEntry(entry));
+      root.appendChild(row);
+    });
+  }
+
+  function runPaletteEntry(entry) {
+    if (!entry) return;
+    closePalette();
+    if (typeof entry.run === "function") entry.run();
+  }
+
+  function closePalette() {
+    const palette = document.getElementById("palette");
+    const backdrop = document.getElementById("palette-backdrop");
+    if (palette) palette.hidden = true;
+    if (backdrop) backdrop.hidden = true;
+    // Focus restoration: this is a modal dialog.
+    if (paletteLastFocus && document.contains(paletteLastFocus)) paletteLastFocus.focus();
+    paletteLastFocus = null;
+  }
+
+  async function openPalette() {
+    const palette = document.getElementById("palette");
+    const backdrop = document.getElementById("palette-backdrop");
+    const input = document.getElementById("palette-input");
+    const root = document.getElementById("palette-results");
+    if (!palette || !input) return;
+
+    paletteLastFocus = document.activeElement;
+    paletteActiveIndex = 0;
+    input.value = "";
+    if (backdrop) backdrop.hidden = false;
+    palette.hidden = false;
+    input.focus();
+
+    if (root) {
+      root.innerHTML = "";
+      root.appendChild(el("p", { class: "hint palette-empty", text: "Loading…" }));
+    }
+    paletteEntries = await buildPaletteIndex();
+    // The operator may have typed while the index loaded.
+    renderPaletteResults(input.value);
+  }
+
+  function initPalette() {
+    const input = document.getElementById("palette-input");
+    const trigger = document.getElementById("palette-open");
+    const backdrop = document.getElementById("palette-backdrop");
+    const palette = document.getElementById("palette");
+    if (!input || !palette) return;
+
+    if (trigger) trigger.addEventListener("click", openPalette);
+    const mobileTrigger = document.getElementById("palette-open-mobile");
+    if (mobileTrigger) mobileTrigger.addEventListener("click", openPalette);
+    if (backdrop) backdrop.addEventListener("click", closePalette);
+
+    input.addEventListener("input", () => {
+      paletteActiveIndex = 0;
+      renderPaletteResults(input.value);
+    });
+
+    input.addEventListener("keydown", (evt) => {
+      if (evt.key === "ArrowDown" || evt.key === "ArrowUp") {
+        evt.preventDefault();
+        if (!paletteMatches.length) return;
+        const delta = evt.key === "ArrowDown" ? 1 : -1;
+        paletteActiveIndex = (paletteActiveIndex + delta + paletteMatches.length) % paletteMatches.length;
+        renderPaletteResults(input.value);
+        const activeRow = document.querySelector(".palette-row.is-active");
+        if (activeRow) activeRow.scrollIntoView({ block: "nearest" });
+      } else if (evt.key === "Enter") {
+        evt.preventDefault();
+        runPaletteEntry(paletteMatches[paletteActiveIndex]);
+      } else if (evt.key === "Escape") {
+        evt.preventDefault();
+        closePalette();
+      }
+    });
+
+    // Keep focus inside the dialog while it is open.
+    palette.addEventListener("keydown", (evt) => {
+      if (evt.key !== "Tab") return;
+      evt.preventDefault();
+      input.focus();
+    });
+  }
+
   // -------------------------------------------------- priority & fallback matrix
 
   /* OCTAREL-UI-04 (issue #23). Renders /api/priority-matrix, which is a read
@@ -963,10 +1253,13 @@
     const hint = document.getElementById("search-hint");
     if (hint) hint.textContent = platformHint();
     input.addEventListener("input", () => applySearch(input.value));
+    // OCTAREL-UI-04: the accelerator opens the cross-entity command palette.
+    // The field beside it keeps filtering the current view, which is a
+    // different job and stays available.
     document.addEventListener("keydown", (evt) => {
       if ((evt.metaKey || evt.ctrlKey) && evt.key.toLowerCase() === "k") {
         evt.preventDefault();
-        input.focus();
+        openPalette();
       }
     });
   }
@@ -4655,6 +4948,7 @@
   initTheme();
   initRail();
   initPriorityMatrix();
+  initPalette();
   initNav();
   initProjectSwitcher();
   initMoreSheet();
