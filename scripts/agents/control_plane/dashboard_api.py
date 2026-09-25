@@ -1438,7 +1438,19 @@ def create_app(
         for role in sorted(ctx.registry.routes):
             try:
                 order = ctx.registry.route(role)
-            except Exception:  # noqa: BLE001 - a misconfigured role must not break the page
+            except Exception as exc:  # noqa: BLE001 - one bad role must not break the page
+                # Reported rather than skipped: a role whose route cannot be
+                # resolved is a real configuration problem, and silently
+                # dropping it would make the matrix look complete when it is not.
+                roles.append(
+                    {
+                        "role": role,
+                        "candidate_count": 0,
+                        "routable_count": 0,
+                        "candidates": [],
+                        "error": f"route could not be resolved: {exc}",
+                    }
+                )
                 continue
             result = compute_routing(mode, provider_map, order)
             shares = dict(result.percentages)

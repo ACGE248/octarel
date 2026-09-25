@@ -842,9 +842,13 @@
             el("h3", { text: role.role }),
             el("span", {
               class: "hint",
-              text: `${role.routable_count} of ${role.candidate_count} routable`,
+              text: role.error
+                ? "route could not be resolved"
+                : `${role.routable_count} of ${role.candidate_count} routable`,
             }),
           ]),
+          // A role whose route is misconfigured is shown as such, not omitted.
+          role.error ? el("p", { class: "priority-reason", text: role.error }) : null,
           ...role.candidates.map(priorityCandidateCard),
         ]),
       );
