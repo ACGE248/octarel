@@ -74,6 +74,17 @@ It is bounded by duration and accepted-task count, allows one write-capable task
 enables paid/API fallback, and merges only with explicit per-session authorization plus the project's `overnight_merge`
 capability. The dashboard/API/CLI only create and control it. See `scripts/agents/README.md`.
 
+## Single-writer runbook advancement
+
+Exactly one Octarel process may advance a runbook at a time (ENG-AO-07). `control_plane/advancement_lease.py` holds a
+per-runbook OS advisory `flock` under `<state dir>/advancement-leases/`; `reconcile_runbooks` takes it non-blocking for
+each runbook's whole reconcile step (acceptance/gate, fallback, finalization, successor advancement), re-reads the runbook
+after winning it, and a process that loses only observes and skips. The kernel drops the lock when its owner exits or is
+killed, so a crashed owner never needs stale-lease cleanup. `POST /api/runbooks/{id}/advance` uses the same lease and
+returns 409 with the owner record instead of advancing; the overnight tick's successor advancement withholds and retries next tick when another process owns the runbook. Lease file names carry a hash of the runbook id so distinct ids never share a lease. The daemon additionally holds `daemon-authority.lock` for its
+lifetime; while another process holds it the dashboard loop only polls its own subprocesses and never reconciles, so the
+dashboard stays a monitoring surface. Operator pause/resume/stop remain plain state writes that the next owner honours.
+
 ## Runtime polling and process ownership
 
 The Control Center keeps active task/run state live while caching expensive

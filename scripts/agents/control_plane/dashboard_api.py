@@ -653,11 +653,19 @@ def _make_lifespan(ctx: CommandContext):
     """
 
     async def _reconcile_loop() -> None:
+        from .advancement_lease import daemon_authority_active
         from .runbooks import reconcile_runbooks
 
         while True:
             await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
             ctx.supervisor.poll_once()
+            # ENG-AO-07: while a live daemon holds advancement authority the dashboard only observes
+            # (it still polls its own subprocesses); the per-runbook lease guards the no-daemon case.
+            try:
+                if daemon_authority_active(ctx.state):
+                    continue
+            except Exception:  # noqa: BLE001 - the monitoring loop must never die on a probe error
+                continue
             reconcile_runbooks(
                 state=ctx.state,
                 repo_root=ctx.repo_root,
@@ -1879,14 +1887,25 @@ def create_app(
         """Re-evaluate advancement from current repository truth (idempotent once a successor started)."""
 
         from .advancement import advance_after_success
+        from .advancement_lease import advancement_lease, lease_owner
 
         runbook = ctx.state.get_runbook(runbook_id)
         if runbook is None:
             raise HTTPException(status_code=404, detail=f"unknown runbook {runbook_id!r}")
-        return advance_after_success(
-            state=ctx.state, runbook=runbook, registry=ctx.registry,
-            supervisor=ctx.supervisor, scheduler=ctx.scheduler,
-        )
+        # ENG-AO-07: never advance a runbook another process owns; report the owner instead.
+        with advancement_lease(ctx.state, runbook_id, holder="dashboard_advance") as owner:
+            if not owner:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": f"runbook {runbook_id!r} is being advanced by another Octarel process",
+                        "owner": lease_owner(ctx.state, runbook_id),
+                    },
+                )
+            return advance_after_success(
+                state=ctx.state, runbook=runbook, registry=ctx.registry,
+                supervisor=ctx.supervisor, scheduler=ctx.scheduler,
+            )
 
     @app.get("/api/runbooks/{runbook_id}/report")
     def runbook_report(runbook_id: str) -> dict[str, Any]:
