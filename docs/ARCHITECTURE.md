@@ -90,6 +90,23 @@ destructiveness itself and requires explicit confirmation, so a natural-language
 action cannot bypass a confirmation gate. The selected worker/provider/model, and any fallback, are shown in
 the conversation and recorded as events.
 
+## Usage, context and cost telemetry
+
+The Control Center reports what a run consumed from the durable usage-governance records the supervisor
+writes, joined with registry facts for the worker that ran. Every metric carries the class that established
+it -- measured, derived (with its formula), unknown, not exposed, or not applicable -- so a figure Octarel
+cannot establish is stated as unavailable instead of being estimated into something plausible.
+
+Two AO-style metric families have no counterpart here and are reported as such. No worker CLI in this stack
+reports cache-category tokens, so fresh input, cache reads and any hit rate derived from them are not
+exposed; a hit rate is never approximated. No runtime reports an effective context limit -- the OpenCode
+catalog's per-model `context_limit` is a fact about a model, not the limit the active worker ran under -- so
+context utilization is not exposed rather than inferred from a model name.
+
+Dollar cost is produced only for an API route with both a pricing snapshot and known token counts.
+Subscription and free routes report not-applicable with the reason; a `$0.00` there would imply API pricing
+that does not apply to a subscription-backed CLI invocation.
+
 ## Continuous overnight advancement
 
 An overnight session (`control_plane/overnight.py`, table `overnight_sessions`) is a durable record the daemon advances
