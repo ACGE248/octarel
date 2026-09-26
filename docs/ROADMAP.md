@@ -12,6 +12,35 @@ Octarel is a standalone, multi-repository development orchestration control plan
 - the Control Center is a truthful operator surface: unavailable facts stay `UNKNOWN`, `NOT_EXPOSED`, `NOT_REPORTED`, or explicitly `DERIVED`;
 - orchestration mechanisms may evolve, but Octarel must not become a second source of managed-project product truth.
 
+## Immediate infrastructure prerequisite
+
+### ENG-AO-10 — First-class Graphify lifecycle, warm index and post-change refresh
+
+**Issue:** [#41](https://github.com/ACGE248/octarel/issues/41)
+
+Complete ENG-AO-10 before beginning the ENG-PC implementation waves below.
+
+Octarel already has safe tree-matched Graphify context from ENG-AO-01. ENG-AO-10 makes it operationally first-class: supported installation/health, warm canonical indexes, candidate refresh after safe implementation checkpoints, canonical refresh after merge/reconciliation, refresh coalescing, tree/worktree-aware evidence, and #26 Control Center visibility.
+
+This is an **implementation sequencing prerequisite**, not a runtime hard dependency. If Graphify is missing or fails safely, normal Octarel execution must continue without graph context and record the reason.
+
+Expected lifecycle:
+
+```text
+managed repository changes
+        |
+        +-- implementation safe checkpoint
+        |       -> refresh candidate-worktree graph
+        |       -> tester/reviewer receives exact candidate graph
+        |
+        +-- accepted merge/reconciliation
+                -> refresh canonical graph
+                -> re-read repository truth
+                -> next task starts with warm current graph
+```
+
+Octarel owns refresh lifecycle; do not depend on Graphify Git hooks inside managed repositories. Graphify remains local/code-only, secret-filtered, provider-neutral, advisory, and below repository truth.
+
 ## Active UI program
 
 - **#23 OCTAREL-UI-04** — Stitch Glass Orchestration Studio integration.
@@ -92,6 +121,7 @@ ENG-PC-09 runtime services          (parallel; refactor existing operations life
 
 Recommended implementation waves:
 
+0. **Repository intelligence prerequisite:** ENG-AO-10 (#41), including #26-compatible Graphify UI/status integration.
 1. **Foundation:** ENG-PC-11, ENG-PC-01.
 2. **Continuity:** ENG-PC-02, ENG-PC-03, ENG-PC-04.
 3. **Efficiency/governance:** ENG-PC-05, ENG-PC-06.
