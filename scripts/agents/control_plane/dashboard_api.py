@@ -35,6 +35,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import model_catalog, native_models
 from ..redaction import redact_text
+from . import manager_chat as _manager_chat
+from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .commands import CommandContext, CommandError, apply_command
 from .operations import (
@@ -63,8 +65,6 @@ from .remote_access import (
 )
 from .routing import MODE_SINGLE_PRIMARY, compute_routing
 from .runbooks import list_presets
-from . import manager_chat as _manager_chat
-from . import usage_telemetry as _usage_telemetry
 from .steering import (
     DESTRUCTIVE_VERBS,
     nl_ai_route_available,
@@ -1951,18 +1951,32 @@ def create_app(
             # entry; attributing usage to a configured default would misreport
             # a run that fell back to a different worker.
             history = record.get("route_history") or []
+            entry: dict[str, Any] = {}
             worker_name = None
-            for entry in reversed(history):
-                if isinstance(entry, dict) and entry.get("worker"):
-                    worker_name = str(entry["worker"])
+            for candidate in reversed(history):
+                if isinstance(candidate, dict) and candidate.get("worker"):
+                    entry = candidate
+                    worker_name = str(candidate["worker"])
                     break
             worker = ctx.registry.workers.get(worker_name) if worker_name else None
+
+            # Prefer what the run itself recorded. The registry describes the
+            # worker as configured *now*: a pool worker resolves a different
+            # model per run, and a later workers.json edit would otherwise
+            # silently relabel history. A registry-sourced value is still shown,
+            # but marked as derived rather than as this run's measurement.
+            recorded_model = entry.get("model") or None
+            recorded_cost_class = entry.get("cost_class") or None
             facts = _usage_telemetry.WorkerFacts(
                 worker=worker_name or "UNKNOWN",
-                provider=getattr(worker, "provider", None),
+                provider=entry.get("provider") or getattr(worker, "provider", None),
                 execution_system=getattr(worker, "execution_system", None),
-                model=(getattr(worker, "effective_model", None) or getattr(worker, "default_model", None)) or None,
-                cost_class=getattr(worker, "cost_class", None),
+                model=recorded_model
+                or (getattr(worker, "effective_model", None) or getattr(worker, "default_model", None))
+                or None,
+                cost_class=recorded_cost_class or getattr(worker, "cost_class", None),
+                model_from_record=bool(recorded_model),
+                cost_class_from_record=bool(recorded_cost_class),
             )
             rows.append(
                 _usage_telemetry.build_row(record, facts=facts, project_id=ctx.selected_project_id)

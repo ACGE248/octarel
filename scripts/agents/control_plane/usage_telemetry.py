@@ -95,13 +95,24 @@ def metric(
 
 @dataclass(frozen=True)
 class WorkerFacts:
-    """The registry facts a usage row needs, resolved by the caller."""
+    """The facts a usage row needs about the worker that ran.
+
+    ``from_record`` marks whether ``model``/``cost_class`` came from what the
+    run itself recorded, or were filled in from the live registry. The registry
+    describes the worker *now*, which is not necessarily how it was configured
+    when the run happened -- a pool worker resolves a different model per run,
+    and any later edit to workers.json would silently relabel history. A
+    registry-sourced value is therefore reported as DERIVED with that caveat
+    rather than as a measurement of this run.
+    """
 
     worker: str
     provider: str | None = None
     execution_system: str | None = None
     model: str | None = None
     cost_class: str | None = None
+    model_from_record: bool = False
+    cost_class_from_record: bool = False
 
 
 def _token_metrics(record: dict[str, Any]) -> dict[str, Any]:
@@ -218,12 +229,35 @@ def build_row(
             "provider": facts.provider,
             "execution_system": facts.execution_system,
             "model": facts.model,
+            # How the model attribution was established, so a registry-derived
+            # label is never mistaken for what this run actually used.
+            "model_class": (
+                CLASS_MEASURED
+                if facts.model_from_record
+                else CLASS_DERIVED
+                if facts.model
+                else CLASS_UNKNOWN
+            ),
+            "model_source": (
+                "recorded by the run"
+                if facts.model_from_record
+                else "current registry configuration for this worker, not recorded by the run"
+                if facts.model
+                else None
+            ),
             "recorded_at": record.get("updated_at"),
             "source": "durable usage governance record",
         },
         "route": {
             "execution_route": route,
             "cost_class": facts.cost_class,
+            "cost_class_class": (
+                CLASS_MEASURED
+                if facts.cost_class_from_record
+                else CLASS_DERIVED
+                if facts.cost_class
+                else CLASS_UNKNOWN
+            ),
             "billable": route == ROUTE_API,
             "history": record.get("route_history") or [],
             "escalation_state": record.get("escalation_state"),

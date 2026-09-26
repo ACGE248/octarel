@@ -8,13 +8,14 @@ decision recorded on the issue.
 from __future__ import annotations
 
 import json
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import pytest
 
 from scripts.agents.control_plane import manager_chat as mc
-from scripts.agents.control_plane.steering import DESTRUCTIVE_VERBS
-
+from scripts.agents.control_plane.commands import ALL_COMMANDS
+from scripts.agents.control_plane.steering import _SLASH_PATTERNS, DESTRUCTIVE_VERBS
 
 # --------------------------------------------------------------------------- doubles
 
@@ -248,7 +249,7 @@ def test_only_verbs_from_the_allowed_vocabulary_are_accepted(registry):
 def test_a_destructive_interpretation_is_flagged_and_still_needs_confirmation(registry):
     """NL may propose a destructive action; it may never pre-authorize one."""
 
-    verb = sorted(DESTRUCTIVE_VERBS)[0]
+    verb = min(DESTRUCTIVE_VERBS)
     result = mc.interpret(
         "do the scary thing",
         registry=registry,
@@ -261,3 +262,106 @@ def test_a_destructive_interpretation_is_flagged_and_still_needs_confirmation(re
     # re-derives destructiveness and demands confirm=true separately.
     assert "confirmation" in result.proposal.preview.lower()
     assert not hasattr(result.proposal, "confirm")
+
+
+# ------------------------------------- the interpretable vocabulary is bounded
+#
+# Independent review (Grok Build, issue #24) found that the interpreter was
+# validated against commands.ALL_COMMANDS rather than the deterministic
+# parser's own vocabulary. /api/steering/execute gates only DESTRUCTIVE_VERBS
+# -- it does not apply CONFIRM_COMMANDS or RUNBOOK_DESTRUCTIVE_COMMANDS, which
+# guard /api/commands/{verb} -- so the wider set let a crafted model reply
+# reach an unconfirmed command, including one that enables premium routing.
+
+
+def test_interpretable_verbs_are_exactly_the_deterministic_grammar():
+    """A reply may only restate an intent the operator could have typed."""
+
+    expected = {verb for _pattern, verb in _SLASH_PATTERNS} | {"quickstart_start"}
+    assert mc.INTERPRETABLE_VERBS == expected
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        "usage_override",          # enables premium Codex routing
+        "runbook_stop",
+        "worktree_cleanup",
+        "terminal_history_clear",
+        "overnight_start",
+        "managed_dispatch",
+        "git_operation",
+        "runbook_create",
+    ],
+)
+def test_a_command_with_no_deterministic_grammar_can_never_be_interpreted(registry, verb):
+    """These are real commands, but no slash/NL grammar produces them."""
+
+    assert verb in ALL_COMMANDS, "guard: this test must name a real command"
+    assert verb not in mc.INTERPRETABLE_VERBS
+
+    result = mc.interpret(
+        "do the thing",
+        registry=registry,
+        invoker=reply({"verb": verb, "args": {"runbook_id": "rb-1", "reason": "x"}}),
+    )
+    assert result.proposal.status == "UNRECOGNIZED"
+    assert result.proposal.verb is None
+
+
+def test_no_interpretable_verb_escapes_the_execute_confirmation_gate(registry):
+    """Every destructive interpretable verb is one /api/steering/execute gates."""
+
+    for verb in mc.INTERPRETABLE_VERBS:
+        result = mc.interpret(
+            "x", registry=registry, invoker=reply({"verb": verb, "args": {"key": "continue-video-editor"}})
+        )
+        if result.proposal.status != "PARSED":
+            continue
+        # The proposal's own destructive flag must agree with the server's
+        # gate, since that gate is what actually blocks execution.
+        assert result.proposal.destructive == (verb in DESTRUCTIVE_VERBS)
+
+
+# ------------------------------------------------- quickstart identity is required
+
+
+def test_quickstart_without_an_option_key_is_not_proposed(registry):
+    """A missing key must not be silently substituted with a default option."""
+
+    result = mc.interpret(
+        "continue development",
+        registry=registry,
+        invoker=reply({"verb": "quickstart_start", "args": {}, "summary": "continue"}),
+    )
+    assert result.proposal.status == "UNRECOGNIZED"
+    assert "key" in result.proposal.reason
+
+
+def test_quickstart_with_an_option_key_is_proposed(registry):
+    result = mc.interpret(
+        "continue the video editor",
+        registry=registry,
+        invoker=reply({"verb": "quickstart_start", "args": {"key": "continue-video-editor"}}),
+    )
+    assert result.proposal.status == "PARSED"
+    assert result.proposal.args == {"key": "continue-video-editor"}
+
+
+# ------------------------------------------------------ interpreter output is redacted
+
+
+def test_interpreter_failure_output_is_redacted(registry):
+    """A CLI error can carry secret-shaped strings; it is redacted like other evidence."""
+
+    # Assembled at runtime so the public-safety scanner never sees a
+    # key-shaped literal in source (same reason as agent-activity.spec.js).
+    secret = "-".join(["sk", "AAAABBBBCCCCDDDDEEEEFFFF"])  # noqa: FLY002
+
+    def _invoke(argv, timeout):
+        return 1, "", f"auth failed using {secret}"
+
+    result = mc.interpret("x", registry=registry, invoker=_invoke)
+    assert result.status == mc.STATUS_FAILED
+    assert secret not in result.proposal.reason
+

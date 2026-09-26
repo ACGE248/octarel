@@ -3085,3 +3085,12 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
   letter-spacing: 0.03em;
 }
 .usage-metric-reason { margin: 2px 0 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
+
+/* Review follow-ups (OCTAREL-UI-04): states that must not borrow another
+   meaning's styling. */
+.agent-activity-chip.neutral { color: var(--muted); background: var(--surface-2); }
+.manager-msg.is-error { border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+.manager-msg.is-error .manager-text { color: var(--err); }
+/* Billable/subscription is a routing fact, not a run state. */
+.usage-route-pill { color: var(--muted); background: var(--surface-2); }
+.usage-route-pill.is-billable { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }

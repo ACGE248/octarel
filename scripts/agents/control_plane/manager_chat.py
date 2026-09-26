@@ -40,14 +40,30 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .. import model_catalog as _catalog
-from .commands import ALL_COMMANDS
+from ..redaction import redact_text
 from .provider_state import NON_ROUTABLE_STATES
 from .steering import (
+    _SLASH_PATTERNS,
     DESTRUCTIVE_VERBS,
     STATUS_PARSED,
     STATUS_UNRECOGNIZED,
     SteeringProposal,
 )
+
+# The verbs an interpreted sentence may resolve to: exactly the vocabulary the
+# deterministic parser can already produce, derived from its own slash table
+# rather than restated, so the two cannot drift apart.
+#
+# This is deliberately NOT ``commands.ALL_COMMANDS``. That set is far larger
+# and includes verbs with no deterministic grammar at all -- ``usage_override``
+# (which enables premium routing), ``runbook_stop``, ``worktree_cleanup``,
+# ``terminal_history_clear`` and others. ``/api/steering/execute`` gates only
+# ``DESTRUCTIVE_VERBS``; it does not apply ``CONFIRM_COMMANDS`` or
+# ``RUNBOOK_DESTRUCTIVE_COMMANDS`` (those guard ``/api/commands/{verb}``), so
+# allowing the wider set would have let a crafted model reply reach an
+# unconfirmed command. Interpretation may only ever restate an intent the
+# operator could have typed deterministically.
+INTERPRETABLE_VERBS: frozenset[str] = frozenset({verb for _pattern, verb in _SLASH_PATTERNS} | {"quickstart_start"})
 
 # The read-only role whose configured route supplies NL-interpretation
 # candidates. Interpreting a sentence is an analysis task, so it draws from a
@@ -225,7 +241,9 @@ Reply with ONLY a JSON object, no prose and no code fence:
 Rules:
 - Use null for verb when the sentence does not clearly map to exactly one allowed verb.
 - Never invent a verb that is not in the allowed list.
-- args keys are limited to: task_id, runbook_id, name, priority, count, reason.
+- args keys are limited to: task_id, runbook_id, name, priority, count, reason, key.
+- quickstart_start requires args.key naming the Quick Start option; if you cannot
+  identify which option is meant, return verb null instead.
 - Do not explain your reasoning. Do not add fields.
 
 Allowed verbs:
@@ -247,7 +265,13 @@ def build_prompt(text: str, *, allowed: Sequence[str]) -> str:
 
 # --------------------------------------------------------------------------- parsing
 
-_ALLOWED_ARG_KEYS = frozenset({"task_id", "runbook_id", "name", "priority", "count", "reason"})
+_ALLOWED_ARG_KEYS = frozenset({"task_id", "runbook_id", "name", "priority", "count", "reason", "key"})
+
+# ``quickstart_start`` acts on a named Quick Start option. Without that name
+# there is nothing safe to propose: the caller would otherwise substitute a
+# default option the interpreter never identified, and present a fully resolved
+# Prepared Run for work the operator did not ask for.
+_REQUIRED_ARGS: dict[str, frozenset[str]] = {"quickstart_start": frozenset({"key"})}
 
 
 def _extract_json(raw: str) -> dict[str, Any] | None:
@@ -311,6 +335,12 @@ def validate_reply(raw: str, *, raw_text: str, allowed: Sequence[str]) -> Steeri
             return _unrecognized(f"argument {key!r} was not a simple value")
         clean[key] = value
 
+    missing = _REQUIRED_ARGS.get(verb, frozenset()) - set(clean)
+    if missing:
+        return _unrecognized(
+            f"the interpreter proposed {verb} without required argument(s): {sorted(missing)}"
+        )
+
     summary = str(parsed.get("summary") or "").strip()
     destructive = verb in DESTRUCTIVE_VERBS
     preview = summary or f"{verb}({clean})"
@@ -353,7 +383,7 @@ def interpret(
     code_root: Path | None = None,
     invoker: Invoker = subprocess_invoker,
     timeout: float = INTERPRET_TIMEOUT_SECONDS,
-    allowed: Sequence[str] = ALL_COMMANDS,
+    allowed: Sequence[str] = tuple(sorted(INTERPRETABLE_VERBS)),
 ) -> Interpretation:
     """Route one sentence to an eligible interpreter and validate its answer.
 
@@ -395,7 +425,10 @@ def interpret(
 
     code, stdout, stderr = invoker(argv, timeout)
     if code != 0:
-        detail = (stderr or stdout or "").strip().splitlines()
+        # Redacted before it is echoed into an API field, like every other
+        # worker output this dashboard surfaces: a CLI error can carry paths or
+        # secret-shaped strings.
+        detail = redact_text((stderr or stdout or "").strip()).splitlines()
         return Interpretation(
             proposal=SteeringProposal(
                 status=STATUS_UNRECOGNIZED,
@@ -415,6 +448,7 @@ def interpret(
 
 
 __all__ = [
+    "INTERPRETABLE_VERBS",
     "INTERPRET_TIMEOUT_SECONDS",
     "NL_ROLE",
     "STATUS_FAILED",

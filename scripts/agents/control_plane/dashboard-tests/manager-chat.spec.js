@@ -100,3 +100,20 @@ test('the conversation keeps both turns in order', async ({ page }) => {
   );
   expect(kinds).toEqual(['you', 'manager', 'you', 'manager']);
 });
+
+test('a failed request is reported as a failure, not as unrecognized input', async ({ page }) => {
+  /* Independent review (Grok Build, issue #24): postJSON does not throw on an
+     HTTP error, so a 5xx was being rendered as "not recognized" -- telling the
+     operator their phrasing was wrong when the request had actually failed. */
+  await page.route('**/api/manager/message', (route) =>
+    route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"down"}' }),
+  );
+
+  await send(page, 'continue development');
+
+  const turn = page.locator(`${THREAD} .manager-msg-manager`).last();
+  await expect(turn).toHaveClass(/is-error/);
+  await expect(turn).toContainText('could not be reached');
+  await expect(turn).not.toContainText('unrecognized');
+});
+

@@ -493,8 +493,15 @@
     ["cost_usd", "Cost"],
   ];
 
+  const USAGE_ESTABLISHED = new Set(["MEASURED", "DERIVED"]);
+
   function usageMetricCell(label, cell) {
-    const known = cell.value !== null && cell.value !== undefined;
+    /* The class decides, not the presence of a value. A cell classed
+       NOT_EXPOSED/UNKNOWN/NOT_APPLICABLE must never render as a figure even if
+       a value is somehow present -- that would be exactly the fabrication this
+       panel exists to prevent. */
+    const known =
+      USAGE_ESTABLISHED.has(cell.class) && cell.value !== null && cell.value !== undefined;
     const display = known
       ? (cell.unit === "tokens"
           ? Number(cell.value).toLocaleString()
@@ -502,7 +509,9 @@
             ? `${Number(cell.value).toFixed(0)}s`
             : cell.unit === "usd"
               ? `$${Number(cell.value).toFixed(4)}`
-              : String(cell.value))
+              : cell.unit === "percent"
+                ? `${Number(cell.value)}%`
+                : String(cell.value))
       : cell.class;
 
     return el("div", { class: `usage-metric${known ? "" : " is-unavailable"}` }, [
@@ -543,16 +552,28 @@
           el("header", { class: "usage-row-head" }, [
             el("strong", { text: a.runbook_id || a.task_id || "run" }),
             el("span", { class: "usage-row-identity", text: identity || "worker UNKNOWN" }),
+            // Billable vs subscription is a routing fact, not a run state, so
+            // it does not borrow the running/idle status colours.
             el("span", {
-              class: `status-pill ${route.billable ? "st-running" : "st-available"}`,
+              class: `status-pill usage-route-pill${route.billable ? " is-billable" : ""}`,
               text: route.execution_route || "UNKNOWN",
             }),
           ]),
           el(
             "dl",
             { class: "usage-metrics" },
+            /* A metric missing from the payload is rendered as UNKNOWN rather
+               than omitted: silently dropping it would hide from the operator
+               that it was never established. */
             USAGE_METRIC_ORDER.map(([key, label]) =>
-              row.metrics && row.metrics[key] ? usageMetricCell(label, row.metrics[key]) : null,
+              usageMetricCell(
+                label,
+                (row.metrics && row.metrics[key]) || {
+                  value: null,
+                  class: "UNKNOWN",
+                  reason: "not reported for this run",
+                },
+              ),
             ),
           ),
         ]),
@@ -567,6 +588,8 @@
       renderUsageTelemetry(await getJSON("/api/usage-telemetry"));
     } catch (err) {
       root.innerHTML = "";
+      const note = document.getElementById("usage-telemetry-note");
+      if (note) note.textContent = "";
       root.appendChild(el("p", { class: "hint", text: "Usage could not be read; nothing is estimated in its place." }));
     }
   }
@@ -672,7 +695,7 @@
         label: task.id,
         detail: [task.state, task.worker].filter(Boolean).join(" · "),
         haystack: `${task.id} ${task.task_ref || ""} ${task.state || ""} ${task.worker || ""} ${task.role || ""}`,
-        run: () => showView("view-tasks"),
+        run: () => revealInView("view-tasks", task.id),
       });
     });
 
@@ -682,7 +705,8 @@
         label: run.name || run.id,
         detail: [run.status, run.branch].filter(Boolean).join(" · "),
         haystack: `${run.id} ${run.name || ""} ${run.status || ""} ${run.branch || ""} ${run.preset || ""}`,
-        run: () => showView("view-runs"),
+        // Runs have a real selection mechanism, so use it.
+        run: () => focusRunbook(run.id),
       });
     });
 
@@ -692,7 +716,7 @@
         label: agent.display_name || agent.worker,
         detail: [agent.provider, agent.effective_model].filter(Boolean).join(" · "),
         haystack: `${agent.worker} ${agent.display_name || ""} ${agent.provider || ""} ${agent.effective_model || ""}`,
-        run: () => showView("view-agents"),
+        run: () => revealInView("view-agents", agent.display_name || agent.worker),
       });
     });
 
@@ -702,7 +726,7 @@
         label: provider.display_name || provider.name,
         detail: [provider.provider, provider.display_state || provider.state].filter(Boolean).join(" · "),
         haystack: `${provider.name} ${provider.display_name || ""} ${provider.provider || ""} ${provider.state || ""}`,
-        run: () => showView("view-providers"),
+        run: () => revealInView("view-providers", provider.display_name || provider.name),
       });
     });
 
@@ -714,7 +738,7 @@
         label,
         detail: tree.branch && tree.branch !== label ? tree.branch : tree.path || "",
         haystack: `${tree.display_name || ""} ${tree.branch || ""} ${tree.path || ""}`,
-        run: () => showView("view-worktrees"),
+        run: () => revealInView("view-worktrees", label),
       });
     });
 
@@ -738,6 +762,18 @@
     });
 
     return entries;
+  }
+
+  /* A palette row names a specific entity, so choosing it must actually
+     surface that entity rather than dropping the operator on an unfiltered
+     list. Runs have a real focus mechanism; everything else navigates and then
+     applies the view filter to the entity's own identifier, which is the same
+     filter the topbar field drives. */
+  function revealInView(viewId, query) {
+    showView(viewId);
+    const field = document.getElementById("global-search");
+    if (field) field.value = query;
+    applySearch(query);
   }
 
   function renderPaletteResults(query) {
@@ -871,11 +907,15 @@
      contract exists for mutating route order, and a draggable control that
      silently did nothing would be a lie. */
 
+  /* These describe how a mode *would* allocate. The selector previews a mode;
+     it does not set one. Octarel's live policy is not changed from this
+     screen, and there is no endpoint that would do so — labelling these as
+     live allocation would make a read-only control look like a policy switch. */
   const ROUTING_MODE_LABELS = {
-    A: "Single primary — all traffic to the first routable candidate",
-    B: "Even split — equal weight across every routable candidate",
-    C: "Cost-weighted — cheapest cost class receives the largest share",
-    D: "Capability-priority — share decays by position in the route",
+    A: "Single primary — would send all traffic to the first routable candidate",
+    B: "Even split — would weight every routable candidate equally",
+    C: "Cost-weighted — would favour the cheapest cost class",
+    D: "Capability-priority — share would decay by position in the route",
     E: "Failover chain — single primary, full ordered chain returned",
   };
 
@@ -888,8 +928,10 @@
     if (active) classes.push("is-active");
 
     // Status text always accompanies the colour; never colour alone.
+    // "Would receive" rather than "Active": this is the selected mode's
+    // computed share, not observed live traffic.
     const stateText = active
-      ? `Active · ${candidate.share_percent}%`
+      ? `Would receive ${candidate.share_percent}%`
       : candidate.routable
         ? "Eligible"
         : "Excluded";
@@ -979,6 +1021,10 @@
       }
     } catch (err) {
       root.innerHTML = "";
+      // Clear the previous aggregate too: a stale "N of M routable" line would
+      // otherwise still read as current.
+      const note = document.getElementById("priority-mode-note");
+      if (note) { note.textContent = ""; note.classList.remove("priority-note-warn"); }
       root.appendChild(
         el("p", {
           class: "hint",
@@ -2092,14 +2138,23 @@
         const graph = d.graph_context;
         if (graph) {
           const injected = graph.injected;
-          const chipKind = injected ? "complete" : graph.status === "failed-safe" ? "failed" : "running";
+          const status = String(graph.status || "unknown").toLowerCase();
+          /* Only a real failure is painted as failed, and only an injected
+             context as complete. Every other recorded state (skipped, stale,
+             unavailable, not-recorded) is neutral -- painting them "running"
+             made a finished attempt look like work in progress. */
+          const chipKind = injected
+            ? "complete"
+            : status === "failed-safe"
+              ? "failed"
+              : "neutral";
           panel.appendChild(
             el("section", { class: "agent-activity-section" }, [
               el("h4", { text: "Graphify context" }),
               el("p", { class: "agent-activity-outcome" }, [
                 el("span", {
                   class: `agent-activity-chip ${chipKind}`,
-                  text: `${injected ? "✓" : "○"} ${String(graph.status).toUpperCase()}`,
+                  text: `${injected ? "✓" : "○"} ${status.toUpperCase()}`,
                 }),
                 el("span", {
                   class: "hint",
@@ -4977,15 +5032,23 @@
          always returns a proposal — execution still goes through
          /api/steering/execute and its server-enforced confirmation gate. */
       appendManagerMessage("you", text);
-      postJSON("/api/manager/message", { text }).then(({ body }) => {
-        if (!body) return;
-        appendManagerResponse(text, body);
-        if (body.status === "PARSED") showProposal(text, body);
-        else {
-          showUnrecognized(body);
-          renderSteeringFeedEntry(text, body);
-        }
-      });
+      postJSON("/api/manager/message", { text })
+        .then(({ ok, status, body }) => {
+          /* postJSON does not throw on an HTTP error, so without this a 4xx/5xx
+             body would be rendered as "not recognized" -- telling the operator
+             their phrasing was the problem when the request actually failed. */
+          if (!ok || !body) {
+            appendManagerError(`The Manager could not be reached (HTTP ${status}).`);
+            return;
+          }
+          appendManagerResponse(text, body);
+          if (body.status === "PARSED") showProposal(text, body);
+          else {
+            showUnrecognized(body);
+            renderSteeringFeedEntry(text, body);
+          }
+        })
+        .catch(() => appendManagerError("The Manager could not be reached."));
     });
   }
 
@@ -5010,6 +5073,19 @@
       el("li", { class: `manager-msg manager-msg-${who}` }, [
         el("span", { class: "manager-who", text: who === "you" ? "You" : "Manager" }),
         el("p", { class: "manager-text", text }),
+      ]),
+    );
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  function appendManagerError(message) {
+    const thread = document.getElementById("manager-thread");
+    if (!thread) return;
+    thread.appendChild(
+      el("li", { class: "manager-msg manager-msg-manager is-error" }, [
+        el("span", { class: "manager-who", text: "Manager" }),
+        el("p", { class: "manager-text", text: message }),
+        el("p", { class: "manager-route-line", text: "no interpretation was attempted" }),
       ]),
     );
     thread.scrollTop = thread.scrollHeight;
