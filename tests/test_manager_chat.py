@@ -365,3 +365,16 @@ def test_interpreter_failure_output_is_redacted(registry):
     assert result.status == mc.STATUS_FAILED
     assert secret not in result.proposal.reason
 
+
+def test_key_is_only_accepted_for_quickstart(registry):
+    """Re-review follow-up: `key` on another verb would reach a handler that
+    does not accept it, failing as a 500 instead of a clean refusal."""
+
+    result = mc.interpret(
+        "pause it",
+        registry=registry,
+        invoker=reply({"verb": "pause", "args": {"task_id": "T1", "key": "continue-video-editor"}}),
+    )
+    assert result.proposal.status == "UNRECOGNIZED"
+    assert "key" in result.proposal.reason
+

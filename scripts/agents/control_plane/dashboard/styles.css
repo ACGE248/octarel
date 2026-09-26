@@ -3094,3 +3094,5 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
 /* Billable/subscription is a routing fact, not a run state. */
 .usage-route-pill { color: var(--muted); background: var(--surface-2); }
 .usage-route-pill.is-billable { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+/* A previewed-mode share is not a run state, so it does not use the running colour. */
+.priority-share-pill { color: var(--accent-ink); background: var(--accent-soft); }

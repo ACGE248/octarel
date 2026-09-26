@@ -119,3 +119,21 @@ test('the view filter and the palette stay separate tools', async ({ page, viewp
   await expect(page.locator('#palette')).toBeHidden();
   await expect(page.locator('#global-search')).toHaveAttribute('placeholder', /filter this view/i);
 });
+
+test('choosing a named provider actually surfaces that provider', async ({ page }) => {
+  /* Re-review follow-up (Grok Build, issue #23): the row filtered on the
+     friendly display name, but provider cards carried only the worker name in
+     their data-search, so the named card was filtered out and the list could
+     come back empty. A row that names an entity must show that entity. */
+  await openPalette(page);
+  await page.fill('#palette-input', 'Grok Build Review');
+  const row = page.locator('.palette-row:has(.palette-kind:text-is("Provider"))').first();
+  await expect(row).toBeVisible();
+  await row.click();
+
+  await expect(page.locator('#view-providers')).toBeVisible();
+  const card = page.locator('#providers-cards .provider-row:visible');
+  await expect(card).toHaveCount(1);
+  await expect(card.first()).toContainText('Grok Build Review');
+});
+

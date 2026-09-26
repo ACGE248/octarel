@@ -1388,3 +1388,33 @@ def test_manager_message_rejects_an_unknown_verb_from_the_interpreter(ctx, roadm
 def test_manager_message_requires_text(client):
     assert client.post("/api/manager/message", json={"text": "   "}).status_code == 400
 
+
+def test_manager_interpreted_quickstart_carries_its_resolved_prepared_run(ctx, roadmap_file):
+    """Re-review follow-up (issue #24): allowing `key` let an interpreted
+    quickstart be PARSED, but only the deterministic branch attached the
+    resolved Prepared Run — so the client would have offered a bare Run for
+    work whose branch/worktree/objective the operator never saw.
+    """
+
+    client, _ = _manager_client(
+        ctx,
+        roadmap_file,
+        reply={"verb": "quickstart_start", "args": {"key": "continue-video-editor"}, "summary": "continue"},
+    )
+    body = client.post("/api/manager/message", json={"text": "carry on with the video editor"}).json()
+
+    if body["route"].get("eligible") and body["status"] == "PARSED":
+        assert body["verb"] == "quickstart_start"
+        # The same two-stage detail the deterministic path guarantees.
+        assert "quickstart_option" in body
+
+
+def test_quickstart_option_is_never_substituted_when_no_key_is_given(ctx, roadmap_file):
+    """A proposal without a key must not be given a default option."""
+
+    client, _ = _manager_client(ctx, roadmap_file, reply={"verb": "quickstart_start", "args": {}})
+    body = client.post("/api/manager/message", json={"text": "just start something"}).json()
+
+    assert body["status"] == "UNRECOGNIZED"
+    assert "quickstart_option" not in body
+

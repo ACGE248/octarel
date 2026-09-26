@@ -546,7 +546,14 @@
       const route = row.route || {};
       // Attribution is per row; figures from different workers are never
       // merged into a single number.
-      const identity = [a.worker, a.provider, a.model].filter(Boolean).join(" · ");
+      /* A model filled in from the current registry is not what this run
+         recorded, so it is marked rather than shown as fact. */
+      const modelLabel = a.model
+        ? a.model_class === "DERIVED"
+          ? `${a.model} (DERIVED)`
+          : a.model
+        : null;
+      const identity = [a.worker, a.provider, modelLabel].filter(Boolean).join(" · ");
       root.appendChild(
         el("article", { class: "entity-card usage-row" }, [
           el("header", { class: "usage-row-head" }, [
@@ -726,7 +733,9 @@
         label: provider.display_name || provider.name,
         detail: [provider.provider, provider.display_state || provider.state].filter(Boolean).join(" · "),
         haystack: `${provider.name} ${provider.display_name || ""} ${provider.provider || ""} ${provider.state || ""}`,
-        run: () => revealInView("view-providers", provider.display_name || provider.name),
+        // Filter on the stable worker name: it is always in the card's
+        // data-search, whereas a defaulted display_name may not be.
+        run: () => revealInView("view-providers", provider.name),
       });
     });
 
@@ -935,7 +944,8 @@
       : candidate.routable
         ? "Eligible"
         : "Excluded";
-    const stateClass = active ? "st-running" : candidate.routable ? "st-available" : "st-paused";
+    // A computed share for a previewed mode is not a run state.
+    const stateClass = active ? "priority-share-pill" : candidate.routable ? "st-available" : "st-paused";
 
     /* A provider and an agent are distinct concepts and the design
        specification requires showing both, alongside the effective model. */
@@ -3110,7 +3120,9 @@
         class: "entity-card provider-row",
         "data-worker": p.name,
         "data-searchable": "true",
-        "data-search": `${p.name} ${p.provider} ${p.state}`,
+        // display_name is included so the friendly name the command palette
+        // (and the operator) actually sees can match this card.
+        "data-search": `${p.name} ${p.display_name || ""} ${p.provider} ${p.state}`,
       });
       // ENG-AGENT-02-S7 (issue #97): six actions per card by default made the
       // mobile Providers view an extremely long stack; collapsed behind one
@@ -3188,7 +3200,7 @@
     tbody.innerHTML = "";
     providers.forEach((p) => {
       tbody.appendChild(
-        el("tr", { "data-searchable": "true", "data-search": `${p.name} ${p.provider} ${p.state}` }, [
+        el("tr", { "data-searchable": "true", "data-search": `${p.name} ${p.display_name || ""} ${p.provider} ${p.state}` }, [
           el("td", { text: p.display_name || displayName(p.name) }),
           el("td", { text: p.execution_system }),
           el("td", { text: p.provider }),

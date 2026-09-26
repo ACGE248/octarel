@@ -241,7 +241,7 @@ Reply with ONLY a JSON object, no prose and no code fence:
 Rules:
 - Use null for verb when the sentence does not clearly map to exactly one allowed verb.
 - Never invent a verb that is not in the allowed list.
-- args keys are limited to: task_id, runbook_id, name, priority, count, reason, key.
+- args keys are limited to: task_id, runbook_id, name, priority, count, reason.
 - quickstart_start requires args.key naming the Quick Start option; if you cannot
   identify which option is meant, return verb null instead.
 - Do not explain your reasoning. Do not add fields.
@@ -265,13 +265,19 @@ def build_prompt(text: str, *, allowed: Sequence[str]) -> str:
 
 # --------------------------------------------------------------------------- parsing
 
-_ALLOWED_ARG_KEYS = frozenset({"task_id", "runbook_id", "name", "priority", "count", "reason", "key"})
+_ALLOWED_ARG_KEYS = frozenset({"task_id", "runbook_id", "name", "priority", "count", "reason"})
 
 # ``quickstart_start`` acts on a named Quick Start option. Without that name
 # there is nothing safe to propose: the caller would otherwise substitute a
 # default option the interpreter never identified, and present a fully resolved
 # Prepared Run for work the operator did not ask for.
+#
+# ``key`` is accepted *only* for that verb. Allowing it everywhere let a reply
+# attach it to pause/stop/..., where apply_command forwards it to a handler
+# that does not accept it -- failing closed, but as a 500 rather than a clean
+# refusal.
 _REQUIRED_ARGS: dict[str, frozenset[str]] = {"quickstart_start": frozenset({"key"})}
+_EXTRA_ARG_KEYS: dict[str, frozenset[str]] = {"quickstart_start": frozenset({"key"})}
 
 
 def _extract_json(raw: str) -> dict[str, Any] | None:
@@ -323,7 +329,7 @@ def validate_reply(raw: str, *, raw_text: str, allowed: Sequence[str]) -> Steeri
     args = parsed.get("args") or {}
     if not isinstance(args, dict):
         return _unrecognized("the interpreter returned a malformed argument object")
-    unexpected = set(args) - _ALLOWED_ARG_KEYS
+    unexpected = set(args) - _ALLOWED_ARG_KEYS - _EXTRA_ARG_KEYS.get(verb, frozenset())
     if unexpected:
         return _unrecognized(f"the interpreter returned unexpected argument(s): {sorted(unexpected)}")
 

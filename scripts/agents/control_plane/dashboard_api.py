@@ -2115,9 +2115,15 @@ def create_app(
 
         if proposal.verb != "quickstart_start":
             return
+        key = proposal.args.get("key")
+        if not key:
+            # No substituted default: attaching a Prepared Run the proposal did
+            # not identify would show the operator resolved work they never
+            # asked for.
+            return
         option = resolve_quickstart_option(
             ctx.project_root,
-            str(proposal.args.get("key", "continue-video-editor")),
+            str(key),
             project=ctx.selected_project,
             state=ctx.state,
             registry=ctx.registry,
@@ -2248,6 +2254,12 @@ def create_app(
         )
         body = interpretation.as_dict()
         body["route"]["kind"] = "model"
+        # Same two-stage treatment as the deterministic branch: a PARSED
+        # quickstart must arrive with its fully resolved Prepared Run so the
+        # operator reviews real branch/worktree/objective detail before
+        # anything starts, never a bare verb.
+        if interpretation.proposal.status == "PARSED":
+            _attach_quickstart_option(interpretation.proposal, body)
 
         route = interpretation.route
         # Route evidence goes into the same event log every other execution
