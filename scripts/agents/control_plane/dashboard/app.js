@@ -12,6 +12,7 @@
   const POLL_MS = 2000;
   const THEME_KEY = "octages-orchestrator-theme";
   const NOTIF_KEY = "octages-orchestrator-notifications";
+  const RAIL_KEY = "octages-orchestrator-rail";
   const SESSION_START_KEY = "octages-orchestrator-session-start";
   const COMPLETED_STATES = ["SUCCEEDED", "READY_LOCAL", "READY_BUT_UNMERGED"];
   const QUEUED_STATES = ["QUEUED", "PENDING", "PAUSED"];
@@ -429,10 +430,19 @@
 
   // --------------------------------------------------------------------- theme
 
+  /* Surfaces that cannot read CSS custom properties themselves (the xterm
+     canvas today) register here so a theme change repaints them too. CSS-driven
+     surfaces need no hook, and the SVG charts repaint on the next poll. */
+  const themeListeners = [];
+  function onThemeChange(fn) { themeListeners.push(fn); }
+
   function applyTheme(value) {
     const root = document.documentElement;
     if (value === "system") root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", value);
+    themeListeners.forEach((fn) => {
+      try { fn(); } catch (err) { /* a repaint failure must never break theming */ }
+    });
   }
 
   function initTheme() {
@@ -459,7 +469,661 @@
     }
   }
 
+  // --------------------------------------------------- model & session usage
+
+  /* OCTAREL-UI-06 (issue #25). Renders /api/usage-telemetry. Each metric
+     arrives with the class that established it, and the class is shown next to
+     the value — a figure Octarel cannot establish reads NOT_EXPOSED with its
+     reason rather than appearing as a plausible number. */
+
+  /* "Input" is the total input the CLI reported. It is deliberately not
+     labelled "fresh input": without cache categories there is no way to know
+     how much of it was fresh versus a cache read, and calling it fresh would
+     assert something unmeasured. Fresh input and cache reads therefore appear
+     as their own explicitly unavailable metrics. */
+  const USAGE_METRIC_ORDER = [
+    ["input_tokens", "Input"],
+    ["output_tokens", "Output"],
+    ["total_tokens", "Tokens processed"],
+    ["fresh_input_tokens", "Fresh input"],
+    ["cache_read_tokens", "Cache reads"],
+    ["cache_hit_rate", "Cache hit rate"],
+    ["context_used_percent", "Context used"],
+    ["duration_seconds", "Duration"],
+    ["cost_usd", "Cost"],
+  ];
+
+  const USAGE_ESTABLISHED = new Set(["MEASURED", "DERIVED"]);
+
+  function usageMetricCell(label, cell) {
+    /* The class decides, not the presence of a value. A cell classed
+       NOT_EXPOSED/UNKNOWN/NOT_APPLICABLE must never render as a figure even if
+       a value is somehow present -- that would be exactly the fabrication this
+       panel exists to prevent. */
+    const known =
+      USAGE_ESTABLISHED.has(cell.class) && cell.value !== null && cell.value !== undefined;
+    const display = known
+      ? (cell.unit === "tokens"
+          ? Number(cell.value).toLocaleString()
+          : cell.unit === "seconds"
+            ? `${Number(cell.value).toFixed(0)}s`
+            : cell.unit === "usd"
+              ? `$${Number(cell.value).toFixed(4)}`
+              : cell.unit === "percent"
+                ? `${Number(cell.value)}%`
+                : String(cell.value))
+      : cell.class;
+
+    return el("div", { class: `usage-metric${known ? "" : " is-unavailable"}` }, [
+      el("dt", { text: label }),
+      el("dd", { text: display }),
+      // The provenance travels with the number, never implied by its absence.
+      el("span", {
+        class: "usage-metric-class",
+        text: known ? cell.class : "",
+        title: cell.reason || cell.formula || cell.source || "",
+      }),
+      cell.reason && !known ? el("p", { class: "usage-metric-reason", text: cell.reason }) : null,
+    ]);
+  }
+
+  function renderUsageTelemetry(body) {
+    const root = document.getElementById("usage-telemetry-rows");
+    if (!root) return;
+    const rows = (body && body.rows) || [];
+    root.innerHTML = "";
+
+    const note = document.getElementById("usage-telemetry-note");
+    if (note) note.textContent = body && body.note ? body.note : "";
+
+    if (!rows.length) {
+      root.appendChild(el("p", { class: "hint", text: "No run has recorded usage yet." }));
+      return;
+    }
+
+    rows.forEach((row) => {
+      const a = row.attribution || {};
+      const route = row.route || {};
+      // Attribution is per row; figures from different workers are never
+      // merged into a single number.
+      /* A model filled in from the current registry is not what this run
+         recorded, so it is marked rather than shown as fact. */
+      const modelDerived = !!a.model && a.model_class !== "MEASURED";
+      const modelLabel = a.model ? (modelDerived ? `${a.model} (${a.model_class || "DERIVED"})` : a.model) : null;
+      const identity = [a.worker, a.provider, modelLabel].filter(Boolean).join(" · ");
+      root.appendChild(
+        el("article", { class: "entity-card usage-row" }, [
+          el("header", { class: "usage-row-head" }, [
+            el("strong", { text: a.runbook_id || a.task_id || "run" }),
+            el("span", {
+              class: "usage-row-identity",
+              text: identity || "worker UNKNOWN",
+              // Where the model attribution came from, when it was not this run's own record.
+              title: modelDerived && a.model_source ? a.model_source : "",
+            }),
+            // Billable vs subscription is a routing fact, not a run state, so
+            // it does not borrow the running/idle status colours.
+            el("span", {
+              class: `status-pill usage-route-pill${route.billable ? " is-billable" : ""}`,
+              text: route.execution_route || "UNKNOWN",
+            }),
+          ]),
+          el(
+            "dl",
+            { class: "usage-metrics" },
+            /* A metric missing from the payload is rendered as UNKNOWN rather
+               than omitted: silently dropping it would hide from the operator
+               that it was never established. */
+            USAGE_METRIC_ORDER.map(([key, label]) =>
+              usageMetricCell(
+                label,
+                (row.metrics && row.metrics[key]) || {
+                  value: null,
+                  class: "UNKNOWN",
+                  reason: "not reported for this run",
+                },
+              ),
+            ),
+          ),
+        ]),
+      );
+    });
+  }
+
+  async function refreshUsageTelemetry() {
+    const root = document.getElementById("usage-telemetry-rows");
+    if (!root || !isViewActive("view-providers")) return;
+    try {
+      renderUsageTelemetry(await getJSON("/api/usage-telemetry"));
+    } catch (err) {
+      root.innerHTML = "";
+      const note = document.getElementById("usage-telemetry-note");
+      if (note) note.textContent = "";
+      root.appendChild(el("p", { class: "hint", text: "Usage could not be read; nothing is estimated in its place." }));
+    }
+  }
+
+  // --------------------------------------------------------- command palette
+
+  /* OCTAREL-UI-04 (issue #23). A real cross-entity palette, not a filter over
+     the current view: it indexes the entities this dashboard already serves
+     and jumps to any of them.
+
+     Safety: the palette navigates and selects. It never executes a destructive
+     verb. Choosing a command places it in the Manager input for review, so
+     execution still goes through the existing parse/confirm path and the
+     server's own destructiveness check — the palette cannot become a way to
+     bypass a confirmation gate. */
+
+  const PALETTE_VIEWS = [
+    ["view-overview", "Overview"],
+    ["view-runs", "Runs"],
+    ["view-flow", "Flow"],
+    ["view-priority", "Priority & Fallback Matrix"],
+    ["view-tasks", "Tasks"],
+    ["view-agents", "Agents"],
+    ["view-providers", "Providers"],
+    ["view-steering", "Manager"],
+    ["view-history", "History"],
+    ["view-worktrees", "Worktrees"],
+    ["view-system", "System"],
+    ["view-terminal", "Terminal"],
+    ["view-settings", "Settings"],
+    ["view-roadmap", "Roadmap"],
+  ];
+
+  /* The deterministic Manager grammar, mirrored from the help panel. The
+     confirm flag marks a verb the server refuses without explicit
+     confirmation; the palette says so up front rather than implying a
+     one-keystroke action. */
+  const PALETTE_COMMANDS = [
+    ["/start [TASK_ID]", false],
+    ["/pause TASK_ID", false],
+    ["/resume TASK_ID", false],
+    ["/stop TASK_ID", true],
+    ["/stop-after-current", true],
+    ["/stop-all", true],
+    ["/enable PROVIDER", false],
+    ["/disable PROVIDER", true],
+    ["/drain PROVIDER", true],
+    ["/probe PROVIDER", false],
+    ["/cost-block PROVIDER [reason]", true],
+    ["/cost-clear PROVIDER", false],
+    ["/priority TASK_ID NUMBER", false],
+    ["/defer TASK_ID", false],
+    ["/set-max-writers NUMBER", false],
+    ["/dry-run TASK_ID", false],
+  ];
+
+  let paletteEntries = [];
+  let paletteMatches = [];
+  let paletteActiveIndex = 0;
+  let paletteLastFocus = null;
+
+  async function buildPaletteIndex() {
+    /* Read when the palette opens rather than mirrored into a second always-on
+       cache: it is user-initiated and infrequent, and reading on open
+       guarantees it never offers a stale entity. Every source is an endpoint
+       the dashboard already polls, and allSettled means one failing endpoint
+       costs only its own group. */
+    const entries = [];
+
+    PALETTE_VIEWS.forEach(([viewId, label]) => {
+      entries.push({
+        kind: "View",
+        label,
+        detail: "Go to view",
+        haystack: `${label} ${viewId}`,
+        run: () => showView(viewId),
+      });
+    });
+
+    const [projects, tasks, runbooks, agents, providerRows, worktreeRows] = await Promise.allSettled([
+      getJSON("/api/projects"),
+      getJSON("/api/tasks"),
+      getJSON("/api/runbooks"),
+      getJSON("/api/models"),
+      getJSON("/api/providers"),
+      getJSON("/api/worktrees"),
+    ]);
+    const ok = (settled, fallback) => (settled.status === "fulfilled" ? settled.value : fallback);
+
+    (ok(projects, {}).projects || []).forEach((project) => {
+      entries.push({
+        kind: "Project",
+        label: project.display_name || project.project_id,
+        detail: project.github_remote || project.project_id,
+        haystack: `${project.display_name || ""} ${project.project_id} ${project.github_remote || ""}`,
+        run: () => selectProject(project.project_id),
+      });
+    });
+
+    (ok(tasks, []) || []).forEach((task) => {
+      entries.push({
+        kind: "Task",
+        label: task.id,
+        detail: [task.state, task.worker].filter(Boolean).join(" · "),
+        haystack: `${task.id} ${task.task_ref || ""} ${task.state || ""} ${task.worker || ""} ${task.role || ""}`,
+        run: () => revealInView("view-tasks", task.id),
+      });
+    });
+
+    (ok(runbooks, []) || []).forEach((run) => {
+      entries.push({
+        kind: "Run",
+        label: run.name || run.id,
+        detail: [run.status, run.branch].filter(Boolean).join(" · "),
+        haystack: `${run.id} ${run.name || ""} ${run.status || ""} ${run.branch || ""} ${run.preset || ""}`,
+        // Runs have a real selection mechanism, so use it.
+        run: () => focusRunbook(run.id),
+      });
+    });
+
+    (ok(agents, []) || []).forEach((agent) => {
+      entries.push({
+        kind: "Agent",
+        label: agent.display_name || agent.worker,
+        detail: [agent.provider, agent.effective_model].filter(Boolean).join(" · "),
+        haystack: `${agent.worker} ${agent.display_name || ""} ${agent.provider || ""} ${agent.effective_model || ""}`,
+        run: () => revealInView("view-agents", agent.display_name || agent.worker),
+      });
+    });
+
+    (ok(providerRows, []) || []).forEach((provider) => {
+      entries.push({
+        kind: "Provider",
+        label: provider.display_name || provider.name,
+        detail: [provider.provider, provider.display_state || provider.state].filter(Boolean).join(" · "),
+        haystack: `${provider.name} ${provider.display_name || ""} ${provider.provider || ""} ${provider.state || ""}`,
+        // Filter on the stable worker name: it is always in the card's
+        // data-search, whereas a defaulted display_name may not be.
+        run: () => revealInView("view-providers", provider.name),
+      });
+    });
+
+    (ok(worktreeRows, []) || []).forEach((tree) => {
+      const label = tree.display_name || tree.branch || tree.path;
+      if (!label) return;
+      entries.push({
+        kind: "Worktree",
+        label,
+        detail: tree.branch && tree.branch !== label ? tree.branch : tree.path || "",
+        haystack: `${tree.display_name || ""} ${tree.branch || ""} ${tree.path || ""}`,
+        run: () => revealInView("view-worktrees", label),
+      });
+    });
+
+    PALETTE_COMMANDS.forEach(([command, needsConfirm]) => {
+      entries.push({
+        kind: "Command",
+        label: command,
+        detail: needsConfirm
+          ? "Opens in Manager · requires confirmation"
+          : "Opens in Manager for review",
+        haystack: command,
+        run: () => {
+          showView("view-steering");
+          const input = document.getElementById("steering-input");
+          if (input) {
+            input.value = command;
+            input.focus();
+          }
+        },
+      });
+    });
+
+    return entries;
+  }
+
+  /* A palette row names a specific entity, so choosing it must actually
+     surface that entity rather than dropping the operator on an unfiltered
+     list. Runs have a real focus mechanism; everything else navigates and then
+     applies the view filter to the entity's own identifier, which is the same
+     filter the topbar field drives. */
+  function revealInView(viewId, query) {
+    showView(viewId);
+    const field = document.getElementById("global-search");
+    if (field) field.value = query;
+    applySearch(query);
+  }
+
+  function renderPaletteResults(query) {
+    const root = document.getElementById("palette-results");
+    if (!root) return;
+    const q = String(query || "").trim().toLowerCase();
+    const matches = (q
+      ? paletteEntries.filter((entry) => entry.haystack.toLowerCase().includes(q))
+      : paletteEntries
+    ).slice(0, 50);
+
+    paletteMatches = matches;
+    if (paletteActiveIndex > matches.length - 1) paletteActiveIndex = Math.max(matches.length - 1, 0);
+    root.innerHTML = "";
+
+    if (!matches.length) {
+      root.appendChild(el("p", { class: "hint palette-empty", text: "Nothing matches that search." }));
+      return;
+    }
+
+    matches.forEach((entry, index) => {
+      const active = index === paletteActiveIndex;
+      const row = el(
+        "button",
+        {
+          type: "button",
+          class: `palette-row${active ? " is-active" : ""}`,
+          role: "option",
+          "aria-selected": active ? "true" : "false",
+        },
+        [
+          el("span", { class: "palette-kind", text: entry.kind }),
+          el("span", { class: "palette-label", text: entry.label }),
+          entry.detail ? el("span", { class: "palette-detail", text: entry.detail }) : null,
+        ],
+      );
+      row.addEventListener("click", () => runPaletteEntry(entry));
+      root.appendChild(row);
+    });
+  }
+
+  function runPaletteEntry(entry) {
+    if (!entry) return;
+    closePalette();
+    if (typeof entry.run === "function") entry.run();
+  }
+
+  function closePalette() {
+    const palette = document.getElementById("palette");
+    const backdrop = document.getElementById("palette-backdrop");
+    if (palette) palette.hidden = true;
+    if (backdrop) backdrop.hidden = true;
+    // Focus restoration: this is a modal dialog.
+    if (paletteLastFocus && document.contains(paletteLastFocus)) paletteLastFocus.focus();
+    paletteLastFocus = null;
+  }
+
+  async function openPalette() {
+    const palette = document.getElementById("palette");
+    const backdrop = document.getElementById("palette-backdrop");
+    const input = document.getElementById("palette-input");
+    const root = document.getElementById("palette-results");
+    if (!palette || !input) return;
+
+    paletteLastFocus = document.activeElement;
+    paletteActiveIndex = 0;
+    input.value = "";
+    if (backdrop) backdrop.hidden = false;
+    palette.hidden = false;
+    input.focus();
+
+    if (root) {
+      root.innerHTML = "";
+      root.appendChild(el("p", { class: "hint palette-empty", text: "Loading…" }));
+    }
+    paletteEntries = await buildPaletteIndex();
+    // The operator may have typed while the index loaded.
+    renderPaletteResults(input.value);
+  }
+
+  function initPalette() {
+    const input = document.getElementById("palette-input");
+    const trigger = document.getElementById("palette-open");
+    const backdrop = document.getElementById("palette-backdrop");
+    const palette = document.getElementById("palette");
+    if (!input || !palette) return;
+
+    if (trigger) trigger.addEventListener("click", openPalette);
+    const mobileTrigger = document.getElementById("palette-open-mobile");
+    if (mobileTrigger) mobileTrigger.addEventListener("click", openPalette);
+    if (backdrop) backdrop.addEventListener("click", closePalette);
+
+    input.addEventListener("input", () => {
+      paletteActiveIndex = 0;
+      renderPaletteResults(input.value);
+    });
+
+    input.addEventListener("keydown", (evt) => {
+      if (evt.key === "ArrowDown" || evt.key === "ArrowUp") {
+        evt.preventDefault();
+        if (!paletteMatches.length) return;
+        const delta = evt.key === "ArrowDown" ? 1 : -1;
+        paletteActiveIndex = (paletteActiveIndex + delta + paletteMatches.length) % paletteMatches.length;
+        renderPaletteResults(input.value);
+        const activeRow = document.querySelector(".palette-row.is-active");
+        if (activeRow) activeRow.scrollIntoView({ block: "nearest" });
+      } else if (evt.key === "Enter") {
+        evt.preventDefault();
+        runPaletteEntry(paletteMatches[paletteActiveIndex]);
+      } else if (evt.key === "Escape") {
+        evt.preventDefault();
+        closePalette();
+      }
+    });
+
+    // Keep focus inside the dialog while it is open.
+    palette.addEventListener("keydown", (evt) => {
+      if (evt.key !== "Tab") return;
+      evt.preventDefault();
+      input.focus();
+    });
+  }
+
+  // -------------------------------------------------- priority & fallback matrix
+
+  /* OCTAREL-UI-04 (issue #23). Renders /api/priority-matrix, which is a read
+     model over the registry's configured routes. Nothing here re-derives or
+     re-orders routing: priority is the position the server reports, and a
+     candidate the router cannot use keeps its recorded reason rather than
+     being dropped. There is deliberately no drag-to-reorder — no backend
+     contract exists for mutating route order, and a draggable control that
+     silently did nothing would be a lie. */
+
+  /* These describe how a mode *would* allocate. The selector previews a mode;
+     it does not set one. Octarel's live policy is not changed from this
+     screen, and there is no endpoint that would do so — labelling these as
+     live allocation would make a read-only control look like a policy switch. */
+  const ROUTING_MODE_LABELS = {
+    A: "Single primary — would send all traffic to the first routable candidate",
+    B: "Even split — would weight every routable candidate equally",
+    C: "Cost-weighted — would favour the cheapest cost class",
+    D: "Capability-priority — share would decay by position in the route",
+    E: "Failover chain — single primary, full ordered chain returned",
+  };
+
+  let priorityMode = "A";
+
+  function priorityCandidateCard(candidate) {
+    const active = candidate.share_percent != null;
+    const classes = ["entity-card", "priority-card"];
+    if (!candidate.routable) classes.push("is-excluded");
+    if (active) classes.push("is-active");
+
+    // Status text always accompanies the colour; never colour alone.
+    // "Would receive" rather than "Active": this is the selected mode's
+    // computed share, not observed live traffic.
+    const stateText = active
+      ? `Would receive ${candidate.share_percent}%`
+      : candidate.routable
+        ? "Eligible"
+        : "Excluded";
+    // A computed share for a previewed mode is not a run state.
+    const stateClass = active ? "priority-share-pill" : candidate.routable ? "st-available" : "st-paused";
+
+    /* A provider and an agent are distinct concepts and the design
+       specification requires showing both, alongside the effective model. */
+    const facts = [
+      ["Provider", candidate.provider],
+      ["Agent", candidate.execution_system],
+      ["Model", candidate.model || "UNKNOWN"],
+      ["Capability", candidate.capability],
+      ["Cost class", candidate.cost_class],
+      ["Provider state", candidate.provider_state],
+    ]
+      .filter(([, value]) => value != null && value !== "")
+      .map(([label, value]) =>
+        el("div", {}, [
+          el("dt", { text: label }),
+          el("dd", { text: String(value) }),
+        ]),
+      );
+
+    return el("article", { class: classes.join(" ") }, [
+      el("header", { class: "priority-card-head" }, [
+        el("span", { class: "priority-tier", text: `P${candidate.priority}` }),
+        el("strong", { class: "priority-agent", text: candidate.display_name }),
+        el("span", { class: `status-pill ${stateClass}`, text: stateText }),
+      ]),
+      el("dl", { class: "priority-facts" }, facts),
+      candidate.excluded_reason
+        ? el("p", { class: "priority-reason", text: `Excluded: ${candidate.excluded_reason}` })
+        : null,
+    ]);
+  }
+
+  function renderPriorityMatrix(body) {
+    const root = document.getElementById("priority-columns");
+    if (!root) return;
+    const roles = (body && body.roles) || [];
+    root.innerHTML = "";
+
+    if (!roles.length) {
+      root.appendChild(el("p", { class: "hint", text: "No routes are configured for the selected project." }));
+      return;
+    }
+
+    roles.forEach((role) => {
+      root.appendChild(
+        el("section", { class: "priority-column" }, [
+          el("div", { class: "priority-column-head" }, [
+            el("h3", { text: role.role }),
+            el("span", {
+              class: "hint",
+              text: role.error
+                ? "route could not be resolved"
+                : `${role.routable_count} of ${role.candidate_count} routable`,
+            }),
+          ]),
+          // A role whose route is misconfigured is shown as such, not omitted.
+          role.error ? el("p", { class: "priority-reason", text: role.error }) : null,
+          ...role.candidates.map(priorityCandidateCard),
+        ]),
+      );
+    });
+  }
+
+  async function refreshPriorityMatrix() {
+    const root = document.getElementById("priority-columns");
+    if (!root || !isViewActive("view-priority")) return;
+    try {
+      const body = await getJSON(`/api/priority-matrix?mode=${encodeURIComponent(priorityMode)}`);
+      renderPriorityMatrix(body);
+      const note = document.getElementById("priority-mode-note");
+      if (note) {
+        // The selector already names the mode, so this line carries the
+        // aggregate instead of repeating it: how much of the configured
+        // fallback capacity is actually usable right now.
+        const roles = body.roles || [];
+        const candidates = roles.reduce((sum, role) => sum + role.candidate_count, 0);
+        const routable = roles.reduce((sum, role) => sum + role.routable_count, 0);
+        const starved = roles.filter((role) => role.routable_count === 0).length;
+        note.textContent =
+          `${roles.length} configured roles \u00b7 ${routable} of ${candidates} candidates routable` +
+          (starved ? ` \u00b7 ${starved} with no routable candidate` : "");
+        note.classList.toggle("priority-note-warn", starved > 0);
+      }
+    } catch (err) {
+      root.innerHTML = "";
+      // Clear the previous aggregate too: a stale "N of M routable" line would
+      // otherwise still read as current.
+      const note = document.getElementById("priority-mode-note");
+      if (note) { note.textContent = ""; note.classList.remove("priority-note-warn"); }
+      root.appendChild(
+        el("p", {
+          class: "hint",
+          text: "Routing could not be read. The matrix is left empty rather than guessed.",
+        }),
+      );
+    }
+  }
+
+  function initPriorityMatrix() {
+    const select = document.getElementById("priority-mode");
+    if (!select) return;
+    Object.entries(ROUTING_MODE_LABELS).forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    });
+    select.value = priorityMode;
+    select.addEventListener("change", () => {
+      priorityMode = select.value;
+      refreshPriorityMatrix();
+    });
+  }
+
+  // ----------------------------------------------------------------- nav rail
+
+  /* Collapsed/expanded state for the desktop navigation rail. Stored in this
+     browser only, like the theme — it is a display preference, not
+     orchestrator state, so it never round-trips to the server. */
+  function applyRail(collapsed) {
+    const root = document.documentElement;
+    if (collapsed) root.setAttribute("data-rail", "collapsed");
+    else root.removeAttribute("data-rail");
+    const btn = document.getElementById("rail-toggle");
+    if (btn) {
+      btn.setAttribute("aria-pressed", collapsed ? "true" : "false");
+      const label = btn.querySelector(".rail-toggle-label");
+      // The accessible name has to describe the action in both states, and the
+      // visible label is hidden while collapsed, so set both.
+      const text = collapsed ? "Expand menu" : "Collapse menu";
+      if (label) label.textContent = text;
+      btn.setAttribute("aria-label", text);
+    }
+  }
+
+  function initRail() {
+    let collapsed = false;
+    try {
+      collapsed = localStorage.getItem(RAIL_KEY) === "collapsed";
+    } catch (err) {
+      collapsed = false;
+    }
+    applyRail(collapsed);
+    const btn = document.getElementById("rail-toggle");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      collapsed = !collapsed;
+      applyRail(collapsed);
+      try {
+        localStorage.setItem(RAIL_KEY, collapsed ? "collapsed" : "expanded");
+      } catch (err) {
+        /* A browser that refuses storage still gets the toggle, just not the
+           memory of it; nothing else depends on the write succeeding. */
+      }
+    });
+  }
+
   // --------------------------------------------------------------------- view switching
+
+  /* A panel that costs real work to produce should not be produced while it is
+     off-screen. /api/manager/route probes CLI presence on the filesystem and
+     loads the model catalog; /api/priority-matrix walks every configured role;
+     /api/usage-telemetry walks every durable usage record. Polling all three
+     every 2s regardless of what the operator is looking at was measurable load
+     for no benefit, so these refresh only while their view is visible and are
+     fetched immediately on switching to it. */
+  function isViewActive(viewId) {
+    const view = document.getElementById(viewId);
+    return !!view && !view.hidden;
+  }
+
+  const VIEW_SCOPED_REFRESH = {
+    "view-priority": () => refreshPriorityMatrix(),
+    "view-steering": () => refreshManagerRoute(),
+    "view-providers": () => refreshUsageTelemetry(),
+  };
 
   function showView(viewId) {
     document.querySelectorAll(".view").forEach((node) => {
@@ -481,6 +1145,12 @@
     applySearch(document.getElementById("global-search")?.value || "");
     if (viewId === "view-flow") requestAnimationFrame(() => drawFlowEdges());
     if (viewId === "view-terminal" && connectTerminalView) connectTerminalView();
+    // Populate a view-scoped panel now rather than waiting for the next poll,
+    // since it is skipped entirely while its view is hidden.
+    const scoped = VIEW_SCOPED_REFRESH[viewId];
+    if (scoped) {
+      try { scoped(); } catch (err) { console.warn(err); }
+    }
   }
 
   function initNav() {
@@ -771,10 +1441,13 @@
     const hint = document.getElementById("search-hint");
     if (hint) hint.textContent = platformHint();
     input.addEventListener("input", () => applySearch(input.value));
+    // OCTAREL-UI-04: the accelerator opens the cross-entity command palette.
+    // The field beside it keeps filtering the current view, which is a
+    // different job and stays available.
     document.addEventListener("keydown", (evt) => {
       if ((evt.metaKey || evt.ctrlKey) && evt.key.toLowerCase() === "k") {
         evt.preventDefault();
-        input.focus();
+        openPalette();
       }
     });
   }
@@ -801,44 +1474,57 @@
     return wrap.innerHTML;
   }
 
+  /* SVG chart strokes are presentation attributes, so unlike a CSS `color`
+     declaration they cannot resolve a custom property themselves. Read the
+     themed tokens from the document once per render instead of pinning a
+     palette here, so the rings and donut follow the active theme (and the
+     design system's status colours) rather than drifting from it. */
+  function themeColors() {
+    const s = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => (s.getPropertyValue(name).trim() || fallback);
+    return {
+      ok: read("--ok", "#18a875"),
+      info: read("--info", "#6d63d9"),
+      completed: read("--purple", read("--info", "#6d63d9")),
+      err: read("--err", "#d84d45"),
+      track: read("--border-strong", "rgba(55,48,39,.17)"),
+    };
+  }
+
   function renderStatusRings(counts) {
     const total = Math.max(counts.total, 1);
+    const tone = themeColors();
     const map = [
-      ["ring-running", "status-running", counts.running, "rgb(var(--ok-rgb))"],
-      ["ring-queued", "status-queued", counts.queued, "rgb(var(--info-rgb))"],
-      ["ring-completed", "status-completed", counts.completed, "rgb(var(--purple-rgb))"],
-      ["ring-blocked", "status-blocked", counts.blocked, "rgb(var(--err-rgb))"],
+      ["ring-running", "status-running", counts.running, tone.ok],
+      ["ring-queued", "status-queued", counts.queued, tone.info],
+      ["ring-completed", "status-completed", counts.completed, tone.completed],
+      ["ring-blocked", "status-blocked", counts.blocked, tone.err],
     ];
-    const colors = {
-      "ring-running": "#12b76a",
-      "ring-queued": "#2e90fa",
-      "ring-completed": "#9b6bff",
-      "ring-blocked": "#f04438",
-    };
-    map.forEach(([ringId, countId, value]) => {
+    map.forEach(([ringId, countId, value, color]) => {
       const countEl = document.getElementById(countId);
       if (countEl) countEl.textContent = String(value);
       const ring = document.getElementById(ringId);
-      if (ring) ring.innerHTML = ringSVG(colors[ringId], value / total);
+      if (ring) ring.innerHTML = ringSVG(color, value / total);
     });
   }
 
   function renderDonut(counts) {
     const root = document.getElementById("donut-chart");
     if (!root) return;
+    const tone = themeColors();
     const slices = [
-      { key: "Running", value: counts.running, color: "#12b76a" },
-      { key: "Queued", value: counts.queued, color: "#2e90fa" },
-      { key: "Completed", value: counts.completed, color: "#9b6bff" },
-      { key: "Blocked", value: counts.blocked, color: "#f04438" },
+      { key: "Running", value: counts.running, color: tone.ok },
+      { key: "Queued", value: counts.queued, color: tone.info },
+      { key: "Completed", value: counts.completed, color: tone.completed },
+      { key: "Blocked", value: counts.blocked, color: tone.err },
     ];
     const total = slices.reduce((sum, s) => sum + s.value, 0);
     const svg = svgEl("svg", { viewBox: "0 0 42 42", width: "140", height: "140", role: "img", "aria-label": "Task status donut" });
     const r = 15.5;
     const c = 2 * Math.PI * r;
-    svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: "rgba(148,163,184,0.18)", "stroke-width": "4" }));
+    svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: tone.track, "stroke-width": "4" }));
     if (total === 0) {
-      svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: "rgba(148,163,184,0.28)", "stroke-width": "4" }));
+      svg.appendChild(svgEl("circle", { cx: 21, cy: 21, r, fill: "none", stroke: tone.track, "stroke-width": "4" }));
     } else {
       let offset = 0;
       slices.forEach((slice) => {
@@ -1455,6 +2141,48 @@
             ["Attempt", attemptIndex === -1 ? null : `${attempts.length - attemptIndex} of ${attempts.length}`],
           ])),
         ]);
+
+        /* OCTAREL-UI-07 (issue #26): recorded Graphify status. Graphify is
+           derived, advisory repository intelligence that ranks below the source
+           tree, managed-project policy and task contracts, so it is labelled as
+           advisory here and never presented as authority. Every state is shown
+           honestly, including the ones where no context was injected. */
+        const graph = d.graph_context;
+        if (graph) {
+          const injected = graph.injected;
+          const status = String(graph.status || "unknown").toLowerCase();
+          /* Only a real failure is painted as failed, and only an injected
+             context as complete. Every other recorded state (skipped, stale,
+             unavailable, not-recorded) is neutral -- painting them "running"
+             made a finished attempt look like work in progress. */
+          const chipKind = injected
+            ? "complete"
+            : status === "failed-safe"
+              ? "failed"
+              : "neutral";
+          panel.appendChild(
+            el("section", { class: "agent-activity-section" }, [
+              el("h4", { text: "Graphify context" }),
+              el("p", { class: "agent-activity-outcome" }, [
+                el("span", {
+                  class: `agent-activity-chip ${chipKind}`,
+                  text: `${injected ? "✓" : "○"} ${status.toUpperCase()}`,
+                }),
+                el("span", {
+                  class: "hint",
+                  text: injected ? "context was supplied to this attempt" : "no context supplied",
+                }),
+              ]),
+              graph.reason ? el("p", { class: "hint", text: graph.reason }) : null,
+              el("p", {
+                class: "hint",
+                text: graph.authoritative
+                  ? "Recorded as authoritative."
+                  : "Advisory only — ranks below the source tree, project policy and task contracts.",
+              }),
+            ]),
+          );
+        }
         return panel;
       }
 
@@ -1849,7 +2577,7 @@
       // discard an in-flight selection. Signature-compare instead, and set
       // `.value` separately so a pure selection change never touches the DOM
       // structure.
-      const signature = enabled.map((p) => `${p.project_id} ${projectLabel(p)}`).join("");
+      const signature = enabled.map((p) => `${p.project_id}\u0000${projectLabel(p)}`).join("\u0001");
       if (select.dataset.signature !== signature) {
         select.dataset.signature = signature;
         select.innerHTML = "";
@@ -2394,7 +3122,9 @@
         class: "entity-card provider-row",
         "data-worker": p.name,
         "data-searchable": "true",
-        "data-search": `${p.name} ${p.provider} ${p.state}`,
+        // display_name is included so the friendly name the command palette
+        // (and the operator) actually sees can match this card.
+        "data-search": `${p.name} ${p.display_name || ""} ${p.provider} ${p.state}`,
       });
       // ENG-AGENT-02-S7 (issue #97): six actions per card by default made the
       // mobile Providers view an extremely long stack; collapsed behind one
@@ -2472,7 +3202,7 @@
     tbody.innerHTML = "";
     providers.forEach((p) => {
       tbody.appendChild(
-        el("tr", { "data-searchable": "true", "data-search": `${p.name} ${p.provider} ${p.state}` }, [
+        el("tr", { "data-searchable": "true", "data-search": `${p.name} ${p.display_name || ""} ${p.provider} ${p.state}` }, [
           el("td", { text: p.display_name || displayName(p.name) }),
           el("td", { text: p.execution_system }),
           el("td", { text: p.provider }),
@@ -4068,6 +4798,9 @@
         refreshEvents,
         refreshRunEvidence,
         refreshRoadmap,
+        refreshPriorityMatrix,
+        refreshManagerRoute,
+        refreshUsageTelemetry,
         refreshTelemetry,
         refreshUsageRouting,
       ];
@@ -4307,15 +5040,122 @@
       evt.preventDefault();
       const text = input.value.trim();
       if (!text) return;
-      postJSON("/api/steering/parse", { text }).then(({ body }) => {
-        if (!body) return;
-        if (body.status === "PARSED") showProposal(text, body);
-        else {
-          showUnrecognized(body);
-          renderSteeringFeedEntry(text, body);
-        }
-      });
+      /* OCTAREL-UI-05 (issue #24): the Manager endpoint tries the deterministic
+         parser first, so a slash command still costs zero AI calls, and only
+         routes genuinely unrecognized text to an eligible interpreter. It
+         always returns a proposal — execution still goes through
+         /api/steering/execute and its server-enforced confirmation gate. */
+      appendManagerMessage("you", text);
+      postJSON("/api/manager/message", { text })
+        .then(({ ok, status, body }) => {
+          /* postJSON does not throw on an HTTP error, so without this a 4xx/5xx
+             body would be rendered as "not recognized" -- telling the operator
+             their phrasing was the problem when the request actually failed. */
+          if (!ok || !body) {
+            appendManagerError(`The Manager could not be reached (HTTP ${status}).`);
+            return;
+          }
+          appendManagerResponse(text, body);
+          if (body.status === "PARSED") showProposal(text, body);
+          else {
+            showUnrecognized(body);
+            renderSteeringFeedEntry(text, body);
+          }
+        })
+        .catch(() => appendManagerError("The Manager could not be reached."));
     });
+  }
+
+  // ------------------------------------------------------------- manager chat
+
+  /* The conversation thread. Each Manager turn is an execution card that names
+     the route that produced it — deterministic, or the actual
+     worker/provider/model that interpreted the sentence — so a fallback is
+     never an unexplained change of behaviour. */
+
+  function routeLabel(route) {
+    if (!route) return "unknown route";
+    if (route.kind === "deterministic") return "deterministic · no model call";
+    const parts = [route.worker, route.provider, route.model].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "no eligible interpreter";
+  }
+
+  function appendManagerMessage(who, text) {
+    const thread = document.getElementById("manager-thread");
+    if (!thread) return;
+    thread.appendChild(
+      el("li", { class: `manager-msg manager-msg-${who}` }, [
+        el("span", { class: "manager-who", text: who === "you" ? "You" : "Manager" }),
+        el("p", { class: "manager-text", text }),
+      ]),
+    );
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  function appendManagerError(message) {
+    const thread = document.getElementById("manager-thread");
+    if (!thread) return;
+    thread.appendChild(
+      el("li", { class: "manager-msg manager-msg-manager is-error" }, [
+        el("span", { class: "manager-who", text: "Manager" }),
+        el("p", { class: "manager-text", text: message }),
+        el("p", { class: "manager-route-line", text: "no interpretation was attempted" }),
+      ]),
+    );
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  function appendManagerResponse(text, body) {
+    const thread = document.getElementById("manager-thread");
+    if (!thread) return;
+    const route = body.route || {};
+    const parsed = body.status === "PARSED";
+
+    const children = [
+      el("span", { class: "manager-who", text: "Manager" }),
+      el("p", { class: "manager-text", text: body.preview || body.reason || "No action matched." }),
+    ];
+
+    if (parsed) {
+      children.push(
+        el("p", { class: "manager-plan" }, [
+          el("span", { class: "manager-verb", text: body.verb }),
+          el("code", { text: JSON.stringify(body.args || {}) }),
+        ]),
+      );
+    }
+    if (body.destructive) {
+      // Stated in the thread as well as the preview: natural language can
+      // propose a destructive action, never pre-authorize one.
+      children.push(
+        el("p", { class: "manager-destructive", text: "Destructive — requires explicit confirmation before it runs." }),
+      );
+    }
+    children.push(el("p", { class: "manager-route-line", text: `via ${routeLabel(route)}` }));
+
+    thread.appendChild(
+      el("li", { class: `manager-msg manager-msg-manager${parsed ? "" : " is-unmatched"}` }, children),
+    );
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  async function refreshManagerRoute() {
+    const label = document.getElementById("manager-route");
+    if (!label || !isViewActive("view-steering")) return;
+    try {
+      const route = await getJSON("/api/manager/route");
+      if (route.eligible) {
+        label.textContent = `Interpreter: ${routeLabel(route)}`;
+        label.classList.remove("is-unavailable");
+      } else {
+        // Honest about being unavailable rather than silently deterministic-only.
+        label.textContent = `No interpreter available — ${route.reason || "unknown reason"}`;
+        label.classList.add("is-unavailable");
+      }
+    } catch (err) {
+      label.textContent = "Interpreter route could not be read";
+      label.classList.add("is-unavailable");
+    }
   }
 
   function executeProposal(text, proposal, input, clearPreview) {
@@ -4332,6 +5172,22 @@
     });
   }
 
+  /* xterm paints its own canvas and cannot read CSS custom properties, so the
+     themed console tokens are resolved here and handed to it. Keeps the
+     terminal on the same warm near-black material as the surrounding shell
+     instead of the cool slate it used to hard-code. */
+  function terminalTheme() {
+    const s = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => (s.getPropertyValue(name).trim() || fallback);
+    const accent = read("--accent", "#ed7a12");
+    return {
+      background: read("--console-bg", "#131210"),
+      foreground: read("--console-text", "#f0ebe1"),
+      cursor: accent,
+      selectionBackground: "rgba(237, 122, 18, 0.32)",
+    };
+  }
+
   function initTerminal() {
     const host = document.getElementById("terminal");
     const statePill = document.getElementById("terminal-state");
@@ -4341,10 +5197,11 @@
       convertEol: true,
       scrollback: 5000,
       fontSize: 13,
-      fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
-      theme: { background: "#090d18", foreground: "#e6edf7", cursor: "#9b8cff", selectionBackground: "#5b4fd966" },
+      fontFamily: '"JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace',
+      theme: terminalTheme(),
     });
     terminal.open(host);
+    onThemeChange(() => { terminal.options.theme = terminalTheme(); });
     let socket = null;
     const frame = document.getElementById("terminal-frame");
     const overlayTitle = document.getElementById("terminal-overlay-title");
@@ -4430,6 +5287,9 @@
   // --------------------------------------------------------------------- boot
 
   initTheme();
+  initRail();
+  initPriorityMatrix();
+  initPalette();
   initNav();
   initProjectSwitcher();
   initMoreSheet();

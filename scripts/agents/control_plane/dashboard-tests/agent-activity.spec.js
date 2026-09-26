@@ -34,7 +34,7 @@ async function repoRoot(request, baseURL) {
   return body.root;
 }
 
-function writeAttempt(root, { worker, runId, result, exitStatus, finishedAt, logText, notes, startedAt = '2026-09-18T10:00:00+00:00' }) {
+function writeAttempt(root, { worker, runId, result, exitStatus, finishedAt, logText, notes, graphContext, startedAt = '2026-09-18T10:00:00+00:00' }) {
   const runDir = path.join(root, '.agent-output', TASK_REF, worker, runId);
   fs.mkdirSync(runDir, { recursive: true });
   const manifest = {
@@ -57,7 +57,8 @@ function writeAttempt(root, { worker, runId, result, exitStatus, finishedAt, log
     tests_or_checks: [],
     notes: notes || [],
     candidate_tree_sha: 'deadbeef',
-    policy_manifest: {},
+    // OCTAREL-UI-07 (issue #26): orchestrate.py records Graphify's status here.
+    policy_manifest: graphContext ? { graph_context: graphContext } : {},
     paths: {},
     redaction_applied: true,
     ci_invocation_allowed: false,
@@ -218,5 +219,75 @@ test.describe('OCTAREL-UI-01 Agent Activity viewer', () => {
     await openWorkerCard(page, DONE_STAGE_ID);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
     expect(overflow).toBe(false);
+  });
+
+  /* OCTAREL-UI-07 (issue #26): Graphify repository intelligence already existed
+     in the orchestrator but was never surfaced. It is derived, advisory context
+     ranking below the source tree, project policy and task contracts, so the
+     viewer must show its real recorded status and say it is advisory — never
+     present it as authority, and never expose the derived context itself. */
+  test('Graphify status is shown with its recorded state and marked advisory', async ({ page, request, baseURL }) => {
+    const root = await repoRoot(request, baseURL);
+    writeAttempt(root, {
+      worker: DONE_WORKER,
+      runId: 'run-graph-used',
+      result: 'PASS',
+      logText: 'ok',
+      graphContext: {
+        status: 'used',
+        reason: 'cached graph matched the current content tree',
+        source: 'graphify',
+        authoritative: false,
+        llm_enrichment: false,
+        api_billing: false,
+        precedence: 'advisory-below-source-tree-policy-and-task-contracts',
+        injected: true,
+      },
+    });
+
+    await openWorkerCard(page, DONE_STAGE_ID);
+    await page.locator('.agent-activity-tab', { hasText: 'Details' }).click();
+    const section = page.locator('.agent-activity-section', { hasText: 'Graphify context' });
+    await expect(section).toBeVisible();
+    await expect(section).toContainText('USED');
+    await expect(section).toContainText('context was supplied');
+    await expect(section).toContainText('Advisory only');
+    await expect(section).toContainText('cached graph matched');
+  });
+
+  test('a Graphify failure is reported honestly rather than hidden', async ({ page, request, baseURL }) => {
+    const root = await repoRoot(request, baseURL);
+    writeAttempt(root, {
+      worker: DONE_WORKER,
+      runId: 'run-graph-failed',
+      result: 'PASS',
+      logText: 'ok',
+      graphContext: {
+        status: 'failed-safe',
+        reason: 'graph context failed safely: TimeoutExpired',
+        source: 'graphify',
+        authoritative: false,
+        llm_enrichment: false,
+        api_billing: false,
+        injected: false,
+      },
+    });
+
+    await openWorkerCard(page, DONE_STAGE_ID);
+    await page.locator('.agent-activity-tab', { hasText: 'Details' }).click();
+    const section = page.locator('.agent-activity-section', { hasText: 'Graphify context' });
+    await expect(section).toContainText('FAILED-SAFE');
+    await expect(section).toContainText('no context supplied');
+    await expect(section).toContainText('failed safely');
+  });
+
+  test('an attempt with no Graphify record says so instead of implying it was skipped', async ({ page, request, baseURL }) => {
+    const root = await repoRoot(request, baseURL);
+    writeAttempt(root, { worker: DONE_WORKER, runId: 'run-graph-absent', result: 'PASS', logText: 'ok' });
+
+    await openWorkerCard(page, DONE_STAGE_ID);
+    await page.locator('.agent-activity-tab', { hasText: 'Details' }).click();
+    const section = page.locator('.agent-activity-section', { hasText: 'Graphify context' });
+    await expect(section).toContainText('NOT-RECORDED');
   });
 });

@@ -1,35 +1,120 @@
-/* OctaScene Control Center — developer dashboard (not the product UI).
-   Dark is the default, matching the supplied visual reference. Light mode
-   re-themes the same layout via html[data-theme] custom properties. */
+/* Octarel Control Center — developer dashboard (not the product UI).
+   Visual system: "Glass Orchestration Studio" (OCTAREL-UI-04, issue #23).
+
+   Theming contract, unchanged from the previous palette so light/dark parity
+   is structural rather than hand-maintained: every themed value is a custom
+   property declared in exactly three places — `:root` (light), the
+   prefers-color-scheme media query (for the "System" setting), and
+   `html[data-theme="dark"]` (so an explicit choice beats the OS). A token
+   that exists in one block exists in all three; nothing below this layer
+   hard-codes a themed colour.
+
+   Light is warm ivory, dark is warm graphite — per the design specification
+   dark is a first-class design, not an inversion, and deliberately not
+   blue-black. Dark remains the shipped default (see index.html). */
+
+/* Self-hosted so the Content-Security-Policy stays `default-src 'self'` with
+   no external font host. Vendored from the pinned @fontsource devDependencies
+   exactly as vendor/xterm is; licenses in vendor/fonts/ and ASSET_LICENSES.md. */
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/vendor/fonts/plus-jakarta-sans-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/vendor/fonts/plus-jakarta-sans-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/vendor/fonts/plus-jakarta-sans-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/vendor/fonts/plus-jakarta-sans-latin-700-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/vendor/fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/vendor/fonts/jetbrains-mono-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/vendor/fonts/jetbrains-mono-latin-600-normal.woff2") format("woff2");
+}
 
 :root {
-  --bg: #f4f6fb;
-  --bg-elevated: #ffffff;
-  --sidebar: #eef1f7;
-  --surface: #ffffff;
-  --surface-2: #f7f8fc;
-  --text: #0f172a;
-  --muted: #5b6478;
-  --border: rgba(15, 23, 42, 0.1);
-  --border-strong: rgba(15, 23, 42, 0.16);
-  --accent: #6d5bff;
-  --accent-2: #8b5cf6;
+  /* --- surfaces (light: warm ivory) --- */
+  --bg: #f7f4ee;
+  --bg-elevated: rgba(255, 255, 255, 0.72);
+  --sidebar: rgba(255, 255, 255, 0.55);
+  --surface: rgba(255, 255, 255, 0.66);
+  --surface-2: rgba(248, 245, 239, 0.78);
+  --surface-strong: rgba(255, 255, 255, 0.84);
+  --surface-solid: #fffdf9;
+  --text: #211f1c;
+  --muted: #746f67;
+  --border: rgba(55, 48, 39, 0.10);
+  --border-strong: rgba(55, 48, 39, 0.17);
+
+  /* --- glass treatment --- */
+  --glass-blur: blur(20px) saturate(120%);
+  --glass-edge: rgba(255, 255, 255, 0.72);
+  --glass-inset: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  --canvas-dot: rgba(55, 48, 39, 0.08);
+
+  /* --- accent (warm amber) --- */
+  --accent: #ed7a12;
+  --accent-2: #d96708;
+  --accent-hover: #d96708;
+  --accent-soft: rgba(237, 122, 18, 0.11);
   --accent-text: #ffffff;
-  --ok: #12b76a;
-  --ok-rgb: 18, 183, 106;
-  --info: #2e90fa;
-  --info-rgb: 46, 144, 250;
-  --purple: #9b6bff;
-  --purple-rgb: 155, 107, 255;
-  --cyan: #22d3ee;
-  --err: #f04438;
-  --err-rgb: 240, 68, 56;
-  --warn: #dc6803;
-  --shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+
+  /* --- status (text always accompanies colour; never colour alone) --- */
+  --ok: #18a875;
+  --info: #6d63d9;
+  --purple: #6d63d9;
+  --err: #d84d45;
+  --warn: #d18a17;
+
+  --shadow: 0 18px 50px rgba(65, 54, 39, 0.08);
   --glow: 0 0 0 transparent;
+
+  /* --- typography --- */
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* --- radii (design spec §3.2) --- */
+  --radius-panel: 26px;
+  --radius-node: 22px;
+  --radius: 20px;
+  --radius-sm: 14px;
+  --radius-pill: 999px;
+
   --sidebar-width: 248px;
-  --radius: 18px;
-  --radius-sm: 12px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
@@ -42,18 +127,37 @@
 
 @media (prefers-color-scheme: dark) {
   html:not([data-theme="light"]) {
-    --bg: #0b1220;
-    --bg-elevated: #10182a;
-    --sidebar: #0a101c;
-    --surface: #121a2b;
-    --surface-2: #0e1626;
-    --text: #eef2ff;
-    --muted: #8b93ab;
-    --border: rgba(148, 163, 184, 0.14);
-    --border-strong: rgba(148, 163, 184, 0.22);
-    --accent-text: #ffffff;
-    --shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
-    --glow: 0 8px 24px rgba(109, 91, 255, 0.28);
+    --bg: #171715;
+    --bg-elevated: rgba(29, 28, 26, 0.80);
+    --sidebar: rgba(24, 23, 21, 0.72);
+    --surface: rgba(34, 33, 30, 0.68);
+    --surface-2: rgba(28, 27, 25, 0.72);
+    --surface-strong: rgba(42, 40, 36, 0.86);
+    --surface-solid: #1d1c1a;
+    --text: #f5f1e9;
+    --muted: #aaa49a;
+    --border: rgba(255, 244, 225, 0.09);
+    --border-strong: rgba(255, 244, 225, 0.16);
+
+    --glass-blur: blur(22px) saturate(115%);
+    --glass-edge: rgba(255, 244, 225, 0.09);
+    --glass-inset: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+    --canvas-dot: rgba(255, 244, 225, 0.07);
+
+    --accent: #ff8a1d;
+    --accent-2: #ff9d42;
+    --accent-hover: #ff9d42;
+    --accent-soft: rgba(255, 138, 29, 0.13);
+    --accent-text: #241503;
+
+    --ok: #36c991;
+    --info: #9c92ff;
+    --purple: #9c92ff;
+    --err: #f16d65;
+    --warn: #e4a541;
+
+    --shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+    --glow: 0 8px 24px rgba(255, 138, 29, 0.20);
   }
 }
 
@@ -61,18 +165,37 @@ html[data-theme="light"] { color-scheme: light; }
 
 html[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0b1220;
-  --bg-elevated: #10182a;
-  --sidebar: #0a101c;
-  --surface: #121a2b;
-  --surface-2: #0e1626;
-  --text: #eef2ff;
-  --muted: #8b93ab;
-  --border: rgba(148, 163, 184, 0.14);
-  --border-strong: rgba(148, 163, 184, 0.22);
-  --accent-text: #ffffff;
-  --shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
-  --glow: 0 8px 24px rgba(109, 91, 255, 0.28);
+  --bg: #171715;
+  --bg-elevated: rgba(29, 28, 26, 0.80);
+  --sidebar: rgba(24, 23, 21, 0.72);
+  --surface: rgba(34, 33, 30, 0.68);
+  --surface-2: rgba(28, 27, 25, 0.72);
+  --surface-strong: rgba(42, 40, 36, 0.86);
+  --surface-solid: #1d1c1a;
+  --text: #f5f1e9;
+  --muted: #aaa49a;
+  --border: rgba(255, 244, 225, 0.09);
+  --border-strong: rgba(255, 244, 225, 0.16);
+
+  --glass-blur: blur(22px) saturate(115%);
+  --glass-edge: rgba(255, 244, 225, 0.09);
+  --glass-inset: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  --canvas-dot: rgba(255, 244, 225, 0.07);
+
+  --accent: #ff8a1d;
+  --accent-2: #ff9d42;
+  --accent-hover: #ff9d42;
+  --accent-soft: rgba(255, 138, 29, 0.13);
+  --accent-text: #241503;
+
+  --ok: #36c991;
+  --info: #9c92ff;
+  --purple: #9c92ff;
+  --err: #f16d65;
+  --warn: #e4a541;
+
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+  --glow: 0 8px 24px rgba(255, 138, 29, 0.20);
 }
 
 * { box-sizing: border-box; }
@@ -92,12 +215,33 @@ html, body {
 
 body {
   margin: 0;
-  background: var(--bg);
+  /* Tier 0 canvas: flat warm base + the faint 16px dotted matrix the design
+     specification calls for. Decorative only — never encodes state. */
+  background-color: var(--bg);
+  background-image: radial-gradient(var(--canvas-dot) 1px, transparent 1px);
+  background-size: 16px 16px;
+  background-attachment: fixed;
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.45;
   padding-bottom: calc(var(--bottom-nav-h) + var(--sticky-h) + var(--safe-bottom));
+}
+
+/* Tier 1 glass. One reusable treatment so every panel/card/sheet shares the
+   same optical surface instead of re-declaring blur and rim per component. */
+.glass {
+  background: var(--surface);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--shadow), var(--glass-inset);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* Some browsers/GPUs drop backdrop-filter; fall back to an opaque surface so
+   text never lands on an unreadable translucent panel. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { background: var(--surface-solid); }
 }
 
 .skip-link {
@@ -458,8 +602,8 @@ select, input[type="number"], input[type="search"], input[type="text"] {
   place-items: center;
   font-size: 12px;
   font-weight: 700;
-  color: #fff;
-  background: linear-gradient(135deg, #fb7185, #a78bfa);
+  color: var(--accent-text);
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
   flex: none;
 }
 .identity-copy { min-width: 0; }
@@ -1765,27 +1909,34 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
    ====================================================================== */
 
 :root {
-  --radius: 14px;
-  --radius-sm: 10px;
+  /* Radii come from the design specification's curvature scale (§3.2); the
+     base tokens are declared once in the first :root block. Re-stating them
+     here would fork the scale, so this layer only adds what it owns. */
   --control-h: 40px;
   --danger: var(--err);
   --surface-soft: var(--surface-2);
-  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06);
-  --shadow-pop: 0 12px 32px rgba(15, 23, 42, 0.16);
+  /* Glass elevation: the ambient drop plus the specular top lip that gives a
+     frosted pane its edge. Both halves are themed. */
+  --shadow-card: 0 18px 50px rgba(65, 54, 39, 0.08), var(--glass-inset);
+  --shadow-pop: 0 28px 70px rgba(65, 54, 39, 0.16), var(--glass-inset);
   --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
-  --console-bg: #0b1020;
-  --console-text: #d7def0;
-  --console-muted: #7c869f;
+  /* Warm near-black, not blue-black: the spec explicitly rules out blue-black
+     surfaces, and code/terminal panes are allowed to go deeper than canvas. */
+  --console-bg: #131210;
+  --console-text: #f0ebe1;
+  --console-muted: #9a938a;
   --t-fast: 120ms;
 }
 html[data-theme="dark"] {
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 20px 60px rgba(0, 0, 0, 0.34), var(--glass-inset);
+  --shadow-pop: 0 28px 74px rgba(0, 0, 0, 0.5), var(--glass-inset);
+  --console-bg: #100f0e;
 }
 @media (prefers-color-scheme: dark) {
   html:not([data-theme="light"]) {
-    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.5);
+    --shadow-card: 0 20px 60px rgba(0, 0, 0, 0.34), var(--glass-inset);
+    --shadow-pop: 0 28px 74px rgba(0, 0, 0, 0.5), var(--glass-inset);
+    --console-bg: #100f0e;
   }
 }
 
@@ -2108,11 +2259,42 @@ button[aria-busy="true"] { cursor: progress; opacity: 0.75; }
 .workflow-result-card .workflow-stage-title strong { white-space: normal; }
 .workflow-desktop .workflow-side .workflow-glyph { display: none; }
 
-/* -- contrast: status colours are text-safe (>= 4.5:1) in each theme ----- */
-:root { --ok: #067647; --ok-rgb: 6, 118, 71; --err: #d92d20; --err-rgb: 217, 45, 32; --warn: #b54708; --info: #175cd3; --info-rgb: 23, 92, 211; }
-html[data-theme="dark"] { --ok: #32d583; --ok-rgb: 50, 213, 131; --err: #f97066; --err-rgb: 249, 112, 102; --warn: #f79009; --info: #53b1fd; --info-rgb: 83, 177, 253; }
+/* -- contrast: status colours are text-safe (>= 4.5:1) in each theme -----
+
+   The design specification supplies one status palette and separately requires
+   "contrast-compliant light and dark themes". Measured against the themed
+   glass surfaces, its dark values all pass as text (success 7.5:1, warning
+   7.4:1, danger 5.4:1, info 6.0:1) but its light values do not — success is
+   2.95:1, warning 2.76:1, amber 2.75:1 — because those hues are tuned for
+   fills and dots on a warm canvas, not for small text.
+
+   So the spec's own values are kept for decorative use (pills, dots, rims,
+   glows, borders — see the token block at the top of this file), and this
+   layer darkens the same hue for anything rendered as *text*. Hue family and
+   semantic meaning are unchanged; only lightness moves, and only in light
+   mode. Verified ratios are noted per value. */
+:root {
+  --ok: #0f7d56;    /* 4.97:1 */
+  --err: #b83a33;   /* 5.50:1 */
+  --warn: #96610f;  /* 5.06:1 */
+  --info: #514acf;  /* 6.29:1 */
+  --accent-ink: #a8540b; /* 5.16:1 — amber as text/label colour */
+}
+html[data-theme="dark"] {
+  --ok: #36c991;    /* 7.51:1 */
+  --err: #f16d65;   /* 5.39:1 */
+  --warn: #e4a541;  /* 7.39:1 */
+  --info: #9c92ff;  /* 6.03:1 */
+  --accent-ink: #ff8a1d; /* 6.74:1 */
+}
 @media (prefers-color-scheme: dark) {
-  html:not([data-theme="light"]) { --ok: #32d583; --ok-rgb: 50, 213, 131; --err: #f97066; --err-rgb: 249, 112, 102; --warn: #f79009; --info: #53b1fd; --info-rgb: 83, 177, 253; }
+  html:not([data-theme="light"]) {
+    --ok: #36c991;
+    --err: #f16d65;
+    --warn: #e4a541;
+    --info: #9c92ff;
+    --accent-ink: #ff8a1d;
+  }
 }
 .workflow-status.running, .phase-step.running .phase-glyph { color: var(--info); }
 .st-queued, .st-pending, .st-paused { color: var(--info); }
@@ -2291,3 +2473,626 @@ body { padding-bottom: calc(var(--bottom-nav-h) + var(--sticky-h) + 16px); }
 .agent-activity-log.wrap .log-line[data-flag]::after { display: none; }
 
 .quickstart-btn .quickstart-reason { display: block; margin-top: 6px; font-size: 12px; font-weight: 400; color: var(--muted); text-align: left; white-space: normal; overflow-wrap: anywhere; }
+
+/* ======================================================================
+   OCTAREL-UI-04 — Glass Orchestration Studio surface layer (issue #23)
+
+   Applies the frosted-glass visual system from OCTAREL_UI_DESIGN.md to the
+   structural components the dashboard already renders. Placed last so it
+   refines the earlier component rules rather than forking them, matching the
+   convention the OCTAREL-UI-03 layer above established.
+
+   Nothing here changes markup, DOM ids, or behaviour: it is purely the
+   optical treatment. Both themes read every value from the token layer, so
+   light and dark stay structurally identical by construction.
+   ====================================================================== */
+
+/* -- Tier 1: panels, cards, sheets --------------------------------------- */
+.card,
+.panel,
+.sheet,
+.dropdown,
+.attention-popover,
+.system-summary {
+  background: var(--surface);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+.card, .panel { border-radius: var(--radius-panel); padding: 20px; }
+.card .card { box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--surface-2); }
+
+/* Tier 3: modals/popovers sit on a stronger base so body text stays readable
+   over whatever is behind them. */
+.sheet, .dropdown, .attention-popover {
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-pop);
+  border-radius: var(--radius-panel);
+}
+.sheet { border-radius: var(--radius-panel) var(--radius-panel) 0 0; }
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .card, .panel, .sheet, .dropdown, .attention-popover, .system-summary { background: var(--surface-solid); }
+}
+
+/* -- entity cards and inner surfaces ------------------------------------- */
+.entity-card {
+  border-radius: var(--radius-node);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 14px 16px;
+}
+.status-card {
+  border-radius: var(--radius-node);
+  background: var(--surface);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* -- shell chrome --------------------------------------------------------- */
+.sidebar {
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+.topbar {
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+.bottom-nav, .sticky-controls {
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* -- typography ----------------------------------------------------------- */
+h1, h2, h3, h4 { font-family: var(--font-sans); letter-spacing: -0.015em; }
+.greeting h2 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+.card h2, .card-head h2 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+
+/* Monospace is the design system's label/metadata voice, not only a code
+   font: status capsules, ids, counts and machine facts all use it. */
+.machine-id,
+.entity-id,
+.log-line,
+.report-body,
+code,
+kbd,
+pre,
+.terminal-meta dd,
+.status-pill,
+.badge,
+.nav-badge,
+.usage-pill,
+.derived-note,
+.key-hint {
+  font-family: var(--font-mono);
+}
+.status-pill, .badge, .nav-badge {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border-radius: var(--radius-pill);
+}
+
+/* -- controls ------------------------------------------------------------- */
+button, .more-item { border-radius: var(--radius-sm); }
+button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+button:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+.btn-primary, .send-btn {
+  background: var(--accent);
+  border: 1px solid transparent;
+  color: var(--accent-text);
+  font-weight: 600;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.btn-primary:hover, .send-btn:hover { background: var(--accent-hover); border-color: transparent; }
+.btn-primary:disabled, .send-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Destructive intent stays visually distinct from ordinary glass in both
+   themes — the confirmation itself remains server-enforced. */
+.danger, .ctl-danger {
+  border-color: color-mix(in srgb, var(--err) 55%, var(--border));
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+.danger:hover, .ctl-danger:hover {
+  border-color: var(--err);
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+}
+
+select, input[type="number"], input[type="search"], input[type="text"], textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+}
+select:focus, input:focus, textarea:focus { border-color: var(--accent); }
+
+/* Pill-shaped metadata capsules and tab/segment controls. */
+.tab { border-radius: var(--radius-sm); }
+.tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.task-pill, .live-pill, .remote-badge, .project-badge { border-radius: var(--radius-pill); }
+
+/* -- motion ---------------------------------------------------------------
+   Subtle only: a hover lift on interactive glass, nothing page-wide. */
+.entity-card, .status-card { transition: transform var(--t-fast) ease, box-shadow var(--t-fast) ease; }
+@media (hover: hover) {
+  .status-card:hover { transform: translateY(-1px); box-shadow: var(--shadow-pop); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .entity-card, .status-card { transition: none; }
+  .status-card:hover { transform: none; }
+}
+
+/* -- accent as text: use the contrast-safe ink -----------------------------
+   var(--accent) is the fill amber (2.75:1 on a light surface — correct for
+   buttons, rims and dots, too weak for small text). Anywhere the accent is
+   the *text* colour, switch to var(--accent-ink), which is the same hue at a
+   lightness that clears 4.5:1 in both themes. Fills, borders and shadows
+   deliberately keep the spec amber. */
+.tab.active,
+.tab.active .nav-icon,
+.bn.active,
+.live-pill,
+.workflow-glyph,
+.workflow-empty-icon,
+.agent-activity-tab.active {
+  color: var(--accent-ink);
+}
+/* --purple is the dashboard's "completed" tone and renders as ring/text, so
+   it tracks the contrast-safe info ink rather than the decorative violet. */
+:root, html[data-theme="dark"] { --purple: var(--info); }
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme="light"]) { --purple: var(--info); }
+}
+
+/* -- terminal & code surfaces --------------------------------------------
+   The design specification allows terminal/code panes to go deeper than the
+   canvas but explicitly rules out blue-black. These panes previously used a
+   cool slate (#090d18 / #293248 / #8f9bb3); they now sit on the warm
+   near-black console tokens so the terminal reads as part of the same
+   material as the rest of the shell. Behaviour and the security boundary are
+   untouched — this is colour only. */
+.terminal-panel {
+  background: var(--console-bg);
+  color: var(--console-text);
+  border-radius: var(--radius-panel);
+}
+.terminal-header { border-bottom: 1px solid var(--border-strong); }
+.terminal-meta dt,
+.terminal-panel > .hint,
+.terminal-state-detail { color: var(--console-muted); }
+.terminal-meta > div { border: 1px solid var(--border-strong); }
+.terminal-overlay {
+  background: color-mix(in srgb, var(--console-bg) 88%, transparent);
+  color: var(--console-text);
+}
+.terminal-overlay strong { color: var(--text); }
+
+/* -- workflow / pipeline accents -----------------------------------------
+   The running state is the active path and takes the amber accent the spec
+   reserves for in-flight work; pending stays a neutral muted tone. The
+   previous cool blue/violet set is replaced by the themed tokens. */
+.workflow-stage-card.running { border-top-color: var(--accent); }
+.workflow-stage-card.pending { border-top-color: var(--border-strong); }
+.workflow-status.running,
+.phase-step.running .phase-glyph { color: var(--accent-ink); }
+.workflow-status.running { background: var(--accent-soft); }
+.workflow-progress i { background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.workflow-progress.indeterminate::after { background: var(--accent); }
+.workflow-glyph.task,
+.workflow-glyph.worktree,
+.workflow-glyph.result { color: var(--info); }
+.progress-track > span { background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.workflow-mobile .workflow-layout::before {
+  background: linear-gradient(var(--accent), var(--ok), var(--border-strong));
+}
+.workflow-mobile .workflow-result-card::before { background: var(--ok); }
+
+/* -- collapsible navigation rail ------------------------------------------
+   Desktop only. `html[data-rail="collapsed"]` narrows the sidebar to an icon
+   rail: labels, the project switcher body and the identity copy collapse, the
+   icons centre, and the main column reclaims the width. Every control keeps
+   its accessible name (labels are visually hidden, not removed) so the rail
+   stays navigable by keyboard and screen reader in both states. */
+.rail-toggle {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  justify-content: flex-start;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.rail-toggle:hover { color: var(--text); border-color: var(--border); background: var(--surface-2); }
+.rail-toggle-icon { display: inline-grid; place-items: center; flex: none; }
+
+@media (min-width: 768px) {
+  .rail-toggle { display: flex; }
+
+  html[data-rail="collapsed"] { --sidebar-width: 72px; }
+  html[data-rail="collapsed"] .sidebar { padding-left: 10px; padding-right: 10px; }
+  html[data-rail="collapsed"] .brand-copy,
+  html[data-rail="collapsed"] .nav-group-label,
+  html[data-rail="collapsed"] .tab-label,
+  html[data-rail="collapsed"] .rail-toggle-label,
+  html[data-rail="collapsed"] .project-switcher-label,
+  html[data-rail="collapsed"] .project-select,
+  html[data-rail="collapsed"] .project-identity,
+  html[data-rail="collapsed"] .project-add-btn,
+  html[data-rail="collapsed"] .identity-copy,
+  html[data-rail="collapsed"] .task-pill > :not(.task-pill-dot),
+  html[data-rail="collapsed"] .remote-badge > :not(.remote-badge-dot) {
+    /* Visually collapsed but still in the accessibility tree, so each control
+       keeps the name it had when expanded. */
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  html[data-rail="collapsed"] .brand,
+  html[data-rail="collapsed"] .tab,
+  html[data-rail="collapsed"] .rail-toggle,
+  html[data-rail="collapsed"] .task-pill,
+  html[data-rail="collapsed"] .identity-card,
+  html[data-rail="collapsed"] .remote-badge { justify-content: center; }
+  html[data-rail="collapsed"] .project-switcher { padding: 0; border: none; background: none; }
+  html[data-rail="collapsed"] .nav-badge {
+    position: absolute;
+    top: 4px; right: 8px;
+    min-width: 16px;
+    padding: 0 4px;
+  }
+  html[data-rail="collapsed"] .tab { position: relative; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .main-column, .sidebar { transition: width var(--t-fast) ease; }
+}
+
+/* -- Priority & Fallback Matrix ------------------------------------------
+   Role columns of ordered candidate cards, per the design specification's
+   priority screen. Columns scroll horizontally on narrow viewports rather
+   than squeezing cards to an unreadable width; the page itself never scrolls
+   sideways. */
+.priority-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(280px, 1fr);
+  gap: 16px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 8px;
+}
+.priority-column { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.priority-column-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 2px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.priority-column-head h3 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.priority-card { display: grid; gap: 10px; }
+.priority-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.priority-agent { flex: 1 1 auto; min-width: 0; font-size: 14px; }
+
+/* The tier flag is the candidate's real position in the configured route. */
+.priority-tier {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.priority-card.is-active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.priority-card.is-active .priority-tier { color: var(--accent-text); background: var(--accent); border-color: transparent; }
+
+/* An excluded candidate stays legible and keeps its reason — it is real
+   configuration, not an error to hide. */
+.priority-card.is-excluded { opacity: 0.78; border-style: dashed; }
+.priority-reason { margin: 0; font-size: 12px; color: var(--warn); }
+
+.priority-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; margin: 0; }
+.priority-facts > div { min-width: 0; }
+.priority-facts dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.priority-facts dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+
+@media (max-width: 767px) {
+  .priority-columns { grid-auto-flow: row; grid-auto-columns: auto; }
+}
+.priority-note-warn { color: var(--warn); }
+
+/* -- command palette -------------------------------------------------------
+   A modal dialog over the whole shell. Tier 3 glass, like the other sheets. */
+.palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  color: var(--muted);
+  min-height: 36px;
+}
+.palette-trigger:hover { color: var(--text); }
+.palette-trigger .key-hint { font-size: 10px; }
+
+.palette {
+  position: fixed;
+  left: 50%;
+  top: 12vh;
+  transform: translateX(-50%);
+  width: min(640px, 94vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  z-index: 51;
+  background: var(--surface-strong);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-pop);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  overflow: hidden;
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .palette { background: var(--surface-solid); }
+}
+
+.palette-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+.palette-field input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-size: 15px;
+  color: var(--text);
+  padding: 4px 0;
+}
+.palette-field input:focus { outline: none; border: none; }
+
+.palette-results { overflow-y: auto; overscroll-behavior: contain; padding: 8px; }
+.palette-empty { padding: 18px; margin: 0; text-align: center; }
+
+.palette-row {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1.2fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  min-height: 0;
+}
+.palette-row:hover { background: var(--surface-2); border-color: transparent; }
+/* Keyboard selection is shown with a border and surface, not colour alone. */
+.palette-row.is-active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 38%, transparent); }
+
+.palette-kind {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.palette-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.palette-detail {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.palette-foot {
+  display: flex;
+  gap: 14px;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+.palette-foot kbd {
+  font-size: 10px;
+  padding: 1px 5px;
+  margin-right: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+}
+
+@media (max-width: 767px) {
+  .palette { top: 6vh; max-height: 80vh; }
+  .palette-row { grid-template-columns: 70px minmax(0, 1fr); }
+  .palette-detail { display: none; }
+}
+
+/* -- Manager Chat ---------------------------------------------------------
+   A real conversation thread. Each Manager turn names the route that produced
+   it, so a fallback to a different worker is visible rather than silent. */
+.manager-route {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+.manager-route.is-unavailable { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+
+.manager-thread {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.manager-thread:empty { display: none; }
+
+.manager-msg {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius-node);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  max-width: 88%;
+}
+.manager-msg-you { justify-self: end; background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 28%, transparent); }
+.manager-msg-manager { justify-self: start; }
+.manager-msg-manager.is-unmatched { border-style: dashed; }
+
+.manager-who {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.manager-text { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.manager-plan { margin: 4px 0 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.manager-verb {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+}
+.manager-plan code { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.manager-destructive { margin: 4px 0 0; font-size: 12px; color: var(--err); }
+.manager-route-line { margin: 2px 0 0; font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+
+@media (max-width: 767px) {
+  .manager-route { max-width: 100%; white-space: normal; }
+  .manager-msg { max-width: 100%; }
+}
+
+/* -- model & session usage ------------------------------------------------
+   Each metric shows its value and the class that established it. An
+   unavailable metric is visibly quieter but never hidden: the point of the
+   panel is that it says what it cannot measure. */
+.usage-row { display: grid; gap: 12px; }
+.usage-row-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.usage-row-identity {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.usage-metric { display: grid; gap: 2px; min-width: 0; }
+.usage-metric dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.usage-metric dd {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.usage-metric-class {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.usage-metric-class:empty { display: none; }
+
+/* Unavailable: the label reads NOT_EXPOSED / UNKNOWN at normal text size
+   rather than as a large figure, so it cannot be mistaken for a measurement. */
+.usage-metric.is-unavailable dd {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+.usage-metric-reason { margin: 2px 0 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
+
+/* Review follow-ups (OCTAREL-UI-04): states that must not borrow another
+   meaning's styling. */
+.agent-activity-chip.neutral { color: var(--muted); background: var(--surface-2); }
+.manager-msg.is-error { border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+.manager-msg.is-error .manager-text { color: var(--err); }
+/* Billable/subscription is a routing fact, not a run state. */
+.usage-route-pill { color: var(--muted); background: var(--surface-2); }
+.usage-route-pill.is-billable { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+/* A previewed-mode share is not a run state, so it does not use the running colour. */
+.priority-share-pill { color: var(--accent-ink); background: var(--accent-soft); }

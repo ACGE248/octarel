@@ -18,8 +18,8 @@
         <svg viewBox="0 0 32 32" width="32" height="32" focusable="false">
           <defs>
             <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#7c6bff" />
-              <stop offset="100%" stop-color="#a78bfa" />
+              <stop offset="0%" stop-color="#ed7a12" />
+              <stop offset="100%" stop-color="#ff9d42" />
             </linearGradient>
           </defs>
           <circle cx="16" cy="16" r="16" fill="url(#brand-grad)" />
@@ -56,82 +56,110 @@
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="3" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="3" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
         </span>
-        Overview
+        <span class="tab-label">Overview</span>
       </button>
       <button role="tab" aria-selected="false" data-view="view-runs" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><path d="M8 5v14l11-7Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
         </span>
-        Runs
+        <span class="tab-label">Runs</span>
         <span id="nav-runs-badge" class="nav-badge" hidden>0</span>
       </button>
       <button role="tab" aria-selected="false" data-view="view-flow" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="6" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="18" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 7.2 10.5 16M16 7.2 13.5 16" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
         </span>
-        Flow
+        <span class="tab-label">Flow</span>
+      </button>
+      <button role="tab" aria-selected="false" data-view="view-priority" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="4" width="6" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="4" width="6" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </span>
+        <span class="tab-label">Priority</span>
       </button>
       <div class="nav-group-label">Work</div>
       <button role="tab" aria-selected="false" data-view="view-tasks" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 12.5 10.5 15 16 9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
-        Tasks
+        <span class="tab-label">Tasks</span>
         <span id="nav-tasks-badge" class="nav-badge" hidden>0</span>
       </button>
       <button role="tab" aria-selected="false" data-view="view-agents" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="9" cy="8" r="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="16" cy="9" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4.5 18c.7-3 2.6-4.5 4.5-4.5S13 15 13.6 18M14 18c.4-2.2 1.6-3.4 3-3.4 1.5 0 2.6 1.2 3 3.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </span>
-        Agents
+        <span class="tab-label">Agents</span>
       </button>
       <div class="nav-group-label">Configure</div>
       <button role="tab" aria-selected="false" data-view="view-providers" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 7h10M18 7h2M4 12h2M10 12h10M4 17h10M18 17h2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="16" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
         </span>
-        Providers
+        <span class="tab-label">Providers</span>
       </button>
+      <!-- OCTAREL-UI-04: user-facing label is "Manager" per the design
+           specification (§5); the internal view id stays `view-steering` so
+           every existing route, binding and API contract is preserved. -->
       <button role="tab" aria-selected="false" data-view="view-steering" class="tab">
         <span class="nav-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 5v2.2M12 16.8V19M5 12h2.2M16.8 12H19M7.2 7.2l1.5 1.5M15.3 15.3l1.5 1.5M16.8 7.2l-1.5 1.5M8.7 15.3l-1.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-4 3.5V6a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 9.5h6M9 12.5h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </span>
-        Steering
+        <span class="tab-label">Manager</span>
       </button>
       <div class="nav-group-label">System</div>
       <button role="tab" aria-selected="false" data-view="view-history" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="13" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 13V9.5M12 13l3 2M9 4.5h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </span>
-        History
+        <span class="tab-label">History</span>
       </button>
       <button role="tab" aria-selected="false" data-view="view-worktrees" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 8.5 12 4l8 4.5v9L12 22 4 17.5v-9Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 22v-9M4 8.5 12 13l8-4.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
         </span>
-        Worktrees
+        <span class="tab-label">Worktrees</span>
       </button>
       <button role="tab" aria-selected="false" data-view="view-system" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="5" width="16" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 21h8M12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </span>
-        System
+        <span class="tab-label">System</span>
       </button>
       <button role="tab" aria-selected="false" data-view="view-terminal" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m7 9 3 3-3 3m5 0h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
-        Terminal
+        <span class="tab-label">Terminal</span>
       </button>
       <button role="tab" aria-selected="false" data-view="view-settings" class="tab">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 5.2V3.5M12 20.5v-1.7M18.8 12H20.5M3.5 12h1.7M16.8 7.2l1.2-1.2M6 18l1.2-1.2M16.8 16.8 18 18M6 6l1.2 1.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </span>
-        Settings
+        <span class="tab-label">Settings</span>
+      </button>
+      <!-- OCTAREL-UI-04: Roadmap is promoted from a hidden alias reachable only
+           through the mobile "More" sheet to a real navigation destination, as
+           the design specification's information architecture requires. -->
+      <button role="tab" aria-selected="false" data-view="view-roadmap" class="tab">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 6.5 9.5 4.5l5 2 5-2v13l-5 2-5-2-5.5 2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9.5 4.5v13M14.5 6.5v13" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </span>
+        <span class="tab-label">Roadmap</span>
       </button>
     </nav>
 
     <div class="sidebar-footer">
+      <!-- OCTAREL-UI-04: the design specification calls for a compact
+           collapsible rail — icons + labels expanded, icons only collapsed.
+           Desktop only: on mobile the sidebar is already a slide-over sheet,
+           where an icons-only mode would remove labels for no gain. -->
+      <button type="button" id="rail-toggle" class="rail-toggle" aria-controls="sidebar" aria-pressed="false">
+        <span class="rail-toggle-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 5h16M4 12h16M4 19h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        <span class="rail-toggle-label">Collapse menu</span>
+      </button>
       <div class="task-pill idle" id="active-task-pill" aria-label="Active task">
         <span class="task-pill-dot" aria-hidden="true"></span>
         <span id="active-task-label">no active task</span>
@@ -172,6 +200,12 @@
             <span class="remote-badge-dot" aria-hidden="true"></span>
             REMOTE
           </span>
+          <!-- OCTAREL-UI-04: the command palette needs an entry point at every
+               viewport; the desktop trigger lives in the desktop topbar, which
+               is hidden here. -->
+          <button id="palette-open-mobile" class="icon-btn" type="button" aria-label="Go to or run" aria-haspopup="dialog">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m7 9 3 3-3 3m5 0h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
           <button id="notif-bell-mobile" class="icon-btn bell-btn" type="button" aria-label="Attention notifications" aria-haspopup="true">
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 9a6 6 0 1 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 13 6 9Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 18a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             <span class="bell-count" hidden>0</span>
@@ -183,11 +217,18 @@
       </div>
 
       <div class="desktop-topbar">
+        <!-- OCTAREL-UI-04: two distinct tools, each labelled for what it does.
+             This field filters what is already on the current view; the button
+             beside it opens the cross-entity command palette. -->
         <label class="search-field" for="global-search">
           <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <input id="global-search" type="search" placeholder="Search tasks, agents, or commands…" autocomplete="off" />
-          <kbd id="search-hint" class="key-hint">⌘K</kbd>
+          <input id="global-search" type="search" placeholder="Filter this view…" autocomplete="off" />
         </label>
+        <button type="button" id="palette-open" class="palette-trigger" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="m7 9 3 3-3 3m5 0h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Go to or run</span>
+          <kbd id="search-hint" class="key-hint">⌘K</kbd>
+        </button>
         <!-- ENG-CP-03: the same selected-project identity, always visible in
              the desktop topbar ("OctaScene / ACGE248/octages"). -->
         <span class="project-badge" id="project-badge" title="Selected managed project">
@@ -536,6 +577,29 @@
         </div>
       </section>
 
+      <!-- OCTAREL-UI-04 (issue #23): Priority & Fallback Matrix. The routing
+           order it renders has always existed in the registry and been computed
+           by the API; until now no screen showed it. Columns are Octarel's real
+           configured roles, not the four illustrative roles in the Stitch
+           mock-up — inventing a role taxonomy to match a mock-up would
+           misrepresent how this orchestrator actually routes. -->
+      <section class="view" id="view-priority" role="tabpanel" hidden>
+        <div class="card wide" id="card-priority-matrix">
+          <div class="card-head">
+            <div>
+              <h2>Priority &amp; Fallback Matrix</h2>
+              <p class="hint">Every configured role and the ordered chain the router falls back through. Priority is the candidate's real position in that role's route, not a display ranking. A candidate the router cannot currently use stays visible with its reason. This screen is read-only: the mode selector previews how a mode would allocate and does not change live routing.</p>
+            </div>
+            <div class="card-head-actions">
+              <label class="sr-only" for="priority-mode">Preview routing mode</label>
+              <select id="priority-mode" aria-label="Routing mode"></select>
+            </div>
+          </div>
+          <p class="hint" id="priority-mode-note"></p>
+          <div id="priority-columns" class="priority-columns">Loading…</div>
+        </div>
+      </section>
+
       <section class="view" id="view-tasks" role="tabpanel" hidden>
         <div class="card wide" id="card-tasks-table">
           <h2>Active Tasks</h2>
@@ -588,6 +652,17 @@
           <p class="hint">Every value below is either a real local CLI status query (never a billable call) or explicitly reported as unavailable — nothing here is estimated or invented.</p>
           <div id="usage-body" class="usage-list"></div>
         </div>
+        <!-- OCTAREL-UI-06 (issue #25): what a run actually consumed. Every
+             figure states how it was established; a metric this stack cannot
+             produce is labelled NOT_EXPOSED with its reason rather than being
+             estimated into something plausible. -->
+        <div class="card wide" id="card-usage-telemetry">
+          <div class="card-head tight">
+            <h2>Model &amp; session usage</h2>
+            <span class="hint" id="usage-telemetry-note"></span>
+          </div>
+          <div id="usage-telemetry-rows" class="entity-list">Loading…</div>
+        </div>
         <div class="card wide" id="card-usage-routing">
           <h2>Usage &amp; Routing</h2>
           <p class="hint">Role-first decisions and durable escalation history. Unattended runs conserve Codex unless explicitly eligible.</p>
@@ -597,12 +672,21 @@
 
       <section class="view" id="view-steering" role="tabpanel" hidden>
         <div class="card wide" id="card-steering">
-          <h2>Steering</h2>
-          <p class="hint">Slash commands and recognized phrases run with zero AI. Anything else is shown as
-            unrecognized — it is never guessed or silently executed.</p>
+          <div class="card-head">
+            <div>
+              <h2>Manager</h2>
+              <p class="hint">Slash commands and recognized phrases run with zero AI. Anything else is routed to
+                the currently eligible worker to be interpreted — it is never guessed, and nothing runs until
+                you approve it.</p>
+            </div>
+            <!-- OCTAREL-UI-05 (issue #24): the route that would interpret a
+                 natural-language message, shown before anything is sent. -->
+            <span class="manager-route" id="manager-route" role="status">Checking interpreter route…</span>
+          </div>
+          <ul id="manager-thread" class="manager-thread" aria-label="Manager conversation" aria-live="polite"></ul>
           <form id="steering-form" class="steering-form">
-            <label for="steering-input" class="sr-only">Steering command</label>
-            <input id="steering-input" type="text" placeholder="/pause T1  or  pause task T1" autocomplete="off" />
+            <label for="steering-input" class="sr-only">Message the Manager</label>
+            <input id="steering-input" type="text" placeholder="Message the Manager or type / for commands…" autocomplete="off" />
             <button type="submit" class="send-btn">Send</button>
           </form>
           <details class="steering-help" id="steering-help">
@@ -809,18 +893,21 @@
             </div>
           </section>
         </div>
-        <div class="card wide" id="card-roadmap">
-          <h2>Roadmap progress <span class="derived-note">status labels from repository docs — any computed % is labelled DERIVED</span></h2>
-          <div id="roadmap-summary" class="roadmap-summary" aria-label="Derived tracked completion"></div>
-          <div id="roadmap-cards" class="entity-list"></div>
-        </div>
       </section>
 
+      <!-- OCTAREL-UI-04: Roadmap is now a first-class navigation destination and
+           owns the live table outright. It previously rendered inside Settings
+           with this view left as a stub pointing back at it — one concern, two
+           places. The ids below are the ones refreshRoadmap() already fills, so
+           the binding is unchanged; only the home moved. Content stays derived
+           live from the selected project's own docs via /api/roadmap and is
+           never copied into Octarel state. -->
       <section class="view" id="view-roadmap" role="tabpanel" hidden>
-        <div class="card wide">
-          <h2>Roadmap progress <span class="derived-note">same table as Settings — status labels only</span></h2>
-          <p class="hint">This view is kept so existing navigation still has a dedicated roadmap panel. The table is filled from <code>/api/roadmap</code>.</p>
-          <div id="roadmap-alias" class="hint">See Settings for the live table.</div>
+        <div class="card wide" id="card-roadmap">
+          <h2>Roadmap progress <span class="derived-note">status labels from repository docs — any computed % is labelled DERIVED</span></h2>
+          <p class="hint">Read fresh from the selected project's own program index on every refresh. Octarel is not the product-truth source for a managed project.</p>
+          <div id="roadmap-summary" class="roadmap-summary" aria-label="Derived tracked completion"></div>
+          <div id="roadmap-cards" class="entity-list"></div>
         </div>
       </section>
 
@@ -833,6 +920,30 @@
   <button id="ctl-pause" class="ctl" type="button">Pause</button>
   <button id="ctl-resume" class="ctl" type="button">Resume</button>
   <button id="ctl-stop" class="ctl ctl-danger" type="button">Stop</button>
+</div>
+
+<!-- OCTAREL-UI-04 (issue #23): cross-entity command palette. It indexes the
+     real entities the dashboard already serves — views, projects, tasks, runs,
+     agents, providers, worktrees — plus the deterministic Manager commands.
+     It navigates and selects; it never executes a destructive verb directly.
+     A command is handed to the Manager input for review, so every execution
+     still goes through the existing parse/confirm path and the server's own
+     destructiveness check. -->
+<div class="sheet-backdrop" id="palette-backdrop" hidden></div>
+<div class="palette" id="palette" role="dialog" aria-modal="true" aria-labelledby="palette-title" hidden>
+  <h3 id="palette-title" class="sr-only">Go to or run</h3>
+  <div class="palette-field">
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <label class="sr-only" for="palette-input">Search views, projects, tasks, runs, agents, providers, worktrees and commands</label>
+    <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="Go to a view, project, task, run, agent, provider or worktree — or type / for commands" />
+  </div>
+  <div id="palette-results" class="palette-results" role="listbox" aria-labelledby="palette-title"></div>
+  <p class="palette-foot hint">
+    <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+    <span><kbd>↵</kbd> open</span>
+    <span><kbd>esc</kbd> close</span>
+  </p>
 </div>
 
 <div class="sheet-backdrop" id="report-backdrop" hidden></div>
@@ -912,6 +1023,13 @@
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5V20h-5.5v-5h-5v5H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
     Home
   </button>
+  <!-- OCTAREL-UI-04: the design specification's mobile dock is
+       Home | Manager | Tasks | Agents | More. History moves into "More"
+       alongside the other secondary surfaces; no surface is lost. -->
+  <button data-view="view-steering" class="bn" aria-label="Manager">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-4 3.5V6a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    Manager
+  </button>
   <button data-view="view-tasks" class="bn" aria-label="Tasks">
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 12.5 10.5 15 16 9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     Tasks
@@ -919,10 +1037,6 @@
   <button data-view="view-agents" class="bn" aria-label="Agents">
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="8" r="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 18c.8-3.2 2.8-5 6-5s5.2 1.8 6 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     Agents
-  </button>
-  <button data-view="view-history" class="bn" aria-label="History">
-    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="13" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 13V9.5M12 13l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-    History
   </button>
   <button id="more-tab" class="bn" aria-label="More sections" aria-haspopup="true" aria-expanded="false">
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg>
@@ -936,8 +1050,9 @@
   <div class="more-list">
     <button data-view="view-runs" class="more-item">Runs</button>
     <button data-view="view-flow" class="more-item">Flow</button>
+    <button data-view="view-priority" class="more-item">Priority</button>
     <button data-view="view-providers" class="more-item">Providers</button>
-    <button data-view="view-steering" class="more-item">Steering</button>
+    <button data-view="view-history" class="more-item">History</button>
     <button data-view="view-worktrees" class="more-item">Worktrees</button>
     <button data-view="view-system" class="more-item">System</button>
     <button data-view="view-terminal" class="more-item">Terminal</button>

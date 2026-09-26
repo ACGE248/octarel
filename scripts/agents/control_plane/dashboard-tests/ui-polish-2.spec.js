@@ -169,9 +169,26 @@ test('log console: honest about combined output, exact raw text, flag filter and
 
 test('mobile: the session bar and bottom nav never cover content on any view', async ({ page }) => {
   test.skip(width(page) > 767, 'fixed bars exist on phone/tablet-portrait layouts only');
-  const views = ['overview', 'runs', 'flow', 'tasks', 'agents', 'providers', 'steering', 'history', 'worktrees', 'system', 'terminal', 'settings'];
+  /* This walks every view and measures real layout geometry on each, so it is
+     inherently slower than a single-surface test. On mobile most views are
+     reached through the "More" sheet, and OCTAREL-UI-04 both added views and
+     moved History into that sheet, which pushed the walk past the 30s default.
+     The assertions below are unchanged; only the wall-clock budget is raised. */
+  test.setTimeout(90_000);
+  const views = ['overview', 'runs', 'flow', 'priority', 'tasks', 'agents', 'providers', 'steering', 'history', 'worktrees', 'system', 'terminal', 'settings', 'roadmap'];
   for (const view of views) {
     await navTo(page, `view-${view}`);
+    /* Some views fetch their content when they become visible, so scrolling
+       immediately would scroll a short page and then measure a tall one.
+       Wait for the document height to stop changing before scrolling. */
+    await expect
+      .poll(async () => {
+        const h = await page.evaluate(() => document.documentElement.scrollHeight);
+        await page.waitForTimeout(120);
+        const again = await page.evaluate(() => document.documentElement.scrollHeight);
+        return h === again;
+      }, { timeout: 10_000 })
+      .toBe(true);
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
     await page.waitForTimeout(150);
     const m = await page.evaluate(() => {

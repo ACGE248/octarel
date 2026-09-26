@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { navTo } from './nav-helper.js';
 
 // Fixture data (scripts/agents/control_plane/dashboard-tests/serve_fixture.py)
 // seeds: two RUNNING tasks (fx-running-1, fx-running-2), one QUEUED
@@ -11,26 +12,16 @@ import { fileURLToPath } from 'node:url';
 // without a single provider/model network call.
 //
 // Navigation is viewport-dependent: desktop shows the full sidebar; mobile
-// shows Home/Tasks/Agents/History plus a "More" sheet for the remaining
+// shows Home/Manager/Tasks/Agents plus a "More" sheet for the remaining
 // sections. `navTo` hides that difference using Playwright's `:visible`
 // pseudo-class.
 
-const VIEWS_IN_MORE_SHEET = new Set([
-  'view-runs',
-  'view-flow',
-  'view-providers',
-  'view-steering',
-  'view-worktrees',
-  'view-system',
-  'view-terminal',
-  'view-settings',
-  'view-roadmap',
-]);
 
 const ALL_SECTIONS = [
   'view-overview',
   'view-runs',
   'view-flow',
+  'view-priority',
   'view-tasks',
   'view-agents',
   'view-providers',
@@ -40,6 +31,9 @@ const ALL_SECTIONS = [
   'view-system',
   'view-terminal',
   'view-settings',
+  // OCTAREL-UI-04: Roadmap is a real destination now, so it is overflow-checked
+  // like every other section.
+  'view-roadmap',
 ];
 
 const VIEWPORTS = [
@@ -65,32 +59,6 @@ function realWorktreePath(rawPath) {
   } catch {
     return rawPath;
   }
-}
-
-async function navTo(page, viewId) {
-  // The sidebar/bottom-nav swap on a CSS transition (transform + visibility),
-  // so a resize can leave the target control mid-transition for a moment;
-  // retry briefly instead of failing on a single instantaneous count() check.
-  const direct = page.locator(`[data-view="${viewId}"]:visible`);
-  const deadline = Date.now() + 3000;
-  while (Date.now() < deadline) {
-    if (await direct.count()) {
-      try {
-        await direct.first().click({ timeout: 1000 });
-        return;
-      } catch {
-        // Layout/poll-cycle churn made the click target unstable; re-resolve
-        // the locator and retry rather than failing on one bad attempt.
-      }
-    }
-    await page.waitForTimeout(100);
-  }
-  if (!VIEWS_IN_MORE_SHEET.has(viewId)) {
-    throw new Error(`no visible nav control for ${viewId}`);
-  }
-  await page.locator('#more-tab').click();
-  await expect(page.locator('#more-sheet')).toBeVisible();
-  await page.locator(`.more-item[data-view="${viewId}"]`).click();
 }
 
 async function revealSessionControls(page) {
@@ -130,7 +98,11 @@ test('no horizontal overflow after visiting every section', async ({ page }) => 
 });
 
 test('sidebar renders every primary section with Overview active', async ({ page }) => {
-  const labels = ['Overview', 'Runs', 'Flow', 'Tasks', 'Agents', 'Providers', 'Steering', 'History', 'Worktrees', 'System', 'Terminal', 'Settings'];
+  // OCTAREL-UI-04: "Steering" is presented as "Manager" (the view id stays
+  // view-steering so routes/bindings are unchanged), and Roadmap is now a real
+  // navigation destination rather than a hidden alias reachable only from the
+  // mobile "More" sheet.
+  const labels = ['Overview', 'Runs', 'Flow', 'Priority', 'Tasks', 'Agents', 'Providers', 'Manager', 'History', 'Worktrees', 'System', 'Terminal', 'Settings', 'Roadmap'];
   const tabs = page.locator('#tabbar .tab');
   await expect(tabs).toHaveCount(labels.length);
   for (const label of labels) {
@@ -775,7 +747,9 @@ test('ENG-AGENT-14 an auto-provisioned review checkout surfaces its PR/head orig
 });
 
 test('S9 roadmap uses derived labels and honest non-computable progress', async ({ page }) => {
-  await navTo(page, 'view-settings');
+  // OCTAREL-UI-04: the live roadmap table moved out of Settings into its own
+  // Roadmap destination; it is no longer duplicated across two views.
+  await navTo(page, 'view-roadmap');
   await expect(page.locator('#roadmap-cards')).toContainText(/DERIVED|not computable/i);
   await expect(page.locator('#roadmap-summary')).toBeVisible();
 });

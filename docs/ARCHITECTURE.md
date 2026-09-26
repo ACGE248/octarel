@@ -65,6 +65,48 @@ cached under Octarel state keyed by project + worktree + content tree, never ins
 and never used by the exact-tree gate. Absent or stale Graphify degrades to normal repository inspection.
 See `scripts/agents/README.md` (Graphify repository intelligence) for the contract.
 
+The Control Center's Agent Activity viewer surfaces the status Graphify recorded for an attempt (used,
+refreshed, stale, skipped, unavailable, failed-safe, or not-recorded) with its reason, and labels it
+advisory. Only that status record is exposed -- never the derived context text, its node list, or any
+path -- and reading it never runs Graphify.
+
+## Manager Chat
+
+Manager Chat is an orchestration interface, not a model client. An operator message is first parsed by the
+deterministic steering grammar; a recognized slash command or bounded intent is handled there and costs no
+AI call. Only text that grammar cannot recognize is routed to an interpreter.
+
+Interpretation uses the normal machinery: candidates come from the configured route for a read-only role, in
+that order, skipping any worker that is disabled, whose CLI is unavailable, or whose provider state is not
+routable -- each skip recorded with its reason. A worker that allows API billing is refused outright, so
+Manager Chat can never be the path that enables paid billing. Model selection is cached-only.
+
+The interpreter's reply is untrusted input. It may only name a verb already in the command vocabulary with a
+bounded argument shape, and the verb, argument keys and value types are revalidated before display. A reply
+can never introduce a new verb or reach the command layer directly.
+
+The result is always a proposal. Execution still goes through the normal steering path, which re-derives
+destructiveness itself and requires explicit confirmation, so a natural-language request for a destructive
+action cannot bypass a confirmation gate. The selected worker/provider/model, and any fallback, are shown in
+the conversation and recorded as events.
+
+## Usage, context and cost telemetry
+
+The Control Center reports what a run consumed from the durable usage-governance records the supervisor
+writes, joined with registry facts for the worker that ran. Every metric carries the class that established
+it -- measured, derived (with its formula), unknown, not exposed, or not applicable -- so a figure Octarel
+cannot establish is stated as unavailable instead of being estimated into something plausible.
+
+Two AO-style metric families have no counterpart here and are reported as such. No worker CLI in this stack
+reports cache-category tokens, so fresh input, cache reads and any hit rate derived from them are not
+exposed; a hit rate is never approximated. No runtime reports an effective context limit -- the OpenCode
+catalog's per-model `context_limit` is a fact about a model, not the limit the active worker ran under -- so
+context utilization is not exposed rather than inferred from a model name.
+
+Dollar cost is produced only for an API route with both a pricing snapshot and known token counts.
+Subscription and free routes report not-applicable with the reason; a `$0.00` there would imply API pricing
+that does not apply to a subscription-backed CLI invocation.
+
 ## Continuous overnight advancement
 
 An overnight session (`control_plane/overnight.py`, table `overnight_sessions`) is a durable record the daemon advances
@@ -90,7 +132,12 @@ dashboard stays a monitoring surface. Operator pause/resume/stop remain plain st
 The Control Center keeps active task/run state live while caching expensive
 Git-derived worktree/checkpoint facts for short, labelled TTLs. Its browser
 refresh resolves project selection first, then fetches independent read models
-concurrently; normal monitoring never probes or invokes an AI provider.
+concurrently; polling and monitoring never probe or invoke an AI provider.
+
+The one place the Control Center can reach a provider is Manager Chat, and only
+in response to an operator message it could not parse deterministically -- see
+Manager Chat below. Every other surface, including every periodic refresh,
+remains provider-free.
 
 Delegated workers, terminal shells, test lanes, and managed development apps
 start in owned process sessions. Cancellation and shutdown terminate only

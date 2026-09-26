@@ -49,6 +49,7 @@ def _write_attempt(
     finished_at: str | None = "2026-09-18T10:00:05+00:00",
     log_text: str | None = "line one\nline two\n",
     notes: list[str] | None = None,
+    graph_context: dict | None = None,
 ) -> Path:
     """Write manifest.json/summary.md/logs/run.log exactly as manifest.py does."""
 
@@ -82,7 +83,7 @@ def _write_attempt(
         "tests_or_checks": ["pytest tests/test_control_plane_agent_activity.py"],
         "notes": notes or [],
         "candidate_tree_sha": "deadbeef",
-        "policy_manifest": {},
+        "policy_manifest": {"graph_context": graph_context} if graph_context else {},
         "paths": {},
         "redaction_applied": True,
         "ci_invocation_allowed": False,
@@ -311,3 +312,94 @@ def test_api_missing_run_id_for_known_task_returns_missing_status_not_500(
     resp = client.get(f"/api/agent-activity/{TASK_ID}/{WORKER}/never-ran")
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "missing"
+
+
+# ------------------------------------------------------- unit: Graphify status
+
+
+def test_read_attempt_reports_recorded_graphify_status(tmp_path: Path) -> None:
+    """OCTAREL-UI-07 (issue #26): expose what the orchestrator already recorded."""
+
+    _write_attempt(
+        tmp_path,
+        run_id="run-graph",
+        graph_context={
+            "status": "used",
+            "reason": "cached graph matched the current content tree",
+            "source": "graphify",
+            "authoritative": False,
+            "llm_enrichment": False,
+            "api_billing": False,
+            "precedence": "advisory-below-source-tree-policy-and-task-contracts",
+            "injected": True,
+        },
+    )
+
+    graph = read_attempt(tmp_path, TASK_ID, WORKER, "run-graph")["details"]["graph_context"]
+    assert graph["status"] == "used"
+    assert graph["injected"] is True
+    # Graphify is advisory; the UI must never present it as authority.
+    assert graph["authoritative"] is False
+    assert graph["precedence"] == "advisory-below-source-tree-policy-and-task-contracts"
+    assert graph["llm_enrichment"] is False
+    assert graph["api_billing"] is False
+
+
+def test_read_attempt_reports_a_contained_graphify_failure(tmp_path: Path) -> None:
+    """build_graph_context never raises; a failed-safe run must still be visible."""
+
+    _write_attempt(
+        tmp_path,
+        run_id="run-graph-failed",
+        graph_context={
+            "status": "failed-safe",
+            "reason": "graph context failed safely: TimeoutExpired",
+            "injected": False,
+            "authoritative": False,
+        },
+    )
+
+    graph = read_attempt(tmp_path, TASK_ID, WORKER, "run-graph-failed")["details"]["graph_context"]
+    assert graph["status"] == "failed-safe"
+    assert graph["injected"] is False
+    assert "failed safely" in graph["reason"]
+
+
+def test_read_attempt_distinguishes_no_graphify_record_from_skipped(tmp_path: Path) -> None:
+    """An attempt predating Graphify must not be reported as having skipped it."""
+
+    _write_attempt(tmp_path, run_id="run-no-graph")
+    graph = read_attempt(tmp_path, TASK_ID, WORKER, "run-no-graph")["details"]["graph_context"]
+    assert graph["status"] == "not-recorded"
+    assert graph["injected"] is False
+
+
+def test_graphify_status_never_carries_context_text_or_paths(tmp_path: Path) -> None:
+    """Only the status record is exposed -- never derived context or file paths.
+
+    Graphify runs over a snapshot of the checkout, so leaking its text or node
+    list through the dashboard would be a repository-content disclosure.
+    """
+
+    secret = ["sk", "AAAABBBBCCCCDDDDEEEEFFFF"]
+    _write_attempt(
+        tmp_path,
+        run_id="run-graph-leak",
+        graph_context={
+            "status": "used",
+            "reason": f"seeded from .env and {'-'.join(secret)}",
+            "injected": True,
+            "text": "## Graphify\nsrc/secret_module.py depends on config/credentials.py",
+            "nodes": ["config/credentials.py", "src/secret_module.py"],
+        },
+    )
+
+    graph = read_attempt(tmp_path, TASK_ID, WORKER, "run-graph-leak")["details"]["graph_context"]
+    assert "text" not in graph
+    assert "nodes" not in graph
+    serialized = json.dumps(graph)
+    assert "credentials.py" not in serialized
+    assert "secret_module" not in serialized
+    # The reason is redacted on read, as defense in depth.
+    assert "-".join(secret) not in serialized
+
