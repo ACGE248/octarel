@@ -1,8 +1,15 @@
-"""OCTAREL-UI-06 (issue #25): AO-style usage, context and cost telemetry.
+"""AO-style usage, context and cost telemetry (issues #25 and #42).
 
 These tests exist mainly to pin the *honesty* rules: a metric Octarel cannot
-establish must be reported as unavailable, never estimated into a plausible
-number, and a subscription-backed route must never be given a dollar figure.
+establish must be reported as unavailable rather than estimated into a
+plausible number, and money must never assert more than its evidence supports.
+
+The money rule changed with issue #42 and this file follows it. It used to be
+"a subscription-backed route never gets a dollar figure". It is now "a
+subscription-backed route gets two figures, and neither overstates itself": an
+explicitly approximate API-equivalent value, and a $0.00 incremental charge
+justified by an established billing class. An *unestablished* billing class
+still gets no figure at all.
 """
 
 from __future__ import annotations
@@ -498,3 +505,164 @@ def test_an_unparseable_timestamp_is_excluded_rather_than_assumed():
         project_id="p",
     )
     assert build_aggregates([row], now=NOW)["excluded_undated_rows"] == 1
+
+
+# --------------------------------------------------------------------------
+# Independent review follow-ups (Grok Build, issue #42).
+
+
+def test_a_window_with_rows_but_no_figures_reports_unknown_not_zero():
+    """The aggregate counterpart of "we do not know is not free".
+
+    Three API-billed runs that could not be priced must not total to "$0.00
+    spend" -- beside a count of three, that reads as "they cost nothing".
+    """
+
+    unpriceable = [
+        build_row(
+            record(
+                telemetry_quality="exact",
+                input_tokens=500_000,
+                output_tokens=100_000,
+                route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}],
+            ),
+            facts=METERED,
+            project_id="p",
+            pricing=None,
+            pricing_reason="no catalog entry",
+        )
+        for _ in range(3)
+    ]
+    today = build_aggregates(unpriceable, now=NOW)["windows"]["today"]
+
+    spend = today["actual_api_spend_usd"]
+    assert spend["value"] is None
+    assert spend["class"] == CLASS_UNKNOWN
+    assert "none of the 3" in spend["reason"]
+    # The rows are still counted, so the gap is visible rather than invisible.
+    assert today["counts"]["api_billed"] == 3
+    assert spend["coverage"] == {"contributed": 0, "rows": 3, "complete": False}
+
+
+def test_a_partial_total_carries_its_own_coverage():
+    priced = dated_row(METERED, NOW)
+    unpriced = build_row(
+        record(
+            telemetry_quality="exact",
+            input_tokens=10,
+            output_tokens=10,
+            route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}],
+        ),
+        facts=METERED,
+        project_id="p",
+        pricing=None,
+        pricing_reason="no catalog entry",
+    )
+    cell = build_aggregates([priced, unpriced], now=NOW)["windows"]["today"]["actual_api_spend_usd"]
+    assert cell["value"] == pytest.approx(0.055)
+    assert cell["coverage"] == {"contributed": 1, "rows": 2, "complete": False}
+
+
+def test_an_empty_window_is_complete_at_zero():
+    """No rows of a kind is a truthful $0.00, not an unknown."""
+
+    cell = build_aggregates([], now=NOW)["windows"]["today"]["actual_api_spend_usd"]
+    assert cell["value"] == 0.0
+    assert cell["class"] == CLASS_DERIVED
+    assert cell["coverage"]["complete"] is True
+
+
+def test_a_row_whose_billing_is_unknown_can_never_enter_actual_spend():
+    """Spend is drawn from API-billed rows only, whatever the row claims."""
+
+    rogue = build_row(
+        record(
+            telemetry_quality="exact",
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            route_history=[{"worker": "mystery-worker", "ended_at": NOW.isoformat()}],
+        ),
+        facts=UNCLASSIFIED,
+        project_id="p",
+        pricing=FLASH_RATES,
+    )
+    # Even if its actual-cost cell were somehow populated, it is not API-billed.
+    rogue["metrics"]["actual_cost_usd"] = {
+        "value": 999.0, "class": CLASS_DERIVED, "formula": "x", "source": None, "reason": None, "unit": "usd",
+    }
+    today = build_aggregates([rogue], now=NOW)["windows"]["today"]
+    assert today["actual_api_spend_usd"]["value"] == 0.0
+    assert today["counts"]["billing_unknown"] == 1
+    assert today["counts"]["api_billed"] == 0
+
+
+def test_an_api_billed_row_is_not_told_it_was_never_billed():
+    """The estimate's caveat has to be true of the run it sits on."""
+
+    metered = money(METERED)["estimated_api_equivalent_usd"]["reason"]
+    assert "reported separately" in metered
+    assert "not billed at these rates" not in metered
+
+    included = money(SUBSCRIPTION)["estimated_api_equivalent_usd"]["reason"]
+    assert "not billed at these rates" in included
+
+
+def test_a_still_running_retry_never_inherits_the_previous_attempts_end_time():
+    """Tokens belong to the attempt the row is attributed to, not an older one.
+
+    Scanning back through history for any ``ended_at`` would date this run to
+    when the *failed* attempt stopped -- six days earlier, in another window.
+    """
+
+    row = build_row(
+        record(
+            updated_at="2026-09-26T11:00:00+00:00",
+            route_history=[
+                {"worker": "claude-code", "status": "FAILED", "ended_at": "2026-09-20T09:00:00+00:00"},
+                {"worker": "codex-build", "status": "RUNNING"},
+            ],
+        ),
+        facts=SUBSCRIPTION,
+        project_id="p",
+    )
+    assert row["occurred_at"]["value"] == "2026-09-26T11:00:00+00:00"
+    assert row["occurred_at"]["class"] == CLASS_DERIVED
+    assert build_aggregates([row], now=NOW)["windows"]["today"]["counts"]["rows"] == 1
+
+
+def test_a_future_timestamp_is_excluded_and_reported_rather_than_dropped():
+    """Clock skew must not quietly shrink every total with nothing saying so."""
+
+    row = build_row(
+        record(route_history=[{"worker": "claude-code", "ended_at": "2027-01-01T00:00:00+00:00"}]),
+        facts=SUBSCRIPTION,
+        project_id="p",
+        pricing=FLASH_RATES,
+    )
+    aggregates = build_aggregates([row], now=NOW)
+    assert aggregates["excluded_future_rows"] == 1
+    assert "clock skew" in aggregates["excluded_reason"]
+    for window in aggregates["windows"].values():
+        assert window["counts"]["rows"] == 0
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens"),
+    [(1000, None), (None, 500), (None, None)],
+)
+def test_a_one_sided_token_count_prices_nothing(input_tokens, output_tokens):
+    """Half a token count is not a basis for either figure."""
+
+    m = money(METERED, input_tokens=input_tokens, output_tokens=output_tokens)
+    assert m["estimated_api_equivalent_usd"]["value"] is None
+    assert m["estimated_api_equivalent_usd"]["class"] == CLASS_UNKNOWN
+    assert m["actual_cost_usd"]["value"] is None
+
+
+def test_the_cost_metric_is_no_longer_part_of_the_generic_metric_grid():
+    """Money moved out of the interchangeable-looking cells on purpose."""
+
+    metrics = money(SUBSCRIPTION)
+    assert "cost_usd" not in metrics
+    assert "estimated_api_equivalent_usd" in metrics
+    assert "actual_cost_usd" in metrics

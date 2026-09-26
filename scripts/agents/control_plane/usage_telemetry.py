@@ -276,8 +276,8 @@ def _as_snapshot(pricing: ModelPricing, worker: str) -> PricingSnapshot:
 
 
 def _equivalent_metric(
-    facts: WorkerFacts,
     record: dict[str, Any],
+    billing_class: str,
     pricing: ModelPricing | None,
     pricing_reason: str | None,
 ) -> dict[str, Any]:
@@ -319,8 +319,14 @@ def _equivalent_metric(
             f"{pricing.source} snapshot {pricing.fingerprint or 'unknown'}"
             f" refreshed {pricing.refreshed_at or 'unknown'}"
         ),
+        # Worded for the route that actually ran. On an API-billed row the run
+        # *was* billed at these rates, so a blanket "not billed at these rates"
+        # would be a false statement about the run rather than a caveat about
+        # the cell. Independent review (Grok Build, issue #42).
         reason=(
-            "approximate API-equivalent value, not a charge: this run was not billed at these rates"
+            "approximate API-equivalent value; the actual charge for this run is reported separately"
+            if billing_class == BILLING_API
+            else "approximate API-equivalent value, not a charge: this run was not billed at these rates"
         ),
         unit="usd",
     )
@@ -414,15 +420,28 @@ def _occurrence(record: dict[str, Any]) -> dict[str, Any]:
     when the record was last written for any reason and so only approximates
     the run. A row with neither is excluded from every window rather than
     silently counted into the current one.
+
+    Only the **latest** attempt may supply that timestamp, and only if it has
+    one. Independent review (Grok Build, issue #42) found that scanning back
+    through history for any ``ended_at`` let a still-running retry inherit the
+    end time of the previous, failed attempt -- dating the current run's tokens
+    to whenever the earlier one stopped, potentially in a different window.
+    The tokens on this record belong to the attempt the row is attributed to,
+    so the timestamp must come from that same attempt or not at all.
     """
 
     for attempt in reversed(record.get("route_history") or []):
-        if isinstance(attempt, dict) and attempt.get("ended_at"):
+        if not isinstance(attempt, dict) or not attempt.get("worker"):
+            continue
+        # The newest attempt with a worker is the one this row is attributed
+        # to. If it has not ended, fall through -- never borrow an older one.
+        if attempt.get("ended_at"):
             return {
                 "value": str(attempt["ended_at"]),
                 "class": CLASS_MEASURED,
                 "source": "route attempt ended_at",
             }
+        break
     updated = record.get("updated_at")
     if updated:
         return {
@@ -455,7 +474,9 @@ def build_row(
     billing_class = billing_for_route(route)
     # Two cells, computed from different evidence, that are never summed
     # together. See the module docstring.
-    metrics["estimated_api_equivalent_usd"] = _equivalent_metric(facts, record, pricing, pricing_reason)
+    metrics["estimated_api_equivalent_usd"] = _equivalent_metric(
+        record, billing_class, pricing, pricing_reason
+    )
     metrics["actual_cost_usd"] = _actual_cost_metric(
         facts, record, billing_class, pricing, pricing_reason
     )
@@ -598,16 +619,39 @@ def window_starts(now: _dt.datetime) -> dict[str, _dt.datetime]:
     }
 
 
-def _sum_cell(values: list[float], *, formula: str, rows: int, missing: int) -> dict[str, Any]:
+def _sum_cell(values: list[float], *, formula: str, rows: int) -> dict[str, Any]:
     """A window total, with how much of the window it actually covers.
 
-    Always ``DERIVED``: a total over zero rows is a real, truthful zero, but
-    the counts travel with it so a total that is small only because most rows
-    could not be priced cannot be mistaken for a total that is small because
-    little was spent.
+    Three genuinely different situations, which earlier collapsed into one
+    number (independent review, Grok Build, issue #42):
+
+    * **No rows of this kind at all.** A total over zero rows is a truthful
+      ``$0.00`` -- nothing of this kind happened.
+    * **Rows existed but none could supply a figure.** ``UNKNOWN``. Reporting
+      ``$0.00`` here would be the same defaulted zero the per-row path refuses:
+      "three API-billed runs, $0.00 spend" reads as "they cost nothing" when it
+      actually means "we could not price any of them".
+    * **Some contributed.** A real partial total, carrying ``coverage`` so the
+      shortfall can be shown on screen rather than hidden in a tooltip.
     """
 
-    return metric(
+    missing = rows - len(values)
+    coverage = {"contributed": len(values), "rows": rows, "complete": missing == 0}
+
+    if rows and not values:
+        cell = metric(
+            klass=CLASS_UNKNOWN,
+            formula=formula,
+            reason=(
+                f"none of the {rows} row(s) in this window could supply this figure, "
+                "so no total is asserted"
+            ),
+            unit="usd",
+        )
+        cell["coverage"] = coverage
+        return cell
+
+    cell = metric(
         round(sum(values), 6),
         klass=CLASS_DERIVED,
         formula=formula,
@@ -619,6 +663,8 @@ def _sum_cell(values: list[float], *, formula: str, rows: int, missing: int) -> 
         ),
         unit="usd",
     )
+    cell["coverage"] = coverage
+    return cell
 
 
 def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = None) -> dict[str, Any]:
@@ -638,15 +684,26 @@ def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = N
 
     dated: list[tuple[_dt.datetime, dict[str, Any]]] = []
     undated = 0
+    future = 0
     for row in rows:
         when = _parse_iso((row.get("occurred_at") or {}).get("value"))
         if when is None:
             undated += 1
             continue
-        dated.append((when.astimezone(_dt.UTC), row))
+        when = when.astimezone(_dt.UTC)
+        if when > moment:
+            # A timestamp after "now" means a clock skew somewhere. It belongs
+            # in no window, but it was being dropped silently -- so the totals
+            # were quietly incomplete with nothing saying so. Independent
+            # review (Grok Build, issue #42).
+            future += 1
+            continue
+        dated.append((when, row))
 
     def established(cell: dict[str, Any] | None) -> float | None:
-        if not cell or cell.get("class") != CLASS_DERIVED:
+        """A figure only counts toward a total if its own class established it."""
+
+        if not cell or cell.get("class") not in (CLASS_DERIVED, CLASS_MEASURED):
             return None
         value = cell.get("value")
         return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
@@ -664,18 +721,17 @@ def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = N
             klass = (row.get("billing") or {}).get("class") or BILLING_UNKNOWN
             by_billing.setdefault(klass, []).append(row)
 
-        def equivalents(group: list[dict[str, Any]]) -> tuple[list[float], int]:
-            values = [
+        def equivalents(group: list[dict[str, Any]]) -> list[float]:
+            return [
                 value
                 for row in group
                 if (value := established((row.get("metrics") or {}).get("estimated_api_equivalent_usd")))
                 is not None
             ]
-            return values, len(group) - len(values)
 
-        sub_values, sub_missing = equivalents(by_billing[BILLING_SUBSCRIPTION])
-        api_values, api_missing = equivalents(by_billing[BILLING_API])
-        free_values, free_missing = equivalents(by_billing[BILLING_FREE])
+        sub_values = equivalents(by_billing[BILLING_SUBSCRIPTION])
+        api_values = equivalents(by_billing[BILLING_API])
+        free_values = equivalents(by_billing[BILLING_FREE])
 
         # Actual spend is drawn *only* from API-billed rows' actual-cost cells.
         # Subscription and free rows contribute a real $0.00 to spend, but they
@@ -686,7 +742,6 @@ def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = N
             for row in by_billing[BILLING_API]
             if (value := established((row.get("metrics") or {}).get("actual_cost_usd"))) is not None
         ]
-        spend_missing = len(by_billing[BILLING_API]) - len(spend_values)
 
         buckets[name] = {
             "window": {"start": start.isoformat(), "end": moment.isoformat()},
@@ -694,25 +749,21 @@ def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = N
                 sub_values,
                 formula="sum of estimated API-equivalent value over subscription-included rows",
                 rows=len(by_billing[BILLING_SUBSCRIPTION]),
-                missing=sub_missing,
             ),
             "free_equivalent_usd": _sum_cell(
                 free_values,
                 formula="sum of estimated API-equivalent value over free-tier rows",
                 rows=len(by_billing[BILLING_FREE]),
-                missing=free_missing,
             ),
             "api_equivalent_usd": _sum_cell(
                 api_values,
                 formula="sum of estimated API-equivalent value over API-billed rows",
                 rows=len(by_billing[BILLING_API]),
-                missing=api_missing,
             ),
             "actual_api_spend_usd": _sum_cell(
                 spend_values,
                 formula="sum of actual cost over API-billed rows only",
                 rows=len(by_billing[BILLING_API]),
-                missing=spend_missing,
             ),
             "counts": {
                 "rows": len(window),
@@ -728,12 +779,24 @@ def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = N
         "invariant": AGGREGATE_INVARIANT,
         "generated_at": moment.isoformat(),
         "excluded_undated_rows": undated,
+        "excluded_future_rows": future,
         "excluded_reason": (
-            "rows with no recorded end time or record timestamp are counted in no window, "
-            "rather than being attributed to the current one"
-        )
-        if undated
-        else None,
+            "; ".join(
+                part
+                for part in (
+                    "rows with no recorded end time or record timestamp are counted in no window, "
+                    "rather than being attributed to the current one"
+                    if undated
+                    else "",
+                    f"{future} row(s) are timestamped after the current time (clock skew) and are "
+                    "counted in no window"
+                    if future
+                    else "",
+                )
+                if part
+            )
+            or None
+        ),
         "windows": buckets,
     }
 

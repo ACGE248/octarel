@@ -3147,7 +3147,15 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
 .billing-chip.is-subscription { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
 .billing-chip.is-api { color: var(--accent-ink); background: var(--accent-soft); }
 .billing-chip.is-free { color: var(--info); background: color-mix(in srgb, var(--info) 13%, transparent); }
-.billing-chip.is-unestablished { color: var(--muted); background: var(--surface-2); }
+/* Independent review (Grok Build, issue #42): --surface-2 on a --surface-2
+   parent made this chip disappear in both themes, so the one state the
+   operator most needs to notice was the least visible. It gets an outline
+   instead of a fill. */
+.billing-chip.is-unestablished {
+  color: var(--muted);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
 
 /* Per-window totals. The spend row is separated by a rule from the value rows
    above it, so the grouping itself says these are not one column of numbers
@@ -3172,9 +3180,17 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
   color: var(--muted);
 }
 .usage-window-rows { display: grid; gap: 6px; margin: 0; }
-.usage-agg { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.usage-agg { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .usage-agg dt { font-size: 11px; color: var(--muted); }
 .usage-agg dd { margin: 0; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* A partial total states its own shortfall on screen, not just on hover. */
+.usage-agg-shortfall {
+  flex: 1 0 100%;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
 .usage-agg.is-estimate dd { color: var(--info); }
 .usage-agg.is-actual {
   margin-top: 4px;

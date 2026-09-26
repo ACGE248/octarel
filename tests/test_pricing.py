@@ -154,6 +154,44 @@ def test_an_old_snapshot_still_prices_but_says_it_is_old():
     assert fresh.stale is False
 
 
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("Anthropic", "claude-sonnet-5"), ("DeepSeek", "deepseek/deepseek-chat")],
+)
+def test_every_provider_the_catalog_omits_is_reported_the_same_way(provider, model):
+    """Both absent providers in workers.json, not just the one that is obvious.
+
+    ``claude-code`` runs through the Claude CLI and ``deepseek-overflow``
+    through a provider OpenCode does not carry, so neither can be priced.
+    """
+
+    result = book(FLASH, GROK).lookup(provider=provider, model=model)
+    assert result.pricing is None
+    assert result.reason
+
+
+def test_the_stale_boundary_is_exactly_the_documented_threshold():
+    """Seven days, deliberately not the catalog's 30-minute discovery window."""
+
+    cutoff = pricing.PRICING_STALE_AFTER_SECONDS
+    assert cutoff == 7 * 24 * 3600
+
+    just_inside = book(FLASH, refreshed_at=(NOW - dt.timedelta(seconds=cutoff - 1)).isoformat())
+    assert just_inside.stale is False
+
+    just_outside = book(FLASH, refreshed_at=(NOW - dt.timedelta(seconds=cutoff + 1)).isoformat())
+    assert just_outside.stale is True
+
+
+def test_a_snapshot_with_no_refresh_time_is_not_called_stale():
+    """Unknown age is not evidence of being old; it is simply unknown."""
+
+    undated = pricing.book_from_catalog(catalog(FLASH, refreshed_at="not a date"), now=NOW)
+    assert undated.age_seconds is None
+    assert undated.stale is False
+    assert undated.lookup(provider="Google", model="google/gemini-2.5-flash").pricing is not None
+
+
 def test_pricing_provenance_is_snapshot_evidence_and_says_so():
     provenance = book(FLASH).provenance()
     assert provenance["source"] == pricing.SOURCE_OPENCODE_CATALOG

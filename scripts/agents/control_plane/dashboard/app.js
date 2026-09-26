@@ -512,6 +512,9 @@
        is the exception: "$0.00" is the whole claim being made on a
        subscription or free route, and "$0.0000" only makes it look uncertain. */
     const amount = Number(value);
+    // A non-numeric value must never become "$NaN": callers already gate on
+    // the cell's class, but a money field is the last place to trust that.
+    if (!Number.isFinite(amount)) return "UNKNOWN";
     if (amount === 0) return "$0.00";
     return Math.abs(amount) >= 0.01 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(4)}`;
   }
@@ -547,9 +550,15 @@
         "estimate",
         "Estimated API-equivalent value",
         estimate,
-        estimate.value !== null && estimate.value !== undefined
-          ? "Approximate. Not a charge and not billed."
-          : null,
+        /* The note follows the route that ran. On an API-billed row the run
+           *was* billed at these rates, so "not billed" would be a false claim
+           about the run rather than a caveat about the cell. Independent
+           review (Grok Build, issue #42). */
+        estimate.value === null || estimate.value === undefined
+          ? null
+          : billing.class === "API_BILLED"
+            ? "Approximate. The actual charge is reported separately."
+            : "Approximate. Not a charge and not billed.",
       ),
       el("div", { class: "usage-money-cell is-billing" }, [
         el("span", { class: "usage-money-label", text: "Billing" }),
@@ -618,15 +627,25 @@
               const cell = bucket[metricKey] || { value: null, class: "UNKNOWN" };
               const known =
                 USAGE_ESTABLISHED.has(cell.class) && cell.value !== null && cell.value !== undefined;
+              const coverage = cell.coverage || {};
+              /* Independent review (Grok Build, issue #42): a partial total
+                 must say so on screen, not only in a tooltip. "$0.00 spend"
+                 beside "3 API-billed" otherwise reads as "those runs cost
+                 nothing" when it means "none of them could be priced". */
+              const incomplete = coverage.complete === false;
               return el("div", { class: `usage-agg is-${kind}${known ? "" : " is-unavailable"}` }, [
                 el("dt", { text: metricLabel }),
                 el("dd", {
                   text: known ? `${kind === "estimate" ? "~" : ""}${usdText(cell.value)}` : cell.class,
-                  // Coverage travels with the total: a small number because
-                  // little was used reads differently from a small number
-                  // because most rows could not be priced.
                   title: [cell.formula, cell.source, cell.reason].filter(Boolean).join(" — "),
                 }),
+                incomplete
+                  ? el("span", {
+                      class: "usage-agg-shortfall",
+                      text: `${coverage.contributed} of ${coverage.rows} priced`,
+                      title: cell.reason || "",
+                    })
+                  : null,
               ]);
             }),
           ),

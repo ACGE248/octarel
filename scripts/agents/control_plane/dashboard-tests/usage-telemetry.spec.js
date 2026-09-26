@@ -242,6 +242,92 @@ test('a failed read clears the totals rather than leaving stale money on screen'
   await expect(page.locator('#usage-aggregate-invariant')).toBeEmpty();
 });
 
+/* Independent review follow-ups (Grok Build, issue #42). */
+
+test('money is no longer one of the interchangeable metric cells', async ({ page }) => {
+  /* It moved out of the grid deliberately. If a later change put a money
+     figure back among cells that all look alike, the distinction this panel
+     exists to make would quietly erode. */
+  const row = page.locator('.usage-row', API_ROW);
+  await expect(row.locator('.usage-metric', { hasText: 'Cost' })).toHaveCount(0);
+  await expect(row.locator('.usage-money')).toHaveCount(1);
+});
+
+test('a money field missing from the payload is shown as unknown, not omitted', async ({ page, request, baseURL }) => {
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    delete body.rows[0].metrics.actual_cost_usd;
+  });
+
+  const actual = page.locator('.usage-row').first().locator('.usage-money-cell.is-actual');
+  await expect(actual).toBeVisible();
+  await expect(actual).toContainText('UNKNOWN');
+  await expect(actual.locator('.usage-money-value')).not.toContainText('$');
+});
+
+test('a spend total nothing could supply reads unknown, not zero', async ({ page, request, baseURL }) => {
+  /* The aggregate form of "we do not know is not free". Beside a count of
+     API-billed runs, a $0.00 total would read as "they cost nothing" when it
+     means "none of them could be priced". */
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    Object.values(body.aggregates.windows).forEach((window) => {
+      window.actual_api_spend_usd = {
+        value: null,
+        class: 'UNKNOWN',
+        reason: 'none of the 2 row(s) in this window could supply this figure',
+        unit: 'usd',
+        coverage: { contributed: 0, rows: 2, complete: false },
+      };
+    });
+  });
+
+  const spend = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-agg.is-actual');
+  await expect(spend).toContainText('UNKNOWN');
+  await expect(spend.locator('dd')).not.toContainText('$');
+});
+
+test('a partial total states its shortfall on screen, not only on hover', async ({ page, request, baseURL }) => {
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    Object.values(body.aggregates.windows).forEach((window) => {
+      window.actual_api_spend_usd = {
+        ...window.actual_api_spend_usd,
+        value: 0.3,
+        class: 'DERIVED',
+        coverage: { contributed: 1, rows: 4, complete: false },
+      };
+    });
+  });
+
+  const spend = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-agg.is-actual');
+  // Visible text, so a total that is small only because most rows could not
+  // be priced cannot be mistaken for a total that is small because little was
+  // spent.
+  await expect(spend.locator('.usage-agg-shortfall')).toHaveText('1 of 4 priced');
+});
+
+test('a complete total shows no shortfall note', async ({ page }) => {
+  const today = page.locator('.usage-window', { hasText: 'Today' });
+  await expect(today.locator('.usage-agg.is-actual .usage-agg-shortfall')).toHaveCount(0);
+});
+
+test('an API-billed row is not told it was never billed', async ({ page }) => {
+  // The caveat on the estimate has to be true of the run it sits on.
+  const estimate = page.locator('.usage-row', API_ROW).locator('.usage-money-cell.is-estimate');
+  await expect(estimate).toContainText('reported separately');
+  await expect(estimate).not.toContainText('Not a charge and not billed');
+
+  const included = page.locator('.usage-row', SUBSCRIPTION_ROW).locator('.usage-money-cell.is-estimate');
+  await expect(included).toContainText('Not a charge and not billed');
+});
+
+test('the unestablished billing chip stays visible against its own panel', async ({ page }) => {
+  /* It used to take --surface-2 on a --surface-2 parent, so the one billing
+     state an operator most needs to notice was the least visible. */
+  const chip = page.locator('.usage-row', UNCLASSIFIED_ROW).locator('.billing-chip');
+  await expect(chip).toBeVisible();
+  const outlined = await chip.evaluate((node) => getComputedStyle(node).boxShadow);
+  expect(outlined).not.toBe('none');
+});
+
 test('an unestablished money cell never renders as an amount', async ({ page, request, baseURL }) => {
   /* Same rule as the metric grid, applied where it matters most: a cell
      carrying a stray number with an UNKNOWN class must not become a figure. */

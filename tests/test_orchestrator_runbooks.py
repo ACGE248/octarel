@@ -390,6 +390,45 @@ def test_start_runbook_launches_exactly_one_session_task(tmp_path, monkeypatch):
     assert len(state.list_tasks()) == 1, "a runbook must create exactly one underlying task"
 
 
+def test_start_runbook_records_the_billing_class_with_the_attempt(tmp_path, monkeypatch):
+    """OCTAREL-UI-07 (issue #42): billing evidence must be written at launch.
+
+    Usage telemetry reads ``cost_class`` back off ``route_history`` so that a
+    later ``workers.json`` edit cannot relabel what a past run cost. That only
+    holds if the launch path actually persists it -- independent review (Grok
+    Build) noted the endpoint tests seeded the field rather than proving the
+    orchestrator writes it.
+    """
+
+    repo = _git_worktree(tmp_path)
+    state = State(":memory:")
+    registry = load_registry()
+    _fake_running_supervisor(monkeypatch)
+    supervisor = Supervisor(registry=registry, repo_root=repo, state=state)
+
+    rb = runbooks.create_runbook(
+        state=state,
+        registry=registry,
+        name="x",
+        preset="test-fix",
+        source_ref="x",
+        branch="eng/test-runbook",
+        worktree=str(repo),
+        duration_minutes=120,
+    )
+    started = runbooks.start_runbook(
+        state=state, registry=registry, supervisor=supervisor, repo_root=repo, runbook_id=rb.id
+    )
+
+    attempt = state.get_usage_governance(started.id)["route_history"][-1]
+    worker = registry.get(attempt["worker"])
+    assert attempt["cost_class"], "a launched attempt must carry a real cost_class"
+    assert attempt["cost_class"] == worker.cost_class
+    # Recorded alongside the identity facts it has to stay consistent with.
+    assert attempt["provider"] == worker.provider
+    assert attempt["model"] == worker.effective_model
+
+
 def test_start_runbook_twice_is_rejected():
     state = State(":memory:")
     registry = load_registry()
