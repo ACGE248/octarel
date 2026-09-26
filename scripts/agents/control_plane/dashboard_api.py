@@ -64,6 +64,7 @@ from .remote_access import (
 from .routing import MODE_SINGLE_PRIMARY, compute_routing
 from .runbooks import list_presets
 from . import manager_chat as _manager_chat
+from . import usage_telemetry as _usage_telemetry
 from .steering import (
     DESTRUCTIVE_VERBS,
     nl_ai_route_available,
@@ -1929,6 +1930,51 @@ def create_app(
             "default_unattended_policy": "conserve",
             "records": ctx.state.list_usage_governance(),
             "policy_note": "Role/workflow policy is provider-independent. Quota may use an equivalent eligible provider; context is minimized first; safeguards block; none silently strengthens a model.",
+        }
+
+    @app.get("/api/usage-telemetry")
+    def usage_telemetry() -> dict[str, Any]:
+        """AO-style per-run model/session usage, context and cost (OCTAREL-UI-06, issue #25).
+
+        A read model over the durable usage-governance records the supervisor
+        already writes, joined with registry facts for the worker that ran.
+        Every metric carries the class that established it -- MEASURED,
+        DERIVED, UNKNOWN, NOT_EXPOSED or NOT_APPLICABLE -- so a figure Octarel
+        cannot establish is stated as unavailable rather than estimated.
+
+        Nothing here probes a provider or runs a worker.
+        """
+
+        rows: list[dict[str, Any]] = []
+        for record in ctx.state.list_usage_governance():
+            # The worker that actually ran is the most recent route-history
+            # entry; attributing usage to a configured default would misreport
+            # a run that fell back to a different worker.
+            history = record.get("route_history") or []
+            worker_name = None
+            for entry in reversed(history):
+                if isinstance(entry, dict) and entry.get("worker"):
+                    worker_name = str(entry["worker"])
+                    break
+            worker = ctx.registry.workers.get(worker_name) if worker_name else None
+            facts = _usage_telemetry.WorkerFacts(
+                worker=worker_name or "UNKNOWN",
+                provider=getattr(worker, "provider", None),
+                execution_system=getattr(worker, "execution_system", None),
+                model=(getattr(worker, "effective_model", None) or getattr(worker, "default_model", None)) or None,
+                cost_class=getattr(worker, "cost_class", None),
+            )
+            rows.append(
+                _usage_telemetry.build_row(record, facts=facts, project_id=ctx.selected_project_id)
+            )
+
+        return {
+            "rows": rows,
+            "unavailable_metrics": _usage_telemetry.unavailable_metrics(),
+            "note": (
+                "Cache-category tokens and effective context limits are not reported by any worker runtime "
+                "in this stack, so those metrics are NOT_EXPOSED rather than estimated."
+            ),
         }
 
     @app.get("/api/runbooks/presets")

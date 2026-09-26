@@ -555,6 +555,12 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
                     "failure_category": "QUOTA",
                 },
             ],
+            # OCTAREL-UI-06 (issue #25): exact CLI-reported counts on this
+            # record so the usage panel's MEASURED path is exercised alongside
+            # the UNKNOWN one on the other fixture runbook.
+            "telemetry_quality": "exact",
+            "input_tokens": 142800,
+            "output_tokens": 9310,
             "context_manifest": {},
         }
     )

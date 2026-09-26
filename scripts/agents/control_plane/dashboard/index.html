@@ -652,6 +652,17 @@
           <p class="hint">Every value below is either a real local CLI status query (never a billable call) or explicitly reported as unavailable — nothing here is estimated or invented.</p>
           <div id="usage-body" class="usage-list"></div>
         </div>
+        <!-- OCTAREL-UI-06 (issue #25): what a run actually consumed. Every
+             figure states how it was established; a metric this stack cannot
+             produce is labelled NOT_EXPOSED with its reason rather than being
+             estimated into something plausible. -->
+        <div class="card wide" id="card-usage-telemetry">
+          <div class="card-head tight">
+            <h2>Model &amp; session usage</h2>
+            <span class="hint" id="usage-telemetry-note"></span>
+          </div>
+          <div id="usage-telemetry-rows" class="entity-list">Loading…</div>
+        </div>
         <div class="card wide" id="card-usage-routing">
           <h2>Usage &amp; Routing</h2>
           <p class="hint">Role-first decisions and durable escalation history. Unattended runs conserve Codex unless explicitly eligible.</p>

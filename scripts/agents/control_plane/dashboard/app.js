@@ -469,6 +469,108 @@
     }
   }
 
+  // --------------------------------------------------- model & session usage
+
+  /* OCTAREL-UI-06 (issue #25). Renders /api/usage-telemetry. Each metric
+     arrives with the class that established it, and the class is shown next to
+     the value — a figure Octarel cannot establish reads NOT_EXPOSED with its
+     reason rather than appearing as a plausible number. */
+
+  /* "Input" is the total input the CLI reported. It is deliberately not
+     labelled "fresh input": without cache categories there is no way to know
+     how much of it was fresh versus a cache read, and calling it fresh would
+     assert something unmeasured. Fresh input and cache reads therefore appear
+     as their own explicitly unavailable metrics. */
+  const USAGE_METRIC_ORDER = [
+    ["input_tokens", "Input"],
+    ["output_tokens", "Output"],
+    ["total_tokens", "Tokens processed"],
+    ["fresh_input_tokens", "Fresh input"],
+    ["cache_read_tokens", "Cache reads"],
+    ["cache_hit_rate", "Cache hit rate"],
+    ["context_used_percent", "Context used"],
+    ["duration_seconds", "Duration"],
+    ["cost_usd", "Cost"],
+  ];
+
+  function usageMetricCell(label, cell) {
+    const known = cell.value !== null && cell.value !== undefined;
+    const display = known
+      ? (cell.unit === "tokens"
+          ? Number(cell.value).toLocaleString()
+          : cell.unit === "seconds"
+            ? `${Number(cell.value).toFixed(0)}s`
+            : cell.unit === "usd"
+              ? `$${Number(cell.value).toFixed(4)}`
+              : String(cell.value))
+      : cell.class;
+
+    return el("div", { class: `usage-metric${known ? "" : " is-unavailable"}` }, [
+      el("dt", { text: label }),
+      el("dd", { text: display }),
+      // The provenance travels with the number, never implied by its absence.
+      el("span", {
+        class: "usage-metric-class",
+        text: known ? cell.class : "",
+        title: cell.reason || cell.formula || cell.source || "",
+      }),
+      cell.reason && !known ? el("p", { class: "usage-metric-reason", text: cell.reason }) : null,
+    ]);
+  }
+
+  function renderUsageTelemetry(body) {
+    const root = document.getElementById("usage-telemetry-rows");
+    if (!root) return;
+    const rows = (body && body.rows) || [];
+    root.innerHTML = "";
+
+    const note = document.getElementById("usage-telemetry-note");
+    if (note) note.textContent = body && body.note ? body.note : "";
+
+    if (!rows.length) {
+      root.appendChild(el("p", { class: "hint", text: "No run has recorded usage yet." }));
+      return;
+    }
+
+    rows.forEach((row) => {
+      const a = row.attribution || {};
+      const route = row.route || {};
+      // Attribution is per row; figures from different workers are never
+      // merged into a single number.
+      const identity = [a.worker, a.provider, a.model].filter(Boolean).join(" · ");
+      root.appendChild(
+        el("article", { class: "entity-card usage-row" }, [
+          el("header", { class: "usage-row-head" }, [
+            el("strong", { text: a.runbook_id || a.task_id || "run" }),
+            el("span", { class: "usage-row-identity", text: identity || "worker UNKNOWN" }),
+            el("span", {
+              class: `status-pill ${route.billable ? "st-running" : "st-available"}`,
+              text: route.execution_route || "UNKNOWN",
+            }),
+          ]),
+          el(
+            "dl",
+            { class: "usage-metrics" },
+            USAGE_METRIC_ORDER.map(([key, label]) =>
+              row.metrics && row.metrics[key] ? usageMetricCell(label, row.metrics[key]) : null,
+            ),
+          ),
+        ]),
+      );
+    });
+  }
+
+  async function refreshUsageTelemetry() {
+    const root = document.getElementById("usage-telemetry-rows");
+    if (!root) return;
+    try {
+      renderUsageTelemetry(await getJSON("/api/usage-telemetry"));
+    } catch (err) {
+      root.innerHTML = "";
+      root.appendChild(el("p", { class: "hint", text: "Usage could not be read; nothing is estimated in its place." }));
+    }
+  }
+
   // --------------------------------------------------------- command palette
 
   /* OCTAREL-UI-04 (issue #23). A real cross-entity palette, not a filter over
@@ -4605,6 +4707,7 @@
         refreshRoadmap,
         refreshPriorityMatrix,
         refreshManagerRoute,
+        refreshUsageTelemetry,
         refreshTelemetry,
         refreshUsageRouting,
       ];

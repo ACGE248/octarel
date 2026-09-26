@@ -3028,3 +3028,60 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
   .manager-route { max-width: 100%; white-space: normal; }
   .manager-msg { max-width: 100%; }
 }
+
+/* -- model & session usage ------------------------------------------------
+   Each metric shows its value and the class that established it. An
+   unavailable metric is visibly quieter but never hidden: the point of the
+   panel is that it says what it cannot measure. */
+.usage-row { display: grid; gap: 12px; }
+.usage-row-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.usage-row-identity {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.usage-metric { display: grid; gap: 2px; min-width: 0; }
+.usage-metric dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.usage-metric dd {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.usage-metric-class {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.usage-metric-class:empty { display: none; }
+
+/* Unavailable: the label reads NOT_EXPOSED / UNKNOWN at normal text size
+   rather than as a large figure, so it cannot be mistaken for a measurement. */
+.usage-metric.is-unavailable dd {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+.usage-metric-reason { margin: 2px 0 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
