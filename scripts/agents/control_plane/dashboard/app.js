@@ -548,17 +548,19 @@
       // merged into a single number.
       /* A model filled in from the current registry is not what this run
          recorded, so it is marked rather than shown as fact. */
-      const modelLabel = a.model
-        ? a.model_class === "DERIVED"
-          ? `${a.model} (DERIVED)`
-          : a.model
-        : null;
+      const modelDerived = !!a.model && a.model_class !== "MEASURED";
+      const modelLabel = a.model ? (modelDerived ? `${a.model} (${a.model_class || "DERIVED"})` : a.model) : null;
       const identity = [a.worker, a.provider, modelLabel].filter(Boolean).join(" · ");
       root.appendChild(
         el("article", { class: "entity-card usage-row" }, [
           el("header", { class: "usage-row-head" }, [
             el("strong", { text: a.runbook_id || a.task_id || "run" }),
-            el("span", { class: "usage-row-identity", text: identity || "worker UNKNOWN" }),
+            el("span", {
+              class: "usage-row-identity",
+              text: identity || "worker UNKNOWN",
+              // Where the model attribution came from, when it was not this run's own record.
+              title: modelDerived && a.model_source ? a.model_source : "",
+            }),
             // Billable vs subscription is a routing fact, not a run state, so
             // it does not borrow the running/idle status colours.
             el("span", {

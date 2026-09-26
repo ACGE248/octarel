@@ -242,8 +242,9 @@ Rules:
 - Use null for verb when the sentence does not clearly map to exactly one allowed verb.
 - Never invent a verb that is not in the allowed list.
 - args keys are limited to: task_id, runbook_id, name, priority, count, reason.
-- quickstart_start requires args.key naming the Quick Start option; if you cannot
-  identify which option is meant, return verb null instead.
+- the single exception is quickstart_start, which takes args.key naming the Quick
+  Start option and nothing else; if you cannot identify which option is meant,
+  return verb null instead.
 - Do not explain your reasoning. Do not add fields.
 
 Allowed verbs:
