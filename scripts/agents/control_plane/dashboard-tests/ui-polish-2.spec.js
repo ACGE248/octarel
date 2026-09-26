@@ -178,6 +178,17 @@ test('mobile: the session bar and bottom nav never cover content on any view', a
   const views = ['overview', 'runs', 'flow', 'priority', 'tasks', 'agents', 'providers', 'steering', 'history', 'worktrees', 'system', 'terminal', 'settings', 'roadmap'];
   for (const view of views) {
     await navTo(page, `view-${view}`);
+    /* Some views fetch their content when they become visible, so scrolling
+       immediately would scroll a short page and then measure a tall one.
+       Wait for the document height to stop changing before scrolling. */
+    await expect
+      .poll(async () => {
+        const h = await page.evaluate(() => document.documentElement.scrollHeight);
+        await page.waitForTimeout(120);
+        const again = await page.evaluate(() => document.documentElement.scrollHeight);
+        return h === again;
+      }, { timeout: 10_000 })
+      .toBe(true);
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
     await page.waitForTimeout(150);
     const m = await page.evaluate(() => {
