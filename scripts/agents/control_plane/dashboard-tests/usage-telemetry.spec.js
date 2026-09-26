@@ -328,6 +328,52 @@ test('the unestablished billing chip stays visible against its own panel', async
   expect(outlined).not.toBe('none');
 });
 
+/* Round-2 review follow-ups (Grok Build, issue #42): three strings that were
+   changed without any assertion holding them in place. */
+
+test('a priced run whose billing is unknown is not told it was never billed', async ({ page, request, baseURL }) => {
+  /* The fixture's unclassified row uses a model the catalog cannot price, so
+     its estimate is unavailable and the note never renders. The dangerous
+     combination is an unclassified row that *can* be priced: it would have
+     claimed "Not a charge and not billed" about a run nobody classified. */
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    const row = body.rows.find((candidate) => candidate.billing.class === 'UNKNOWN');
+    row.metrics.estimated_api_equivalent_usd = {
+      value: 0.042, class: 'DERIVED', formula: 'x', source: null, reason: null, unit: 'usd',
+    };
+  });
+
+  const estimate = page
+    .locator('.usage-row', UNCLASSIFIED_ROW)
+    .locator('.usage-money-cell.is-estimate');
+  await expect(estimate.locator('.usage-money-value')).toContainText('~$0.04');
+  await expect(estimate).toContainText('not established');
+  // The claim it must never make about a run nobody could classify.
+  await expect(estimate).not.toContainText('not billed');
+});
+
+test('the window breakdown counts unclassified runs instead of dropping them', async ({ page }) => {
+  /* The parts used to sum to less than the stated total with nothing saying
+     why. The fixture seeds one run whose billing cannot be established. */
+  const count = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-window-count');
+  await expect(count).toContainText('billing unknown');
+  await expect(count).toContainText('5 run(s)');
+});
+
+test('runs counted in no window at all are stated, not silently dropped', async ({ page, request, baseURL }) => {
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    body.aggregates.excluded_undated_rows = 2;
+    body.aggregates.excluded_future_rows = 1;
+    body.aggregates.excluded_reason = 'no recorded end time';
+  });
+
+  const note = page.locator('#usage-aggregate-invariant');
+  await expect(note).toContainText('3 run(s) are counted in no window');
+  await expect(note).toContainText('no recorded end time');
+  // The separation rule is still stated alongside it.
+  await expect(note).toContainText('never added to actual API spend');
+});
+
 test('an unestablished money cell never renders as an amount', async ({ page, request, baseURL }) => {
   /* Same rule as the metric grid, applied where it matters most: a cell
      carrying a stray number with an UNKNOWN class must not become a figure. */
