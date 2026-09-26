@@ -562,7 +562,7 @@
 
   async function refreshUsageTelemetry() {
     const root = document.getElementById("usage-telemetry-rows");
-    if (!root) return;
+    if (!root || !isViewActive("view-providers")) return;
     try {
       renderUsageTelemetry(await getJSON("/api/usage-telemetry"));
     } catch (err) {
@@ -959,7 +959,7 @@
 
   async function refreshPriorityMatrix() {
     const root = document.getElementById("priority-columns");
-    if (!root) return;
+    if (!root || !isViewActive("view-priority")) return;
     try {
       const body = await getJSON(`/api/priority-matrix?mode=${encodeURIComponent(priorityMode)}`);
       renderPriorityMatrix(body);
@@ -1049,6 +1049,24 @@
 
   // --------------------------------------------------------------------- view switching
 
+  /* A panel that costs real work to produce should not be produced while it is
+     off-screen. /api/manager/route probes CLI presence on the filesystem and
+     loads the model catalog; /api/priority-matrix walks every configured role;
+     /api/usage-telemetry walks every durable usage record. Polling all three
+     every 2s regardless of what the operator is looking at was measurable load
+     for no benefit, so these refresh only while their view is visible and are
+     fetched immediately on switching to it. */
+  function isViewActive(viewId) {
+    const view = document.getElementById(viewId);
+    return !!view && !view.hidden;
+  }
+
+  const VIEW_SCOPED_REFRESH = {
+    "view-priority": () => refreshPriorityMatrix(),
+    "view-steering": () => refreshManagerRoute(),
+    "view-providers": () => refreshUsageTelemetry(),
+  };
+
   function showView(viewId) {
     document.querySelectorAll(".view").forEach((node) => {
       node.hidden = node.id !== viewId;
@@ -1069,6 +1087,12 @@
     applySearch(document.getElementById("global-search")?.value || "");
     if (viewId === "view-flow") requestAnimationFrame(() => drawFlowEdges());
     if (viewId === "view-terminal" && connectTerminalView) connectTerminalView();
+    // Populate a view-scoped panel now rather than waiting for the next poll,
+    // since it is skipped entirely while its view is hidden.
+    const scoped = VIEW_SCOPED_REFRESH[viewId];
+    if (scoped) {
+      try { scoped(); } catch (err) { console.warn(err); }
+    }
   }
 
   function initNav() {
@@ -5027,7 +5051,7 @@
 
   async function refreshManagerRoute() {
     const label = document.getElementById("manager-route");
-    if (!label) return;
+    if (!label || !isViewActive("view-steering")) return;
     try {
       const route = await getJSON("/api/manager/route");
       if (route.eligible) {
