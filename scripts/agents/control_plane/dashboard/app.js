@@ -4604,6 +4604,7 @@
         refreshRunEvidence,
         refreshRoadmap,
         refreshPriorityMatrix,
+        refreshManagerRoute,
         refreshTelemetry,
         refreshUsageRouting,
       ];
@@ -4843,8 +4844,15 @@
       evt.preventDefault();
       const text = input.value.trim();
       if (!text) return;
-      postJSON("/api/steering/parse", { text }).then(({ body }) => {
+      /* OCTAREL-UI-05 (issue #24): the Manager endpoint tries the deterministic
+         parser first, so a slash command still costs zero AI calls, and only
+         routes genuinely unrecognized text to an eligible interpreter. It
+         always returns a proposal — execution still goes through
+         /api/steering/execute and its server-enforced confirmation gate. */
+      appendManagerMessage("you", text);
+      postJSON("/api/manager/message", { text }).then(({ body }) => {
         if (!body) return;
+        appendManagerResponse(text, body);
         if (body.status === "PARSED") showProposal(text, body);
         else {
           showUnrecognized(body);
@@ -4852,6 +4860,85 @@
         }
       });
     });
+  }
+
+  // ------------------------------------------------------------- manager chat
+
+  /* The conversation thread. Each Manager turn is an execution card that names
+     the route that produced it — deterministic, or the actual
+     worker/provider/model that interpreted the sentence — so a fallback is
+     never an unexplained change of behaviour. */
+
+  function routeLabel(route) {
+    if (!route) return "unknown route";
+    if (route.kind === "deterministic") return "deterministic · no model call";
+    const parts = [route.worker, route.provider, route.model].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "no eligible interpreter";
+  }
+
+  function appendManagerMessage(who, text) {
+    const thread = document.getElementById("manager-thread");
+    if (!thread) return;
+    thread.appendChild(
+      el("li", { class: `manager-msg manager-msg-${who}` }, [
+        el("span", { class: "manager-who", text: who === "you" ? "You" : "Manager" }),
+        el("p", { class: "manager-text", text }),
+      ]),
+    );
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  function appendManagerResponse(text, body) {
+    const thread = document.getElementById("manager-thread");
+    if (!thread) return;
+    const route = body.route || {};
+    const parsed = body.status === "PARSED";
+
+    const children = [
+      el("span", { class: "manager-who", text: "Manager" }),
+      el("p", { class: "manager-text", text: body.preview || body.reason || "No action matched." }),
+    ];
+
+    if (parsed) {
+      children.push(
+        el("p", { class: "manager-plan" }, [
+          el("span", { class: "manager-verb", text: body.verb }),
+          el("code", { text: JSON.stringify(body.args || {}) }),
+        ]),
+      );
+    }
+    if (body.destructive) {
+      // Stated in the thread as well as the preview: natural language can
+      // propose a destructive action, never pre-authorize one.
+      children.push(
+        el("p", { class: "manager-destructive", text: "Destructive — requires explicit confirmation before it runs." }),
+      );
+    }
+    children.push(el("p", { class: "manager-route-line", text: `via ${routeLabel(route)}` }));
+
+    thread.appendChild(
+      el("li", { class: `manager-msg manager-msg-manager${parsed ? "" : " is-unmatched"}` }, children),
+    );
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  async function refreshManagerRoute() {
+    const label = document.getElementById("manager-route");
+    if (!label) return;
+    try {
+      const route = await getJSON("/api/manager/route");
+      if (route.eligible) {
+        label.textContent = `Interpreter: ${routeLabel(route)}`;
+        label.classList.remove("is-unavailable");
+      } else {
+        // Honest about being unavailable rather than silently deterministic-only.
+        label.textContent = `No interpreter available — ${route.reason || "unknown reason"}`;
+        label.classList.add("is-unavailable");
+      }
+    } catch (err) {
+      label.textContent = "Interpreter route could not be read";
+      label.classList.add("is-unavailable");
+    }
   }
 
   function executeProposal(text, proposal, input, clearPreview) {

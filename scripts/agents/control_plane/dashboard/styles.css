@@ -2957,3 +2957,74 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
   .palette-row { grid-template-columns: 70px minmax(0, 1fr); }
   .palette-detail { display: none; }
 }
+
+/* -- Manager Chat ---------------------------------------------------------
+   A real conversation thread. Each Manager turn names the route that produced
+   it, so a fallback to a different worker is visible rather than silent. */
+.manager-route {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+.manager-route.is-unavailable { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+
+.manager-thread {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.manager-thread:empty { display: none; }
+
+.manager-msg {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius-node);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  max-width: 88%;
+}
+.manager-msg-you { justify-self: end; background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 28%, transparent); }
+.manager-msg-manager { justify-self: start; }
+.manager-msg-manager.is-unmatched { border-style: dashed; }
+
+.manager-who {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.manager-text { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.manager-plan { margin: 4px 0 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.manager-verb {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+}
+.manager-plan code { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.manager-destructive { margin: 4px 0 0; font-size: 12px; color: var(--err); }
+.manager-route-line { margin: 2px 0 0; font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+
+@media (max-width: 767px) {
+  .manager-route { max-width: 100%; white-space: normal; }
+  .manager-msg { max-width: 100%; }
+}

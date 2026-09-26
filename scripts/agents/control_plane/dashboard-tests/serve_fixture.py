@@ -704,6 +704,28 @@ def _mount_test_token_route(app, private_key) -> None:
         return {"token": token}
 
 
+def _fixture_manager_invoker(argv, timeout):
+    """Deterministic stand-in for a natural-language interpreter.
+
+    Recognizes a couple of fixture phrases so the Manager Chat UI can be driven
+    end to end, and returns "no single matching command" for anything else.
+    Never spawns a process and never contacts a provider.
+    """
+
+    # Not argv[-1]: a worker's CLI template may place {prompt} anywhere, so
+    # scan the whole command rather than assuming it is the final argument.
+    lowered = " ".join(str(part) for part in (argv or [])).lower()
+    if "wind things down" in lowered:
+        # Maps to a destructive verb on purpose: the browser suite asserts that
+        # a natural-language destructive request still has to be confirmed.
+        reply = {"verb": "stop", "args": {"task_id": "fx-running-1"}, "summary": "Stop task fx-running-1"}
+    elif "take a break" in lowered:
+        reply = {"verb": "pause", "args": {"task_id": "fx-running-1"}, "summary": "Pause task fx-running-1"}
+    else:
+        reply = {"verb": None, "summary": "no single matching command"}
+    return 0, json.dumps(reply), ""
+
+
 def _mount_test_repo_root_route(app, ctx) -> None:
     """Test-only route: expose this fixture process's isolated repo_root so a
     Playwright spec running in the same host process's filesystem (see the
@@ -732,7 +754,16 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=True)
     ctx = build_fixture_context(root)
     remote_state, private_key = _build_remote_state(f"{args.host}:{args.port}")
-    app = create_app(ctx, roadmap_path=root / "docs" / "PRODUCT_ROADMAP.md", remote=remote_state)
+    app = create_app(
+        ctx,
+        roadmap_path=root / "docs" / "PRODUCT_ROADMAP.md",
+        remote=remote_state,
+        # OCTAREL-UI-05 (issue #24): Manager Chat's natural-language interpreter
+        # is a deterministic fake in the fixture. The browser suite must never
+        # make a live or billable provider call, and a fixed reply also keeps
+        # the assertions deterministic.
+        manager_invoker=_fixture_manager_invoker,
+    )
     _mount_test_token_route(app, private_key)
     _mount_test_repo_root_route(app, ctx)
 

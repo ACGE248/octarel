@@ -41,14 +41,29 @@ export async function navTo(page, viewId) {
   // so a resize can leave the target control mid-transition for a moment;
   // retry briefly instead of failing on a single instantaneous count() check.
   //
-  // A view that lives behind the mobile "More" sheet has no directly visible
-  // control at small viewports *by design*, so it gets only a short probe
-  // before falling through to the sheet. Waiting the full retry budget for
-  // each of those is pure dead time, and with enough such views it pushed the
-  // whole test past its timeout.
   const inSheet = VIEWS_IN_MORE_SHEET.has(viewId);
   const direct = page.locator(`[data-view="${viewId}"]:visible`);
-  const deadline = Date.now() + (inSheet ? 500 : 3000);
+
+  // On desktop every view has a directly visible rail control, including the
+  // sheet-backed ones, so try once immediately. On mobile a sheet-backed view
+  // has none by design and falls straight through — waiting out a retry budget
+  // for each of those added up to whole seconds per test.
+  if (inSheet) {
+    if (await direct.count()) {
+      try {
+        await direct.first().click({ timeout: 1000 });
+        return;
+      } catch {
+        // Fall through to the sheet rather than retrying a moving target.
+      }
+    }
+    await page.locator('#more-tab').click();
+    await expect(page.locator('#more-sheet')).toBeVisible();
+    await page.locator(`.more-item[data-view="${viewId}"]`).click();
+    return;
+  }
+
+  const deadline = Date.now() + 3000;
   while (Date.now() < deadline) {
     if (await direct.count()) {
       try {

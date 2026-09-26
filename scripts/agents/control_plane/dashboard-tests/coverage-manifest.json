@@ -193,8 +193,8 @@
     "Refresh"
   ],
   "view-steering": [
-    "/pause T# or pause task T#",
     "Commands / Help",
+    "Message the Manager or type / for commands…",
     "Send"
   ],
   "view-history": [

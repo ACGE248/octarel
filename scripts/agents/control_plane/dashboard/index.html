@@ -661,12 +661,21 @@
 
       <section class="view" id="view-steering" role="tabpanel" hidden>
         <div class="card wide" id="card-steering">
-          <h2>Steering</h2>
-          <p class="hint">Slash commands and recognized phrases run with zero AI. Anything else is shown as
-            unrecognized — it is never guessed or silently executed.</p>
+          <div class="card-head">
+            <div>
+              <h2>Manager</h2>
+              <p class="hint">Slash commands and recognized phrases run with zero AI. Anything else is routed to
+                the currently eligible worker to be interpreted — it is never guessed, and nothing runs until
+                you approve it.</p>
+            </div>
+            <!-- OCTAREL-UI-05 (issue #24): the route that would interpret a
+                 natural-language message, shown before anything is sent. -->
+            <span class="manager-route" id="manager-route" role="status">Checking interpreter route…</span>
+          </div>
+          <ul id="manager-thread" class="manager-thread" aria-label="Manager conversation" aria-live="polite"></ul>
           <form id="steering-form" class="steering-form">
-            <label for="steering-input" class="sr-only">Steering command</label>
-            <input id="steering-input" type="text" placeholder="/pause T1  or  pause task T1" autocomplete="off" />
+            <label for="steering-input" class="sr-only">Message the Manager</label>
+            <input id="steering-input" type="text" placeholder="Message the Manager or type / for commands…" autocomplete="off" />
             <button type="submit" class="send-btn">Send</button>
           </form>
           <details class="steering-help" id="steering-help">

@@ -1294,3 +1294,97 @@ def test_telemetry_checkpoints_are_scoped_to_the_selected_project(ctx, roadmap_f
     pr.select_project(ctx.state, "proj-b")
     paths = {row["worktree"] for row in client.get("/api/telemetry").json()["checkpoints"]}
     assert str(other) in paths and str(mine) not in paths
+
+
+# ----------------------------------------------------- Manager Chat endpoints
+
+
+def _manager_client(ctx, roadmap_file, reply: dict | None):
+    """A dashboard client whose Manager interpreter is a deterministic fake.
+
+    OCTAREL-UI-05 (issue #24): no test may make a live or billable provider
+    call, so the invoker seam is always filled with a local function here.
+    """
+
+    import json as _json
+
+    calls: list = []
+
+    def _invoke(argv, timeout):
+        calls.append(list(argv))
+        if reply is None:
+            return 1, "", "interpreter unavailable"
+        return 0, _json.dumps(reply), ""
+
+    app = create_app(ctx, roadmap_path=roadmap_file, manager_invoker=_invoke)
+    return TestClient(app), calls
+
+
+def test_manager_route_is_read_only_and_names_the_interpreter(client):
+    body = client.get("/api/manager/route").json()
+    assert "eligible" in body
+    assert "considered" in body
+    if body["eligible"]:
+        # Provider and model must be visible so the operator knows who read it.
+        assert body["worker"] and body["provider"] and body["model"]
+
+
+def test_manager_message_uses_the_deterministic_fast_path_without_any_model_call(ctx, roadmap_file):
+    client, calls = _manager_client(ctx, roadmap_file, reply={"verb": "stop", "args": {}})
+    body = client.post("/api/manager/message", json={"text": "/pause T1"}).json()
+
+    assert body["status"] == "PARSED"
+    assert body["verb"] == "pause"
+    assert body["route"]["kind"] == "deterministic"
+    # The interpreter was never reached: a recognized command costs zero AI.
+    assert calls == []
+
+
+def test_manager_message_routes_unrecognized_text_and_reports_the_route(ctx, roadmap_file):
+    client, calls = _manager_client(
+        ctx, roadmap_file, reply={"verb": "pause", "args": {"task_id": "T7"}, "summary": "pause T7"}
+    )
+    body = client.post("/api/manager/message", json={"text": "give T7 a rest please"}).json()
+
+    if body["route"].get("eligible"):
+        assert len(calls) == 1
+        assert body["status"] == "PARSED"
+        assert body["verb"] == "pause"
+        assert body["route"]["kind"] == "model"
+        assert body["route"]["worker"]
+    else:
+        # No eligible interpreter in this environment is an honest outcome.
+        assert body["status"] == "UNRECOGNIZED"
+        assert calls == []
+
+
+def test_manager_message_never_executes_a_destructive_proposal(ctx, roadmap_file):
+    """Natural language may propose a destructive action, never perform one."""
+
+    client, _ = _manager_client(
+        ctx, roadmap_file, reply={"verb": "stop", "args": {"task_id": "T1"}, "summary": "stop T1"}
+    )
+    body = client.post("/api/manager/message", json={"text": "shut it all down"}).json()
+
+    if body["status"] == "PARSED" and body["verb"] == "stop":
+        assert body["destructive"] is True
+        # The proposal carries no confirmation; execute still demands one.
+        blocked = client.post(
+            "/api/steering/execute", json={"verb": "stop", "args": {"task_id": "T1"}}
+        )
+        assert blocked.status_code == 409
+
+
+def test_manager_message_rejects_an_unknown_verb_from_the_interpreter(ctx, roadmap_file):
+    """A model reply is untrusted input and can never introduce a new verb."""
+
+    client, _ = _manager_client(ctx, roadmap_file, reply={"verb": "delete_everything", "args": {}})
+    body = client.post("/api/manager/message", json={"text": "do the thing"}).json()
+
+    assert body["status"] == "UNRECOGNIZED"
+    assert body["verb"] is None
+
+
+def test_manager_message_requires_text(client):
+    assert client.post("/api/manager/message", json={"text": "   "}).status_code == 400
+
