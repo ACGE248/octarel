@@ -290,6 +290,61 @@ def test_quota_failure_can_retry_to_policy_eligible_codex_without_model_escalati
     assert state.get_task(runbook.task_id).fallback_reason.startswith("quota:")
 
 
+def test_a_retry_records_the_billing_class_of_the_worker_that_actually_ran(tmp_path, monkeypatch):
+    """OCTAREL-UI-07 (issue #42): the fallback case that matters most.
+
+    Usage telemetry attributes a run to the newest route-history attempt and
+    reads ``cost_class`` off it, so a later ``workers.json`` edit cannot
+    relabel what a past run cost. A retry is exactly where the preferred
+    worker and the one that ran differ, so the retry path must persist the
+    replacement's billing class rather than leave the original's standing.
+    Re-review follow-up (Grok Build).
+    """
+
+    state = State(":memory:")
+    registry = load_registry()
+    reconcile_provider_states(state, registry)
+    monkeypatch.setattr("scripts.agents.registry.Worker.availability_reason", lambda self, probe=True: REASON_AVAILABLE)
+    monkeypatch.setattr("scripts.agents.control_plane.runbooks.validate_target", lambda **kwargs: None)
+    monkeypatch.setattr("scripts.agents.control_plane.runbooks.pid_is_alive", lambda pid: False)
+    runbook = Runbook(
+        id="RB-billing", name="Billing", preset="overnight-development", objective="work", source_ref="ENG-1",
+        branch="feature", worktree=str(tmp_path), parent_worker="claude-code", max_duration_minutes=120,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO, codex_policy="unrestricted",
+        codex_auto_eligible=True, max_codex_invocations=1, status=RUNBOOK_FAILED, task_id="RB-billing-session",
+    )
+    task = Task(
+        id=runbook.task_id, task_ref="ENG-1", role="primary-implementation", worker="claude-code",
+        state=TASK_FAILED, worktree=str(tmp_path), last_error="429 quota exhausted", launch_mode=LAUNCH_SESSION,
+        runbook_id=runbook.id, permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
+    )
+    state.upsert_runbook(runbook)
+    state.upsert_task(task)
+
+    class FakeSupervisor:
+        @staticmethod
+        def launch_task(relaunched):
+            relaunched.state = TASK_RUNNING
+            relaunched.pid = 4242
+            state.upsert_task(relaunched)
+            return relaunched
+
+    retry_runbook(
+        state=state, registry=registry, supervisor=FakeSupervisor(), repo_root=tmp_path,
+        runbook_id=runbook.id, worker_name="codex-build",
+    )
+
+    attempt = state.get_usage_governance(runbook.id)["route_history"][-1]
+    replacement = registry.get("codex-build")
+    assert attempt["worker"] == "codex-build"
+    assert attempt["cost_class"], "a retry attempt must carry a real cost_class"
+    assert attempt["cost_class"] == replacement.cost_class
+    # Recorded beside the identity facts telemetry prices the run from.
+    assert attempt["provider"] == replacement.provider
+    assert attempt["model"] == replacement.effective_model
+    assert attempt["from_worker"] == "claude-code"
+
+
 def test_codex_build_is_subscription_write_worker_separate_from_review():
     registry = load_registry()
     build = registry.get("codex-build")
