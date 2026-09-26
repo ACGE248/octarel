@@ -659,6 +659,53 @@ def test_a_one_sided_token_count_prices_nothing(input_tokens, output_tokens):
     assert m["actual_cost_usd"]["value"] is None
 
 
+@pytest.mark.parametrize(
+    ("label", "tokens"),
+    [
+        ("a string SQLite happily stored in an INTEGER column", ("1000", "10")),
+        ("a float", (1000.5, 10.5)),
+        ("a bool", (True, False)),
+    ],
+)
+def test_a_token_count_that_is_not_a_whole_number_prices_nothing(label, tokens):
+    """One malformed record must not take the whole panel down with it.
+
+    The arithmetic used to raise straight out of the money path, failing the
+    endpoint and hiding every other run's usage. ``_token_metrics`` already
+    refused to display such a value; the money path is now at least as strict.
+    """
+
+    m = money(METERED, input_tokens=tokens[0], output_tokens=tokens[1])
+    assert m["estimated_api_equivalent_usd"]["value"] is None, label
+    assert m["estimated_api_equivalent_usd"]["class"] == CLASS_UNKNOWN
+    assert m["actual_cost_usd"]["value"] is None
+
+
+def test_a_negative_token_count_is_refused_rather_than_understating_spend():
+    """A negative count is not missing evidence, it is wrong evidence."""
+
+    m = money(METERED, input_tokens=-5000, output_tokens=-100)
+    assert m["actual_cost_usd"]["value"] is None
+    assert m["estimated_api_equivalent_usd"]["value"] is None
+
+
+def test_an_unestablished_billing_class_never_claims_the_run_was_not_billed():
+    """Saying "not billed at these rates" is a claim, not a caveat.
+
+    It is only sayable where the classification establishes it. On an
+    unclassified route it asserts something unknown -- the mirror image of
+    reporting $0.00 spend for a run nobody could classify.
+    """
+
+    unknown = money(UNCLASSIFIED)["estimated_api_equivalent_usd"]["reason"]
+    assert "not established" in unknown
+    assert "was not billed at these rates" not in unknown
+
+    # ...while the classifications that do license the claim still make it.
+    for facts in (SUBSCRIPTION, FREE):
+        assert "not billed at these rates" in money(facts)["estimated_api_equivalent_usd"]["reason"]
+
+
 def test_the_cost_metric_is_no_longer_part_of_the_generic_metric_grid():
     """Money moved out of the interchangeable-looking cells on purpose."""
 

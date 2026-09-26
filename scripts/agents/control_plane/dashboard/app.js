@@ -506,6 +506,16 @@
     UNKNOWN: "is-unestablished",
   };
 
+  /* What the estimate may truthfully say about itself, per billing class.
+     "Not billed" is a claim, and only an established subscription or free
+     classification licenses it. */
+  const ESTIMATE_NOTES = {
+    SUBSCRIPTION_INCLUDED: "Approximate. Not a charge and not billed.",
+    FREE_TIER: "Approximate. Not a charge and not billed.",
+    API_BILLED: "Approximate. The actual charge is reported separately.",
+    UNKNOWN: "Approximate. Whether this run was charged is not established.",
+  };
+
   function usdText(value) {
     /* Sub-cent figures are common here, so two decimals would round most
        equivalent values to $0.00 and make the panel look empty. An exact zero
@@ -550,15 +560,15 @@
         "estimate",
         "Estimated API-equivalent value",
         estimate,
-        /* The note follows the route that ran. On an API-billed row the run
-           *was* billed at these rates, so "not billed" would be a false claim
-           about the run rather than a caveat about the cell. Independent
-           review (Grok Build, issue #42). */
+        /* The note follows the route that ran, in three cases. On an
+           API-billed row the run *was* billed at these rates, so "not billed"
+           is false; where billing was never established, "not billed" asserts
+           something unknown. Only a subscription or free classification
+           actually licenses that claim. Independent review (Grok Build,
+           issue #42). */
         estimate.value === null || estimate.value === undefined
           ? null
-          : billing.class === "API_BILLED"
-            ? "Approximate. The actual charge is reported separately."
-            : "Approximate. Not a charge and not billed.",
+          : ESTIMATE_NOTES[billing.class] || ESTIMATE_NOTES.UNKNOWN,
       ),
       el("div", { class: "usage-money-cell is-billing" }, [
         el("span", { class: "usage-money-label", text: "Billing" }),
@@ -649,11 +659,17 @@
               ]);
             }),
           ),
+          /* Independent review (Grok Build, issue #42): the breakdown listed
+             included/API-billed/free and silently omitted unclassified rows,
+             so the parts could add up to less than the total with nothing
+             saying why. A run whose billing is unknown is the one an operator
+             most needs to see, so it is never the category that disappears. */
           el("p", {
             class: "usage-window-count",
-            text: `${counts.rows || 0} run(s) · ${counts.subscription_included || 0} included · ${
-              counts.api_billed || 0
-            } API-billed · ${counts.free_tier || 0} free`,
+            text:
+              `${counts.rows || 0} run(s) · ${counts.subscription_included || 0} included · ` +
+              `${counts.api_billed || 0} API-billed · ${counts.free_tier || 0} free` +
+              (counts.billing_unknown ? ` · ${counts.billing_unknown} billing unknown` : ""),
           }),
         ]),
       );
@@ -704,7 +720,18 @@
     renderUsageAggregates(body && body.aggregates);
     const invariant = document.getElementById("usage-aggregate-invariant");
     if (invariant) {
-      invariant.textContent = (body && body.aggregates && body.aggregates.invariant) || "";
+      const aggregates = (body && body.aggregates) || {};
+      /* Rows counted in no window at all. The payload has always recorded
+         them; showing them is what stops the totals from looking complete
+         when they are not. Independent review (Grok Build, issue #42). */
+      const excluded =
+        (aggregates.excluded_undated_rows || 0) + (aggregates.excluded_future_rows || 0);
+      invariant.textContent = [
+        aggregates.invariant || "",
+        excluded ? `${excluded} run(s) are counted in no window: ${aggregates.excluded_reason}.` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
     }
     const pricingSource = document.getElementById("usage-pricing-provenance");
     if (pricingSource) {

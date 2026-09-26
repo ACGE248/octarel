@@ -152,6 +152,26 @@ def billing_for_route(execution_route: str) -> str:
     return _ROUTE_BILLING.get(execution_route, BILLING_UNKNOWN)
 
 
+# What the estimated API-equivalent value may truthfully say about itself, per
+# billing class. The subscription/free wording asserts the run was not billed;
+# that is only sayable where the classification establishes it.
+_EQUIVALENT_REASONS: dict[str, str] = {
+    BILLING_SUBSCRIPTION: (
+        "approximate API-equivalent value, not a charge: this run was not billed at these rates"
+    ),
+    BILLING_FREE: (
+        "approximate API-equivalent value, not a charge: this run was not billed at these rates"
+    ),
+    BILLING_API: (
+        "approximate API-equivalent value; the actual charge for this run is reported separately"
+    ),
+    BILLING_UNKNOWN: (
+        "approximate API-equivalent value only; how this run was billed is not established, "
+        "so whether it was charged at these rates is unknown"
+    ),
+}
+
+
 def metric(
     value: Any = None,
     *,
@@ -253,13 +273,35 @@ def _token_metrics(record: dict[str, Any]) -> dict[str, Any]:
     return cells
 
 
+def _countable(value: Any) -> int | None:
+    """A token count fit to multiply by a price, or nothing.
+
+    ``_token_metrics`` already refuses to display a non-integer count; the
+    money path must be at least as strict, because it divides and multiplies
+    rather than merely rendering. Independent review (Grok Build, issue #42)
+    found that a value SQLite happily stores in an INTEGER column but which is
+    not an ``int`` -- the column has affinity, not a constraint -- raised a
+    ``TypeError`` out of the arithmetic and failed the whole endpoint, hiding
+    every other run's usage because of one malformed record.
+
+    A negative count is refused for a different reason: it is not a fabricated
+    figure, it is a *wrong* one, and it would understate spend. Missing
+    evidence is always the safer answer than a number that reads as money and
+    is not.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
 def _token_usage(record: dict[str, Any]) -> TokenUsage:
     quality = str(record.get("telemetry_quality") or "unknown").lower()
     mode = {"exact": TOKEN_EXACT, "estimated": TOKEN_ESTIMATED}.get(quality, "UNKNOWN")
     return TokenUsage(
         mode=mode,
-        input_tokens=record.get("input_tokens"),
-        output_tokens=record.get("output_tokens"),
+        input_tokens=_countable(record.get("input_tokens")),
+        output_tokens=_countable(record.get("output_tokens")),
     )
 
 
@@ -319,15 +361,13 @@ def _equivalent_metric(
             f"{pricing.source} snapshot {pricing.fingerprint or 'unknown'}"
             f" refreshed {pricing.refreshed_at or 'unknown'}"
         ),
-        # Worded for the route that actually ran. On an API-billed row the run
-        # *was* billed at these rates, so a blanket "not billed at these rates"
-        # would be a false statement about the run rather than a caveat about
-        # the cell. Independent review (Grok Build, issue #42).
-        reason=(
-            "approximate API-equivalent value; the actual charge for this run is reported separately"
-            if billing_class == BILLING_API
-            else "approximate API-equivalent value, not a charge: this run was not billed at these rates"
-        ),
+        # Worded for the route that actually ran, in three cases rather than
+        # two. On an API-billed row the run *was* billed at these rates, so a
+        # blanket "not billed at these rates" is false. And where the billing
+        # class was never established, claiming the run was not billed asserts
+        # something unknown -- the same unsupported claim in the opposite
+        # direction. Independent review (Grok Build, issue #42).
+        reason=_EQUIVALENT_REASONS.get(billing_class, _EQUIVALENT_REASONS[BILLING_UNKNOWN]),
         unit="usd",
     )
 
