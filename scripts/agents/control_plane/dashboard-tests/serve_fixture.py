@@ -565,6 +565,52 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
         }
     )
 
+    # OCTAREL-UI-07 (issue #42): one usage record per billing class, so the
+    # browser suite can assert that a subscription-included run, an API-billed
+    # run, a free-route run and an unclassified one are each presented as what
+    # they are. The route history records cost_class the way a real run now
+    # does, which is also what makes these rows independent of whatever
+    # workers.json happens to say today.
+    for runbook_id, history, tokens in (
+        (
+            "fx-usage-api-billed",
+            [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
+            (80_000, 4_000),
+        ),
+        (
+            "fx-usage-free-route",
+            [
+                {
+                    "worker": "opencode2-gemini-flash-lite",
+                    "provider": "Google",
+                    "model": "google/gemini-3.5-flash-lite",
+                    "cost_class": "free-verified",
+                }
+            ],
+            (51_000, 2_400),
+        ),
+        (
+            # No cost_class anywhere, so billing cannot be established. This
+            # row exists to prove the panel says so instead of showing $0.00.
+            "fx-usage-unclassified",
+            [{"worker": "retired-worker", "provider": "Somebody", "model": "mystery-model"}],
+            (12_000, 800),
+        ),
+    ):
+        state.upsert_usage_governance(
+            {
+                "runbook_id": runbook_id,
+                "task_id": f"{runbook_id}-task",
+                "classification": "routine",
+                "codex_policy": "conserve",
+                "telemetry_quality": "exact",
+                "input_tokens": tokens[0],
+                "output_tokens": tokens[1],
+                "route_history": [{**history[0], "status": "SUCCEEDED", "ended_at": utc_now_iso()}],
+                "context_manifest": {},
+            }
+        )
+
     # This fixture deliberately seeds more concurrently RUNNING work (two
     # plain tasks plus two write session runbooks) than production's default
     # caps (ENG-AGENT-10) allow, specifically to make the dashboard's
@@ -732,6 +778,45 @@ def _fixture_manager_invoker(argv, timeout):
     return 0, json.dumps(reply), ""
 
 
+def _fixture_pricing_book():
+    """A fixed API-equivalent price list (OCTAREL-UI-07, issue #42).
+
+    The real loader reads whatever OpenCode catalog snapshot happens to be
+    cached on the machine, which would make every money assertion in the
+    browser suite depend on a developer's local state. This book is pinned
+    instead, and deliberately omits Anthropic so the "model the catalog does
+    not carry" path stays exercised alongside the priced ones.
+
+    Rates are the catalog's own units: US dollars per million tokens.
+    """
+
+    from scripts.agents.control_plane import pricing as _pricing
+    from scripts.agents.model_catalog import Catalog, CatalogModel
+
+    def model(model_id: str, cost: dict) -> CatalogModel:
+        provider_id, _, bare = model_id.partition("/")
+        return CatalogModel(
+            id=model_id, provider_id=provider_id, model_id=bare, display_name=bare, family="",
+            status="active", api_url="", context_limit=200000, output_limit=8192, cost=cost,
+            credential="api", cost_class="metered", cost_reason="", capable=True, capability_reasons=(),
+        )
+
+    return _pricing.book_from_catalog(
+        Catalog(
+            status="ok",
+            reason="fixture",
+            opencode_version="fixture",
+            refreshed_at=utc_now_iso(),
+            credentials_status="ok",
+            models=(
+                model("xai/grok-4.6", {"input": 3.0, "output": 15.0}),
+                model("openai/gpt-5.6-sol", {"input": 1.25, "output": 10.0}),
+                model("google/gemini-3.5-flash-lite", {"input": 0.1, "output": 0.4}),
+            ),
+        )
+    )
+
+
 def _mount_test_repo_root_route(app, ctx) -> None:
     """Test-only route: expose this fixture process's isolated repo_root so a
     Playwright spec running in the same host process's filesystem (see the
@@ -769,6 +854,9 @@ def main() -> int:
         # make a live or billable provider call, and a fixed reply also keeps
         # the assertions deterministic.
         manager_invoker=_fixture_manager_invoker,
+        # OCTAREL-UI-07 (issue #42): a pinned price list, so money figures in
+        # the browser suite never depend on the host's cached catalog.
+        pricing_loader=_fixture_pricing_book,
     )
     _mount_test_token_route(app, private_key)
     _mount_test_repo_root_route(app, ctx)

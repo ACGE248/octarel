@@ -661,6 +661,13 @@
             <h2>Model &amp; session usage</h2>
             <span class="hint" id="usage-telemetry-note"></span>
           </div>
+          <!-- OCTAREL-UI-07 (issue #42): value and spend, side by side and
+               never combined. The estimated figures say what the tokens would
+               have been worth at public API rates; only the last row is money
+               that actually left an account. -->
+          <div id="usage-aggregates" class="usage-aggregates"></div>
+          <p class="hint usage-invariant" id="usage-aggregate-invariant"></p>
+          <p class="hint usage-invariant" id="usage-pricing-provenance"></p>
           <div id="usage-telemetry-rows" class="entity-list">Loading…</div>
         </div>
         <div class="card wide" id="card-usage-routing">

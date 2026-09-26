@@ -3086,6 +3086,106 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
 }
 .usage-metric-reason { margin: 2px 0 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
 
+/* -- estimated value vs. actual cost (OCTAREL-UI-07, issue #42) ------------
+   These two figures must be impossible to confuse, so they differ on every
+   axis a glance can use: position (their own block, above the metric grid),
+   weight, colour, and a leading tilde on anything approximate. Every value
+   here is a token declared in the same three blocks as the rest of the sheet,
+   so light and dark stay structurally identical. */
+.usage-money {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.usage-money-cell { display: grid; gap: 4px; align-content: start; min-width: 0; }
+.usage-money-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.usage-money-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* An estimate is quieter and never uses the ink an actual charge gets. */
+.usage-money-cell.is-estimate .usage-money-value { color: var(--info); font-weight: 600; }
+/* Actual money is the most emphatic figure in the block, because it is the
+   only one here that describes a real charge. */
+.usage-money-cell.is-actual .usage-money-value { color: var(--text); }
+.usage-money-cell.is-unavailable .usage-money-value {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+.usage-money-note { font-size: 10px; line-height: 1.4; color: var(--muted); }
+.usage-money-note:empty { display: none; }
+.usage-pricing-source {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* Who paid. Distinct from the route pill above it, which says how the work
+   was executed rather than how it was billed. */
+.billing-chip {
+  justify-self: start;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.billing-chip.is-subscription { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.billing-chip.is-api { color: var(--accent-ink); background: var(--accent-soft); }
+.billing-chip.is-free { color: var(--info); background: color-mix(in srgb, var(--info) 13%, transparent); }
+.billing-chip.is-unestablished { color: var(--muted); background: var(--surface-2); }
+
+/* Per-window totals. The spend row is separated by a rule from the value rows
+   above it, so the grouping itself says these are not one column of numbers
+   waiting to be added up. */
+.usage-aggregates {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+}
+.usage-aggregates:empty { display: none; }
+.usage-window {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.usage-window h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.usage-window-rows { display: grid; gap: 6px; margin: 0; }
+.usage-agg { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.usage-agg dt { font-size: 11px; color: var(--muted); }
+.usage-agg dd { margin: 0; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage-agg.is-estimate dd { color: var(--info); }
+.usage-agg.is-actual {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.usage-agg.is-actual dt { color: var(--text); font-weight: 600; }
+.usage-agg.is-unavailable dd { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+.usage-window-count { margin: 8px 0 0; font-size: 10px; line-height: 1.4; color: var(--muted); }
+.usage-invariant:empty { display: none; }
+
 /* Review follow-ups (OCTAREL-UI-04): states that must not borrow another
    meaning's styling. */
 .agent-activity-chip.neutral { color: var(--muted); background: var(--surface-2); }

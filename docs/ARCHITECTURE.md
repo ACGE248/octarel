@@ -103,9 +103,29 @@ exposed; a hit rate is never approximated. No runtime reports an effective conte
 catalog's per-model `context_limit` is a fact about a model, not the limit the active worker ran under -- so
 context utilization is not exposed rather than inferred from a model name.
 
-Dollar cost is produced only for an API route with both a pricing snapshot and known token counts.
-Subscription and free routes report not-applicable with the reason; a `$0.00` there would imply API pricing
-that does not apply to a subscription-backed CLI invocation.
+### Value versus spend
+
+Money is two figures, never one (OCTAREL-UI-07, issue #42). Every row reports an **estimated
+API-equivalent value** -- what its tokens would have cost at public API rates, on any route, always derived
+and always announced as an approximation -- alongside an **actual incremental API cost**, which is what the
+run added to a bill. They are separate fields in the read model, not one value formatted twice, and the
+aggregates never add one to the other.
+
+Which of the two is meaningful is decided by a **billing class** derived from the worker's `cost_class`
+through the execution route routing already uses: subscription-included, API-billed, free tier, or unknown.
+A subscription or free route reports `$0.00` incremental cost *because that classification establishes it*;
+an unclassified route reports unknown, never `$0.00`, since missing evidence is not a claim that a run was
+free. A run records its `cost_class` in `route_history` at launch, so a later `workers.json` edit cannot
+relabel what past runs cost, and a fallback is attributed to the billing class that actually executed.
+
+Rates come from the OpenCode model catalog (`control_plane/pricing.py`), which is already the authority
+`model_catalog.classify_cost` uses to decide whether a route is metered -- there is no second price table to
+drift out of step with it. A model resolves by exact catalog id or by its provider-qualified id and by
+nothing else; Anthropic and DeepSeek are absent from the catalog, so their runs report the estimate as
+unavailable with that reason rather than a guess. An actual charge additionally requires **exact**
+provider-reported token counts: a local character-length approximation can inform an explicitly approximate
+value, but never an assertion about what someone was billed. A pricing snapshot is not billing evidence, and
+its provenance travels separately all the way to the UI.
 
 ## Continuous overnight advancement
 

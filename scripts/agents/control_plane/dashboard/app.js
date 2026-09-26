@@ -490,10 +490,156 @@
     ["cache_hit_rate", "Cache hit rate"],
     ["context_used_percent", "Context used"],
     ["duration_seconds", "Duration"],
-    ["cost_usd", "Cost"],
   ];
 
   const USAGE_ESTABLISHED = new Set(["MEASURED", "DERIVED"]);
+
+  /* OCTAREL-UI-07 (issue #42): money is deliberately *not* in the metric grid
+     above. An approximate equivalent value and an actual charge are different
+     kinds of claim, and putting them in a row of interchangeable-looking cells
+     is exactly how they get confused. They get their own block, their own
+     typography, and wording that states which is which every time. */
+  const BILLING_CHIP_CLASS = {
+    SUBSCRIPTION_INCLUDED: "is-subscription",
+    API_BILLED: "is-api",
+    FREE_TIER: "is-free",
+    UNKNOWN: "is-unestablished",
+  };
+
+  function usdText(value) {
+    /* Sub-cent figures are common here, so two decimals would round most
+       equivalent values to $0.00 and make the panel look empty. An exact zero
+       is the exception: "$0.00" is the whole claim being made on a
+       subscription or free route, and "$0.0000" only makes it look uncertain. */
+    const amount = Number(value);
+    if (amount === 0) return "$0.00";
+    return Math.abs(amount) >= 0.01 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(4)}`;
+  }
+
+  function usageMoneyCell(kind, label, cell, note) {
+    const known =
+      USAGE_ESTABLISHED.has(cell.class) && cell.value !== null && cell.value !== undefined;
+    /* The tilde is load-bearing: an estimate never renders as a bare amount,
+       so a glance can never read it as a figure someone was charged. */
+    const display = known ? `${kind === "estimate" ? "~" : ""}${usdText(cell.value)}` : cell.class;
+
+    return el("div", { class: `usage-money-cell is-${kind}${known ? "" : " is-unavailable"}` }, [
+      el("span", { class: "usage-money-label", text: label }),
+      el("span", { class: "usage-money-value", text: display }),
+      el("span", {
+        class: "usage-money-note",
+        text: note || (known ? cell.formula || "" : cell.reason || ""),
+        title: cell.reason || cell.formula || cell.source || "",
+      }),
+    ]);
+  }
+
+  function usageMoneyBlock(row) {
+    const metrics = row.metrics || {};
+    const billing = row.billing || {};
+    const pricing = row.pricing || {};
+    const estimate = metrics.estimated_api_equivalent_usd || { value: null, class: "UNKNOWN" };
+    const actual = metrics.actual_cost_usd || { value: null, class: "UNKNOWN" };
+    const chip = BILLING_CHIP_CLASS[billing.class] || BILLING_CHIP_CLASS.UNKNOWN;
+
+    return el("div", { class: "usage-money" }, [
+      usageMoneyCell(
+        "estimate",
+        "Estimated API-equivalent value",
+        estimate,
+        estimate.value !== null && estimate.value !== undefined
+          ? "Approximate. Not a charge and not billed."
+          : null,
+      ),
+      el("div", { class: "usage-money-cell is-billing" }, [
+        el("span", { class: "usage-money-label", text: "Billing" }),
+        el("span", {
+          class: `billing-chip ${chip}`,
+          text: billing.label || "Billing not established",
+          title: billing.reason || "",
+        }),
+        el("span", {
+          class: "usage-money-note",
+          // How well established the classification is. An inferred billing
+          // class is weaker evidence than one the run recorded, and the
+          // operator gets to see which they are reading.
+          text: billing.source || "no billing classification for this route",
+          title: billing.reason || "",
+        }),
+      ]),
+      usageMoneyCell("actual", "Actual incremental API cost", actual, null),
+      // Where the rates came from, never where the billing facts came from.
+      el("p", {
+        class: "usage-pricing-source",
+        text:
+          pricing.status === "ok"
+            ? `Rates: ${pricing.source} · ${pricing.catalog_model_id}${
+                pricing.stale ? " · snapshot may be out of date" : ""
+              }`
+            : `Rates unavailable: ${pricing.reason || "no pricing snapshot covers this model"}`,
+        title: pricing.refreshed_at ? `Snapshot refreshed ${pricing.refreshed_at}` : "",
+      }),
+    ]);
+  }
+
+  const USAGE_WINDOW_LABELS = [
+    ["today", "Today"],
+    ["week", "This week"],
+    ["month", "This month"],
+  ];
+
+  /* The aggregate rows. Value totals and the spend total are separated by an
+     explicit rule in the markup as well as in wording, because the whole
+     reason these numbers exist is that they must not be added up. */
+  const USAGE_AGGREGATE_ROWS = [
+    ["subscription_equivalent_usd", "Included value (est.)", "estimate"],
+    ["free_equivalent_usd", "Free-route value (est.)", "estimate"],
+    ["api_equivalent_usd", "API-billed value (est.)", "estimate"],
+    ["actual_api_spend_usd", "Actual API spend", "actual"],
+  ];
+
+  function renderUsageAggregates(aggregates) {
+    const root = document.getElementById("usage-aggregates");
+    if (!root) return;
+    root.innerHTML = "";
+    if (!aggregates || !aggregates.windows) return;
+
+    USAGE_WINDOW_LABELS.forEach(([key, label]) => {
+      const bucket = aggregates.windows[key];
+      if (!bucket) return;
+      const counts = bucket.counts || {};
+      root.appendChild(
+        el("section", { class: "usage-window" }, [
+          el("h3", { text: label }),
+          el(
+            "dl",
+            { class: "usage-window-rows" },
+            USAGE_AGGREGATE_ROWS.map(([metricKey, metricLabel, kind]) => {
+              const cell = bucket[metricKey] || { value: null, class: "UNKNOWN" };
+              const known =
+                USAGE_ESTABLISHED.has(cell.class) && cell.value !== null && cell.value !== undefined;
+              return el("div", { class: `usage-agg is-${kind}${known ? "" : " is-unavailable"}` }, [
+                el("dt", { text: metricLabel }),
+                el("dd", {
+                  text: known ? `${kind === "estimate" ? "~" : ""}${usdText(cell.value)}` : cell.class,
+                  // Coverage travels with the total: a small number because
+                  // little was used reads differently from a small number
+                  // because most rows could not be priced.
+                  title: [cell.formula, cell.source, cell.reason].filter(Boolean).join(" — "),
+                }),
+              ]);
+            }),
+          ),
+          el("p", {
+            class: "usage-window-count",
+            text: `${counts.rows || 0} run(s) · ${counts.subscription_included || 0} included · ${
+              counts.api_billed || 0
+            } API-billed · ${counts.free_tier || 0} free`,
+          }),
+        ]),
+      );
+    });
+  }
 
   function usageMetricCell(label, cell) {
     /* The class decides, not the presence of a value. A cell classed
@@ -536,6 +682,22 @@
     const note = document.getElementById("usage-telemetry-note");
     if (note) note.textContent = body && body.note ? body.note : "";
 
+    renderUsageAggregates(body && body.aggregates);
+    const invariant = document.getElementById("usage-aggregate-invariant");
+    if (invariant) {
+      invariant.textContent = (body && body.aggregates && body.aggregates.invariant) || "";
+    }
+    const pricingSource = document.getElementById("usage-pricing-provenance");
+    if (pricingSource) {
+      const source = (body && body.pricing_source) || {};
+      pricingSource.textContent =
+        source.status === "ok"
+          ? `Estimates priced from the ${source.source}, snapshot refreshed ${
+              source.refreshed_at || "at an unknown time"
+            }${source.stale ? " (may be out of date)" : ""}.`
+          : `No pricing snapshot: ${source.reason || "estimates are unavailable"}.`;
+    }
+
     if (!rows.length) {
       root.appendChild(el("p", { class: "hint", text: "No run has recorded usage yet." }));
       return;
@@ -568,6 +730,7 @@
               text: route.execution_route || "UNKNOWN",
             }),
           ]),
+          usageMoneyBlock(row),
           el(
             "dl",
             { class: "usage-metrics" },
@@ -599,6 +762,12 @@
       root.innerHTML = "";
       const note = document.getElementById("usage-telemetry-note");
       if (note) note.textContent = "";
+      /* A failed read must not leave last poll's totals standing beside a
+         "could not be read" message: stale money figures are worse than none. */
+      ["usage-aggregates", "usage-aggregate-invariant", "usage-pricing-provenance"].forEach((id) => {
+        const node = document.getElementById(id);
+        if (node) node.textContent = "";
+      });
       root.appendChild(el("p", { class: "hint", text: "Usage could not be read; nothing is estimated in its place." }));
     }
   }

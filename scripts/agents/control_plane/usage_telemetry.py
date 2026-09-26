@@ -15,9 +15,11 @@ Every metric is returned with a class:
 ``NOT_EXPOSED``
     Nothing in the current stack can produce it, with the reason.
 ``NOT_APPLICABLE``
-    Meaningless for this route -- a subscription-backed CLI invocation has no
-    per-call dollar cost, so reporting ``$0.00`` would imply API pricing that
-    does not apply.
+    Meaningless for this route. Cost no longer uses this class: issue #42
+    replaced "a subscription route has no dollar figure" with an explicit
+    billing class plus two separate money fields, which says more and says it
+    more precisely. The class stays in the vocabulary because it is part of
+    the published contract and consumers already render it.
 
 Inventory behind those classes, as of this change:
 
@@ -33,22 +35,57 @@ Inventory behind those classes, as of this change:
   model rather than the limit the active worker ran under, and the design
   specification forbids guessing a context window from a model name. Context
   utilization is therefore ``NOT_EXPOSED`` until a runtime reports it.
-* Dollar cost is only ever produced for an API route with both a pricing
-  snapshot and known token counts; subscription and free routes report
-  ``NOT_APPLICABLE`` with the reason.
+* Money is reported as **two separate fields** -- see below. Neither is ever
+  folded into the other.
+
+Estimated value versus actual cost (OCTAREL-UI-07, issue #42)
+-------------------------------------------------------------
+
+Subscription-backed work has a real API-equivalent value: the same tokens
+bought on the public API would have cost something, and knowing roughly what
+is useful. Presenting that number as *spend* would be a lie. So every row
+carries two independent money cells, computed from different inputs, that are
+never added together:
+
+``estimated_api_equivalent_usd``
+    What these tokens would have cost at public API rates, on any route.
+    Always ``DERIVED`` -- an informational approximation, never an invoice,
+    never a charge, and never accumulated into actual spend.
+``actual_cost_usd``
+    What this run actually added to a bill. ``$0.00`` on a subscription or
+    free route *once that billing classification is established*, a computed
+    figure on an API route with trustworthy evidence, and ``UNKNOWN`` when the
+    billing class itself is unknown -- an unclassified route never reports
+    ``$0.00``, because "we do not know" is not "free".
+
+"Trustworthy evidence" for an actual charge means **exact** provider-reported
+token counts plus a pricing snapshot. An ``ESTIMATED`` count is a local
+character-length approximation: good enough to inform an explicitly
+approximate equivalent value, not good enough to assert what someone was
+charged. That asymmetry is why the two fields exist separately.
+
+Billing class comes from the worker's ``cost_class``; rates come from a
+pricing snapshot (``pricing.py``). They are tracked apart all the way to the
+UI. A price says what a model advertises, a billing class says who paid, and
+conflating the two is exactly how a subscription session gets mislabelled as
+API spend.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass
 from typing import Any
 
+from .pricing import ModelPricing
 from .telemetry import (
     ROUTE_API,
     ROUTE_FREE,
     ROUTE_SUBSCRIPTION,
+    ROUTE_UNKNOWN,
     TOKEN_ESTIMATED,
     TOKEN_EXACT,
+    PricingSnapshot,
     TokenUsage,
     compute_cost,
     execution_route_for_cost_class,
@@ -70,6 +107,49 @@ REASON_NO_CONTEXT_LIMIT = (
     "the active worker runtime does not report an effective context limit; a "
     "limit is never inferred from a model name"
 )
+
+# ------------------------------------------------------------ billing class
+#
+# Who paid, as distinct from what the model costs. Derived from the worker's
+# ``cost_class`` through the execution route that routing already uses, so
+# there is no second classifier to drift out of step with it.
+
+BILLING_SUBSCRIPTION = "SUBSCRIPTION_INCLUDED"
+BILLING_API = "API_BILLED"
+BILLING_FREE = "FREE_TIER"
+BILLING_UNKNOWN = "UNKNOWN"
+
+_ROUTE_BILLING: dict[str, str] = {
+    ROUTE_SUBSCRIPTION: BILLING_SUBSCRIPTION,
+    ROUTE_API: BILLING_API,
+    ROUTE_FREE: BILLING_FREE,
+    ROUTE_UNKNOWN: BILLING_UNKNOWN,
+}
+
+# The operator-facing wording. A free route says "free", never "included with
+# a subscription": both cost nothing, but only one of them is covered by
+# something the operator is paying for, and claiming a subscription covers a
+# free-tier route would misdescribe what the account is buying.
+BILLING_LABELS: dict[str, str] = {
+    BILLING_SUBSCRIPTION: "Included with subscription",
+    BILLING_API: "API-billed",
+    BILLING_FREE: "Free tier",
+    BILLING_UNKNOWN: "Billing not established",
+}
+
+BILLING_REASONS: dict[str, str] = {
+    BILLING_SUBSCRIPTION: "subscription-backed CLI session: tokens are covered by the subscription",
+    BILLING_API: "metered API route: tokens add to an API bill",
+    BILLING_FREE: "free route: the provider charges nothing for these tokens",
+    BILLING_UNKNOWN: (
+        "no cost_class maps this route to a billing class, so whether these tokens "
+        "were charged is unknown"
+    ),
+}
+
+
+def billing_for_route(execution_route: str) -> str:
+    return _ROUTE_BILLING.get(execution_route, BILLING_UNKNOWN)
 
 
 def metric(
@@ -173,31 +253,184 @@ def _token_metrics(record: dict[str, Any]) -> dict[str, Any]:
     return cells
 
 
-def _cost_metric(facts: WorkerFacts, record: dict[str, Any]) -> dict[str, Any]:
-    """Dollar cost, or the reason there is no meaningful dollar figure."""
-
+def _token_usage(record: dict[str, Any]) -> TokenUsage:
     quality = str(record.get("telemetry_quality") or "unknown").lower()
     mode = {"exact": TOKEN_EXACT, "estimated": TOKEN_ESTIMATED}.get(quality, "UNKNOWN")
-    usage = TokenUsage(
+    return TokenUsage(
         mode=mode,
         input_tokens=record.get("input_tokens"),
         output_tokens=record.get("output_tokens"),
     )
+
+
+def _as_snapshot(pricing: ModelPricing, worker: str) -> PricingSnapshot:
+    """Adapt a catalog-derived rate to the existing cost-accounting contract."""
+
+    return PricingSnapshot(
+        version=f"{pricing.source} @ {pricing.refreshed_at or 'unknown'}",
+        worker=worker,
+        model=pricing.catalog_model_id,
+        input_per_1k_usd=pricing.input_per_1k_usd,
+        output_per_1k_usd=pricing.output_per_1k_usd,
+    )
+
+
+def _equivalent_metric(
+    facts: WorkerFacts,
+    record: dict[str, Any],
+    pricing: ModelPricing | None,
+    pricing_reason: str | None,
+) -> dict[str, Any]:
+    """What these tokens would have cost at public API rates, on any route.
+
+    Deliberately route-blind. The entire point of this cell is that a
+    subscription-backed run *does* get a number here, so an operator can see
+    the value of what the subscription covered. It is always ``DERIVED``: it
+    is arithmetic over an advertised rate, never a record of a charge.
+    """
+
+    usage = _token_usage(record)
+    if pricing is None:
+        return metric(
+            klass=CLASS_UNKNOWN,
+            reason=pricing_reason or "no pricing is available for this model, so no equivalent value is estimated",
+            unit="usd",
+        )
+    if usage.mode == "UNKNOWN" or usage.input_tokens is None or usage.output_tokens is None:
+        return metric(
+            klass=CLASS_UNKNOWN,
+            reason="token counts are UNKNOWN for this run, so there is nothing to price",
+            unit="usd",
+        )
+
+    usd = (usage.input_tokens / 1000.0) * pricing.input_per_1k_usd
+    usd += (usage.output_tokens / 1000.0) * pricing.output_per_1k_usd
+    basis = "provider-reported" if usage.mode == TOKEN_EXACT else "locally approximated"
+    return metric(
+        round(usd, 6),
+        klass=CLASS_DERIVED,
+        # Worded so the two money cells never read identically, even on an
+        # API-billed row where the arithmetic happens to be the same.
+        formula=(
+            f"API-equivalent value: {basis} tokens x {pricing.source} rates "
+            f"for {pricing.catalog_model_id}"
+        ),
+        source=(
+            f"{pricing.source} snapshot {pricing.fingerprint or 'unknown'}"
+            f" refreshed {pricing.refreshed_at or 'unknown'}"
+        ),
+        reason=(
+            "approximate API-equivalent value, not a charge: this run was not billed at these rates"
+        ),
+        unit="usd",
+    )
+
+
+def _actual_cost_metric(
+    facts: WorkerFacts,
+    record: dict[str, Any],
+    billing_class: str,
+    pricing: ModelPricing | None,
+    pricing_reason: str | None,
+) -> dict[str, Any]:
+    """What this run actually added to a bill, or why that is not known.
+
+    ``$0.00`` is an assertion, not a default. It is made only where the
+    billing classification actually establishes that nothing was charged --
+    a subscription-included or free route. An unclassified route reports
+    ``UNKNOWN``; reporting zero there would turn missing evidence into a
+    claim that the run was free.
+    """
+
+    provenance = (
+        "billing class recorded by the run"
+        if facts.cost_class_from_record
+        else "billing class from the current registry configuration for this worker"
+    )
+
+    if billing_class == BILLING_SUBSCRIPTION:
+        return metric(
+            0.0,
+            klass=CLASS_DERIVED,
+            formula="subscription-included route: no per-token API charge",
+            source=provenance,
+            unit="usd",
+        )
+    if billing_class == BILLING_FREE:
+        return metric(
+            0.0,
+            klass=CLASS_DERIVED,
+            formula="free route: the provider charges nothing for these tokens",
+            source=provenance,
+            unit="usd",
+        )
+    if billing_class != BILLING_API:
+        return metric(klass=CLASS_UNKNOWN, reason=BILLING_REASONS[BILLING_UNKNOWN], unit="usd")
+
+    # API-billed. A charge is only asserted from evidence strong enough to
+    # support it: exact provider-reported counts plus a rate.
+    usage = _token_usage(record)
+    if usage.mode == TOKEN_ESTIMATED:
+        return metric(
+            klass=CLASS_UNKNOWN,
+            reason=(
+                "token counts are a local approximation rather than a provider count; "
+                "an actual charge is never derived from an approximation (the estimated "
+                "API-equivalent value is reported separately)"
+            ),
+            unit="usd",
+        )
+    if pricing is None:
+        return metric(
+            klass=CLASS_UNKNOWN,
+            reason=pricing_reason or "API route but no pricing snapshot covers this model",
+            unit="usd",
+        )
     result = compute_cost(
         worker_cost_class=facts.cost_class or "",
         token_usage=usage,
-        # No pricing snapshot is configured in this deployment; compute_cost
-        # returns None with that reason rather than inventing a rate.
-        pricing=None,
+        pricing=_as_snapshot(pricing, facts.worker),
     )
-    if result.usd is not None:
-        return metric(result.usd, klass=CLASS_DERIVED, formula="tokens x pricing snapshot", unit="usd")
+    if result.usd is None:
+        return metric(klass=CLASS_UNKNOWN, reason=result.reason, unit="usd")
+    return metric(
+        result.usd,
+        klass=CLASS_DERIVED,
+        formula=(
+            f"actual API charge: provider-reported tokens x {pricing.source} rates "
+            f"for {pricing.catalog_model_id}"
+        ),
+        source=f"{provenance}; {result.reason}",
+        unit="usd",
+    )
 
-    route = result.route
-    if route in (ROUTE_SUBSCRIPTION, ROUTE_FREE):
-        # Never imply API pricing for a subscription-backed or free CLI route.
-        return metric(klass=CLASS_NOT_APPLICABLE, reason=result.reason, unit="usd")
-    return metric(klass=CLASS_UNKNOWN, reason=result.reason, unit="usd")
+
+def _occurrence(record: dict[str, Any]) -> dict[str, Any]:
+    """When this usage happened, for time-bounded aggregation.
+
+    The strongest available evidence is the finalized route attempt's
+    ``ended_at`` -- the moment the worker that produced these tokens stopped.
+    Failing that, the governance record's ``updated_at`` is used, which is
+    when the record was last written for any reason and so only approximates
+    the run. A row with neither is excluded from every window rather than
+    silently counted into the current one.
+    """
+
+    for attempt in reversed(record.get("route_history") or []):
+        if isinstance(attempt, dict) and attempt.get("ended_at"):
+            return {
+                "value": str(attempt["ended_at"]),
+                "class": CLASS_MEASURED,
+                "source": "route attempt ended_at",
+            }
+    updated = record.get("updated_at")
+    if updated:
+        return {
+            "value": str(updated),
+            "class": CLASS_DERIVED,
+            "source": "usage record updated_at; the run's own end time was not recorded",
+        }
+    return {"value": None, "class": CLASS_UNKNOWN, "source": None}
 
 
 def build_row(
@@ -206,6 +439,8 @@ def build_row(
     facts: WorkerFacts,
     project_id: str | None,
     duration_seconds: float | None = None,
+    pricing: ModelPricing | None = None,
+    pricing_reason: str | None = None,
 ) -> dict[str, Any]:
     """One attributable usage row for a runbook's durable usage record."""
 
@@ -215,9 +450,16 @@ def build_row(
         if duration_seconds is not None
         else metric(klass=CLASS_UNKNOWN, reason="no recorded run duration", unit="seconds")
     )
-    metrics["cost_usd"] = _cost_metric(facts, record)
 
     route = execution_route_for_cost_class(facts.cost_class or "")
+    billing_class = billing_for_route(route)
+    # Two cells, computed from different evidence, that are never summed
+    # together. See the module docstring.
+    metrics["estimated_api_equivalent_usd"] = _equivalent_metric(facts, record, pricing, pricing_reason)
+    metrics["actual_cost_usd"] = _actual_cost_metric(
+        facts, record, billing_class, pricing, pricing_reason
+    )
+
     return {
         # Every row is attributable; figures from different workers are never
         # merged into one number without saying so.
@@ -263,8 +505,236 @@ def build_row(
             "escalation_state": record.get("escalation_state"),
             "escalation_reason": record.get("escalation_reason"),
         },
+        # Who paid. Kept as its own block rather than folded into ``route`` so
+        # that the UI, the aggregates and any later consumer all read the same
+        # classification, and so it can never be confused with the pricing
+        # provenance below.
+        "billing": {
+            "class": billing_class,
+            "label": BILLING_LABELS[billing_class],
+            "reason": BILLING_REASONS[billing_class],
+            # How well established the classification itself is. A billing
+            # class inferred from today's registry is weaker evidence than one
+            # the run recorded, and an operator can see which they are reading.
+            "established": (
+                CLASS_MEASURED
+                if facts.cost_class_from_record
+                else CLASS_DERIVED
+                if facts.cost_class
+                else CLASS_UNKNOWN
+            ),
+            "source": (
+                "cost_class recorded by the run"
+                if facts.cost_class_from_record
+                else "cost_class from the current registry configuration for this worker"
+                if facts.cost_class
+                else None
+            ),
+        },
+        # Where the rates came from. A pricing snapshot is not billing
+        # evidence: it says what a model advertises, never what was charged.
+        "pricing": (
+            pricing.as_dict()
+            if pricing is not None
+            else {
+                "status": "unavailable",
+                "catalog_model_id": None,
+                "input_per_1k_usd": None,
+                "output_per_1k_usd": None,
+                "matched_by": None,
+                "source": None,
+                "refreshed_at": None,
+                "fingerprint": None,
+                "age_seconds": None,
+                "stale": False,
+                "reason": pricing_reason,
+            }
+        ),
+        "occurred_at": _occurrence(record),
         "telemetry_quality": str(record.get("telemetry_quality") or "unknown"),
         "metrics": metrics,
+    }
+
+
+# ------------------------------------------------------------- aggregation
+
+# The one rule the aggregates exist to enforce. Stated here, asserted in
+# tests, and shown to the operator in the panel legend.
+AGGREGATE_INVARIANT = (
+    "Estimated API-equivalent value is never added to actual API spend. They are "
+    "separate totals over separate evidence and answer different questions."
+)
+
+WINDOW_BASIS = (
+    "UTC: today is the current calendar day, this week starts Monday, this month "
+    "starts on the 1st"
+)
+
+
+def _parse_iso(value: str | None) -> _dt.datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    # A naive timestamp from this stack is always UTC (``utc_now_iso``); saying
+    # so explicitly beats letting it compare as local time.
+    return parsed.replace(tzinfo=_dt.UTC) if parsed.tzinfo is None else parsed
+
+
+def window_starts(now: _dt.datetime) -> dict[str, _dt.datetime]:
+    """Start of the current UTC day, ISO week and calendar month."""
+
+    moment = now.astimezone(_dt.UTC)
+    day = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    return {
+        "today": day,
+        "week": day - _dt.timedelta(days=day.weekday()),
+        "month": day.replace(day=1),
+    }
+
+
+def _sum_cell(values: list[float], *, formula: str, rows: int, missing: int) -> dict[str, Any]:
+    """A window total, with how much of the window it actually covers.
+
+    Always ``DERIVED``: a total over zero rows is a real, truthful zero, but
+    the counts travel with it so a total that is small only because most rows
+    could not be priced cannot be mistaken for a total that is small because
+    little was spent.
+    """
+
+    return metric(
+        round(sum(values), 6),
+        klass=CLASS_DERIVED,
+        formula=formula,
+        source=f"{len(values)} of {rows} row(s) in this window contributed a figure",
+        reason=(
+            f"{missing} row(s) in this window could not supply this figure and are excluded"
+            if missing
+            else None
+        ),
+        unit="usd",
+    )
+
+
+def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = None) -> dict[str, Any]:
+    """Per-window totals, with estimated value and actual spend kept apart.
+
+    Three totals of *value* -- what the tokens would have been worth on the
+    public API, split by who actually paid -- and exactly one total of
+    *spend*, over API-billed rows only. Nothing crosses between them.
+
+    A row whose occurrence time is unknown is counted nowhere and reported as
+    excluded. Dropping it into the current window would inflate today's
+    figures with work of unknown age.
+    """
+
+    moment = (now or _dt.datetime.now(_dt.UTC)).astimezone(_dt.UTC)
+    starts = window_starts(moment)
+
+    dated: list[tuple[_dt.datetime, dict[str, Any]]] = []
+    undated = 0
+    for row in rows:
+        when = _parse_iso((row.get("occurred_at") or {}).get("value"))
+        if when is None:
+            undated += 1
+            continue
+        dated.append((when.astimezone(_dt.UTC), row))
+
+    def established(cell: dict[str, Any] | None) -> float | None:
+        if not cell or cell.get("class") != CLASS_DERIVED:
+            return None
+        value = cell.get("value")
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    buckets: dict[str, Any] = {}
+    for name, start in starts.items():
+        window = [row for when, row in dated if start <= when <= moment]
+        by_billing: dict[str, list[dict[str, Any]]] = {
+            BILLING_SUBSCRIPTION: [],
+            BILLING_API: [],
+            BILLING_FREE: [],
+            BILLING_UNKNOWN: [],
+        }
+        for row in window:
+            klass = (row.get("billing") or {}).get("class") or BILLING_UNKNOWN
+            by_billing.setdefault(klass, []).append(row)
+
+        def equivalents(group: list[dict[str, Any]]) -> tuple[list[float], int]:
+            values = [
+                value
+                for row in group
+                if (value := established((row.get("metrics") or {}).get("estimated_api_equivalent_usd")))
+                is not None
+            ]
+            return values, len(group) - len(values)
+
+        sub_values, sub_missing = equivalents(by_billing[BILLING_SUBSCRIPTION])
+        api_values, api_missing = equivalents(by_billing[BILLING_API])
+        free_values, free_missing = equivalents(by_billing[BILLING_FREE])
+
+        # Actual spend is drawn *only* from API-billed rows' actual-cost cells.
+        # Subscription and free rows contribute a real $0.00 to spend, but they
+        # are counted separately so the number reads as "what the API bill grew
+        # by", not "the sum of everything that happened".
+        spend_values = [
+            value
+            for row in by_billing[BILLING_API]
+            if (value := established((row.get("metrics") or {}).get("actual_cost_usd"))) is not None
+        ]
+        spend_missing = len(by_billing[BILLING_API]) - len(spend_values)
+
+        buckets[name] = {
+            "window": {"start": start.isoformat(), "end": moment.isoformat()},
+            "subscription_equivalent_usd": _sum_cell(
+                sub_values,
+                formula="sum of estimated API-equivalent value over subscription-included rows",
+                rows=len(by_billing[BILLING_SUBSCRIPTION]),
+                missing=sub_missing,
+            ),
+            "free_equivalent_usd": _sum_cell(
+                free_values,
+                formula="sum of estimated API-equivalent value over free-tier rows",
+                rows=len(by_billing[BILLING_FREE]),
+                missing=free_missing,
+            ),
+            "api_equivalent_usd": _sum_cell(
+                api_values,
+                formula="sum of estimated API-equivalent value over API-billed rows",
+                rows=len(by_billing[BILLING_API]),
+                missing=api_missing,
+            ),
+            "actual_api_spend_usd": _sum_cell(
+                spend_values,
+                formula="sum of actual cost over API-billed rows only",
+                rows=len(by_billing[BILLING_API]),
+                missing=spend_missing,
+            ),
+            "counts": {
+                "rows": len(window),
+                "subscription_included": len(by_billing[BILLING_SUBSCRIPTION]),
+                "api_billed": len(by_billing[BILLING_API]),
+                "free_tier": len(by_billing[BILLING_FREE]),
+                "billing_unknown": len(by_billing[BILLING_UNKNOWN]),
+            },
+        }
+
+    return {
+        "basis": WINDOW_BASIS,
+        "invariant": AGGREGATE_INVARIANT,
+        "generated_at": moment.isoformat(),
+        "excluded_undated_rows": undated,
+        "excluded_reason": (
+            "rows with no recorded end time or record timestamp are counted in no window, "
+            "rather than being attributed to the current one"
+        )
+        if undated
+        else None,
+        "windows": buckets,
     }
 
 
@@ -281,6 +751,13 @@ def unavailable_metrics() -> list[str]:
 
 
 __all__ = [
+    "AGGREGATE_INVARIANT",
+    "BILLING_API",
+    "BILLING_FREE",
+    "BILLING_LABELS",
+    "BILLING_REASONS",
+    "BILLING_SUBSCRIPTION",
+    "BILLING_UNKNOWN",
     "CLASS_DERIVED",
     "CLASS_MEASURED",
     "CLASS_NOT_APPLICABLE",
@@ -288,8 +765,12 @@ __all__ = [
     "CLASS_UNKNOWN",
     "REASON_NO_CACHE_ACCOUNTING",
     "REASON_NO_CONTEXT_LIMIT",
+    "WINDOW_BASIS",
     "WorkerFacts",
+    "billing_for_route",
+    "build_aggregates",
     "build_row",
     "metric",
     "unavailable_metrics",
+    "window_starts",
 ]

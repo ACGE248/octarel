@@ -80,9 +80,11 @@ but two families have no counterpart in this stack and are labelled
   worker ran under, and the design specification forbids inferring a context
   window from a model name.
 
-Dollar cost is produced only for an API route with both a pricing snapshot and
-known token counts. Subscription and free routes report `NOT_APPLICABLE`, never
-`$0.00`, which would imply API pricing that does not apply.
+Money is handled separately; see `OCTAREL-UI-07.md`, which supersedes the
+cost paragraph this section originally carried. Cost was reported as a single
+figure that a subscription route answered with `NOT_APPLICABLE`; it is now an
+approximate API-equivalent value plus an actual incremental charge, each with
+its own evidence.
 
 ## Accessibility departures from the palette
 
