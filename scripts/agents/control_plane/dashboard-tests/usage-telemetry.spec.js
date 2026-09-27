@@ -151,10 +151,14 @@ test('the estimate and the actual charge are different elements, never one figur
   await expect(money.locator('.usage-money-cell.is-estimate')).toHaveCount(1);
   await expect(money.locator('.usage-money-cell.is-actual')).toHaveCount(1);
 
-  // On an API row the arithmetic matches, so only the presentation separates
-  // them -- exactly the case where confusion would be easiest.
+  // On a derived API row the arithmetic matches, so only the presentation
+  // separates them -- exactly the case where confusion would be easiest.
   await expect(money.locator('.usage-money-cell.is-estimate .usage-money-value')).toContainText('~$0.30');
-  await expect(money.locator('.usage-money-cell.is-actual .usage-money-value')).toHaveText('$0.30');
+  await expect(money.locator('.usage-money-cell.is-actual .usage-money-value')).toHaveText('~$0.30');
+  // They remain different claims: only the actual cell states how it was
+  // established.
+  await expect(money.locator('.usage-money-cell.is-actual .usage-money-provenance')).toHaveCount(1);
+  await expect(money.locator('.usage-money-cell.is-estimate .usage-money-provenance')).toHaveCount(0);
 });
 
 test('an API-billed run is labelled as API-billed, not as subscription-included', async ({ page }) => {
@@ -218,11 +222,12 @@ test('the aggregates keep value and spend in separate rows for every window', as
 });
 
 test('subscription value is not added into actual API spend', async ({ page }) => {
-  /* The fixture has one API-billed run at $0.30 and subscription/free runs
-     worth roughly another $0.28 of equivalent value. If the two totals were
-     ever combined, spend would read about $0.58. */
+  /* Spend counts the two API-billed runs only: $0.30 derived plus $0.69791188
+     reported = $1.00. The subscription and free rows contribute roughly $0.28
+     of equivalent *value*; if the totals were ever combined, spend would read
+     about $1.28 instead. */
   const today = page.locator('.usage-window', { hasText: 'Today' });
-  await expect(today.locator('.usage-agg.is-actual dd')).toHaveText('$0.30');
+  await expect(today.locator('.usage-agg.is-actual dd')).toHaveText('$1.00');
   await expect(today.locator('.usage-agg', { hasText: 'Included value' }).locator('dd')).toContainText('~$0.27');
 });
 
@@ -357,7 +362,7 @@ test('the window breakdown counts unclassified runs instead of dropping them', a
      why. The fixture seeds one run whose billing cannot be established. */
   const count = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-window-count');
   await expect(count).toContainText('billing unknown');
-  await expect(count).toContainText('5 run(s)');
+  await expect(count).toContainText('7 run(s)');
 });
 
 test('runs counted in no window at all are stated, not silently dropped', async ({ page, request, baseURL }) => {
@@ -388,3 +393,72 @@ test('an unestablished money cell never renders as an amount', async ({ page, re
   await expect(actual).not.toContainText('42.5');
 });
 
+
+/* --------------------------------------------------------------------------
+   OCTAREL-UI-08 (issue #44): a cost the worker CLI reported about itself.
+
+   The fixture seeds an API-billed run whose CLI reported $0.69791188, and a
+   subscription-backed run that also reports a figure -- the case where a
+   monetary field must NOT become API spend. */
+
+const REPORTED_ROW = { hasText: 'fx-usage-reported-cost' };
+const SUB_REPORTED_ROW = { hasText: 'fx-usage-subscription-reported' };
+
+test('a provider-reported charge is shown as reported, at its reported precision', async ({ page }) => {
+  const actual = page.locator('.usage-row', REPORTED_ROW).locator('.usage-money-cell.is-actual');
+
+  // Not rounded into a tidier number than the provider gave.
+  await expect(actual.locator('.usage-money-value')).toHaveText('$0.6979');
+  // ...and never marked approximate, because it is not.
+  await expect(actual.locator('.usage-money-value')).not.toContainText('~');
+  await expect(actual.locator('.usage-money-provenance')).toHaveText('Provider reported');
+});
+
+test('a reconstructed charge says so and stays marked approximate', async ({ page }) => {
+  const actual = page.locator('.usage-row', API_ROW).locator('.usage-money-cell.is-actual');
+  await expect(actual.locator('.usage-money-value')).toContainText('~$');
+  await expect(actual.locator('.usage-money-provenance')).toHaveText('Derived from usage + pricing');
+});
+
+test('the two provenances are visibly different, not just differently worded', async ({ page }) => {
+  const reported = page.locator('.usage-row', REPORTED_ROW).locator('.usage-money-provenance');
+  const derived = page.locator('.usage-row', API_ROW).locator('.usage-money-provenance');
+  await expect(reported).toHaveClass(/is-reported/);
+  await expect(derived).toHaveClass(/is-derived/);
+  const [a, b] = await Promise.all([
+    reported.evaluate((n) => getComputedStyle(n).color),
+    derived.evaluate((n) => getComputedStyle(n).color),
+  ]);
+  expect(a).not.toBe(b);
+});
+
+test('a subscription run reporting a cost still shows zero incremental spend', async ({ page }) => {
+  /* The safety property. The Claude CLI's total_cost_usd means "what this
+     would have cost on the API", not "what you were charged", so a
+     subscription session must never present it as spend. */
+  const row = page.locator('.usage-row', SUB_REPORTED_ROW);
+  await expect(row.locator('.billing-chip')).toHaveText('Included with subscription');
+
+  const actual = row.locator('.usage-money-cell.is-actual');
+  await expect(actual.locator('.usage-money-value')).toHaveText('$0.00');
+  // No reported figure leaks in, and the zero is not dressed up as an estimate.
+  await expect(actual).not.toContainText('0.51');
+  await expect(actual.locator('.usage-money-value')).not.toContainText('~');
+});
+
+test('a billing-class zero claims no reconstruction it did not perform', async ({ page }) => {
+  // Its $0.00 comes from the route, not from usage and pricing, so it carries
+  // no provenance chip -- its own note already states where it came from.
+  const actual = page.locator('.usage-row', FREE_ROW).locator('.usage-money-cell.is-actual');
+  await expect(actual.locator('.usage-money-provenance')).toHaveCount(0);
+  await expect(actual).toContainText('free route');
+});
+
+test('a reported charge never displaces the API-equivalent value', async ({ page }) => {
+  const row = page.locator('.usage-row', REPORTED_ROW);
+  const estimate = row.locator('.usage-money-cell.is-estimate');
+  // Still the public-rate approximation, still marked approximate, and not
+  // the same figure as the reported charge.
+  await expect(estimate.locator('.usage-money-value')).toContainText('~$');
+  await expect(estimate.locator('.usage-money-value')).not.toContainText('0.6979');
+});

@@ -413,7 +413,11 @@ class Supervisor:
         record = self.state.get_usage_governance(task.runbook_id)
         if not record:
             return
-        from .telemetry import estimated_token_usage, extract_token_usage
+        from .telemetry import (
+            estimated_token_usage,
+            extract_reported_cost,
+            extract_token_usage,
+        )
 
         payload = stdout
         pointer = re.search(r"^LOG:\s+(.+)$", stdout, re.MULTILINE)
@@ -438,6 +442,21 @@ class Supervisor:
         record["telemetry_quality"] = usage.mode.lower()
         record["input_tokens"] = usage.input_tokens
         record["output_tokens"] = usage.output_tokens
+
+        # OCTAREL-UI-08 (issue #44): a cost the worker CLI stated about itself,
+        # read from the same structured payload as the token counts above. It
+        # is recorded with the run so a historical figure never has to be
+        # reconstructed from today's registry or price catalog.
+        #
+        # Only ever written, never cleared: a later reconcile pass over output
+        # that no longer carries the field (a truncated tail, a re-read that
+        # found only the pointer) must not erase evidence an earlier pass
+        # captured. Losing a measured figure would silently demote the run to
+        # the derived path.
+        reported = extract_reported_cost(payload)
+        if reported.usd is not None:
+            record["reported_cost_usd"] = reported.usd
+            record["reported_cost_source"] = reported.source
         self.state.upsert_usage_governance(record)
 
     def _record_route_outcome(self, task: Task) -> None:

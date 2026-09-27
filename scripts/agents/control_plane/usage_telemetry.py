@@ -83,12 +83,14 @@ from .telemetry import (
     ROUTE_FREE,
     ROUTE_SUBSCRIPTION,
     ROUTE_UNKNOWN,
+    SOURCE_WORKER_CLI,
     TOKEN_ESTIMATED,
     TOKEN_EXACT,
     PricingSnapshot,
     TokenUsage,
     compute_cost,
     execution_route_for_cost_class,
+    usable_reported_cost,
 )
 
 CLASS_MEASURED = "MEASURED"
@@ -150,6 +152,16 @@ BILLING_REASONS: dict[str, str] = {
 
 def billing_for_route(execution_route: str) -> str:
     return _ROUTE_BILLING.get(execution_route, BILLING_UNKNOWN)
+
+
+# How an actual-cost figure was arrived at (OCTAREL-UI-08, issue #44). The
+# metric class alone cannot carry this: a subscription route's $0.00 and an
+# API route's tokens-times-pricing figure are both DERIVED, but one is an
+# assertion the billing class licenses and the other is a reconstruction. The
+# UI needs to say which without pattern-matching prose.
+BASIS_REPORTED = "reported"          # the worker CLI stated this run's cost
+BASIS_BILLING_CLASS = "billing-class"  # $0.00 established by the route itself
+BASIS_TOKENS_AND_PRICING = "tokens-and-pricing"  # reconstructed from a snapshot
 
 
 # What the estimated API-equivalent value may truthfully say about itself, per
@@ -372,6 +384,13 @@ def _equivalent_metric(
     )
 
 
+def _with_basis(cell: dict[str, Any], basis: str) -> dict[str, Any]:
+    """Tag an actual-cost cell with how its figure was arrived at."""
+
+    cell["basis"] = basis
+    return cell
+
+
 def _actual_cost_metric(
     facts: WorkerFacts,
     record: dict[str, Any],
@@ -386,6 +405,24 @@ def _actual_cost_metric(
     a subscription-included or free route. An unclassified route reports
     ``UNKNOWN``; reporting zero there would turn missing evidence into a
     claim that the run was free.
+
+    **Billing class is decided before any monetary evidence is consulted, and
+    that ordering is load-bearing** (OCTAREL-UI-08, issue #44). A
+    subscription-backed CLI may itself print a ``total_cost_usd`` -- the
+    Claude CLI does, and it means "what this would have cost on the API", not
+    "what you were charged". Reading that field before classifying the route
+    would turn a subscription session into reported API spend, which is the
+    exact misrepresentation this whole feature exists to prevent. Only an
+    API-billed route ever reaches the evidence below.
+
+    Within an API-billed route the precedence is strongest-evidence-first:
+
+    1. a cost the worker CLI reported for this run -- ``MEASURED``;
+    2. exact provider-reported tokens times a trusted pricing snapshot --
+       ``DERIVED``;
+    3. ``UNKNOWN``.
+
+    A derived figure never overwrites a measured one.
     """
 
     provenance = (
@@ -395,26 +432,47 @@ def _actual_cost_metric(
     )
 
     if billing_class == BILLING_SUBSCRIPTION:
-        return metric(
-            0.0,
-            klass=CLASS_DERIVED,
-            formula="subscription-included route: no per-token API charge",
-            source=provenance,
-            unit="usd",
+        return _with_basis(
+            metric(
+                0.0,
+                klass=CLASS_DERIVED,
+                formula="subscription-included route: no per-token API charge",
+                source=provenance,
+                unit="usd",
+            ),
+            BASIS_BILLING_CLASS,
         )
     if billing_class == BILLING_FREE:
-        return metric(
-            0.0,
-            klass=CLASS_DERIVED,
-            formula="free route: the provider charges nothing for these tokens",
-            source=provenance,
-            unit="usd",
+        return _with_basis(
+            metric(
+                0.0,
+                klass=CLASS_DERIVED,
+                formula="free route: the provider charges nothing for these tokens",
+                source=provenance,
+                unit="usd",
+            ),
+            BASIS_BILLING_CLASS,
         )
     if billing_class != BILLING_API:
         return metric(klass=CLASS_UNKNOWN, reason=BILLING_REASONS[BILLING_UNKNOWN], unit="usd")
 
-    # API-billed. A charge is only asserted from evidence strong enough to
-    # support it: exact provider-reported counts plus a rate.
+    # API-billed. Strongest evidence first: what the worker itself reported
+    # this run cost beats what a price list implies it should have cost.
+    reported = usable_reported_cost(record.get("reported_cost_usd"))
+    if reported is not None:
+        return _with_basis(
+            metric(
+                reported,
+                klass=CLASS_MEASURED,
+                source=str(record.get("reported_cost_source") or SOURCE_WORKER_CLI),
+                unit="usd",
+            ),
+            BASIS_REPORTED,
+        )
+
+    # No reported figure: fall back to reconstructing one, exactly as before.
+    # A charge is only asserted from evidence strong enough to support it:
+    # exact provider-reported counts plus a rate.
     usage = _token_usage(record)
     if usage.mode == TOKEN_ESTIMATED:
         return metric(
@@ -439,15 +497,18 @@ def _actual_cost_metric(
     )
     if result.usd is None:
         return metric(klass=CLASS_UNKNOWN, reason=result.reason, unit="usd")
-    return metric(
-        result.usd,
-        klass=CLASS_DERIVED,
-        formula=(
-            f"actual API charge: provider-reported tokens x {pricing.source} rates "
-            f"for {pricing.catalog_model_id}"
+    return _with_basis(
+        metric(
+            result.usd,
+            klass=CLASS_DERIVED,
+            formula=(
+                f"actual API charge: provider-reported tokens x {pricing.source} rates "
+                f"for {pricing.catalog_model_id}"
+            ),
+            source=f"{provenance}; {result.reason}",
+            unit="usd",
         ),
-        source=f"{provenance}; {result.reason}",
-        unit="usd",
+        BASIS_TOKENS_AND_PRICING,
     )
 
 

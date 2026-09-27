@@ -25,6 +25,7 @@ from .models import (
     WorktreeRecord,
     utc_now_iso,
 )
+from .telemetry import usable_reported_cost
 
 STATE_DIRNAME = ".orchestrator-state"
 DB_FILENAME = "orchestrator.db"
@@ -192,6 +193,8 @@ CREATE TABLE IF NOT EXISTS usage_governance (
     route_history TEXT NOT NULL DEFAULT '[]',
     escalation_history TEXT NOT NULL DEFAULT '[]',
     context_manifest TEXT NOT NULL DEFAULT '{}',
+    reported_cost_usd REAL,
+    reported_cost_source TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -314,6 +317,16 @@ _RUNBOOKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("stop_after_current_requested", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+# OCTAREL-UI-08 (issue #44): the per-run cost a worker CLI stated about
+# itself, persisted with the run's own usage evidence so a historical figure
+# never has to be reconstructed from today's registry or price catalog. Both
+# columns are nullable: a pre-existing row, or a run by a CLI that reports no
+# cost, simply has none and keeps the derived path it has always had.
+_USAGE_GOVERNANCE_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("reported_cost_usd", "REAL"),
+    ("reported_cost_source", "TEXT"),
+)
+
 
 # ENG-CP-03 (issue #165): the tables that carry per-project records and so gain
 # a ``project_id``. Everything omitted here is deliberately *global* Control
@@ -423,6 +436,7 @@ class State:
             self._migrate_provider_states_columns()
             self._migrate_worktrees_columns()
             self._migrate_runbooks_columns()
+            self._migrate_usage_governance_columns()
             self._migrate_project_id_columns()
         except Exception:
             self._conn.rollback()
@@ -457,6 +471,13 @@ class State:
         for column, ddl in _RUNBOOKS_MIGRATED_COLUMNS:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE runbooks ADD COLUMN {column} {ddl}")
+
+    @_serialized
+    def _migrate_usage_governance_columns(self) -> None:
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(usage_governance)").fetchall()}
+        for column, ddl in _USAGE_GOVERNANCE_MIGRATED_COLUMNS:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE usage_governance ADD COLUMN {column} {ddl}")
 
     @_serialized
     def _migrate_project_id_columns(self) -> None:
@@ -968,6 +989,16 @@ class State:
             "route_history": json.dumps(record.get("route_history", []), sort_keys=True),
             "escalation_history": json.dumps(record.get("escalation_history", []), sort_keys=True),
             "context_manifest": json.dumps(record.get("context_manifest", {}), sort_keys=True),
+            # OCTAREL-UI-08 (issue #44): validated at the boundary so a wrong
+            # figure never reaches the column. A caller passing something that
+            # cannot stand as money stores nothing rather than a bad number.
+            "reported_cost_usd": usable_reported_cost(record.get("reported_cost_usd")),
+            "reported_cost_source": (
+                str(record["reported_cost_source"])
+                if usable_reported_cost(record.get("reported_cost_usd")) is not None
+                and record.get("reported_cost_source")
+                else None
+            ),
             "updated_at": utc_now_iso(),
         }
         columns = ", ".join(row)

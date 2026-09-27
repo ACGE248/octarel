@@ -516,7 +516,7 @@
     UNKNOWN: "Approximate. Whether this run was charged is not established.",
   };
 
-  function usdText(value) {
+  function usdText(value, { reported = false } = {}) {
     /* Sub-cent figures are common here, so two decimals would round most
        equivalent values to $0.00 and make the panel look empty. An exact zero
        is the exception: "$0.00" is the whole claim being made on a
@@ -526,19 +526,64 @@
     // the cell's class, but a money field is the last place to trust that.
     if (!Number.isFinite(amount)) return "UNKNOWN";
     if (amount === 0) return "$0.00";
+    if (reported) {
+      /* OCTAREL-UI-08 (issue #44): a figure the worker reported is shown at
+         the precision it was reported to, not rounded into a tidier-looking
+         number. $0.6979 is what was spent; $0.70 is a different claim. Trailing
+         zeros are trimmed so a round figure still reads as money, never below
+         two decimals. */
+      const trimmed = amount.toFixed(4).replace(/0+$/, "");
+      const padded = trimmed.endsWith(".") ? `${trimmed}00` : trimmed;
+      const [whole, fraction = ""] = padded.split(".");
+      return `$${whole}.${fraction.padEnd(2, "0")}`;
+    }
     return Math.abs(amount) >= 0.01 ? `$${amount.toFixed(2)}` : `$${amount.toFixed(4)}`;
   }
+
+  /* How an actual charge was established, in the fewest words that stay true.
+     A provider-reported figure and a reconstructed one are different kinds of
+     claim, and the operator can see which they are reading without opening a
+     tooltip.
+
+     Keyed on the payload's explicit `basis`, not on the metric class: a
+     subscription route's $0.00 and an API route's reconstructed figure are
+     both DERIVED, but only one of them is a reconstruction. The zero a
+     billing class establishes gets no provenance line at all -- its own note
+     ("subscription-included route: no per-token API charge") already says
+     exactly where it came from. */
+  const ACTUAL_PROVENANCE = {
+    reported: "Provider reported",
+    "tokens-and-pricing": "Derived from usage + pricing",
+  };
 
   function usageMoneyCell(kind, label, cell, note) {
     const known =
       USAGE_ESTABLISHED.has(cell.class) && cell.value !== null && cell.value !== undefined;
     /* The tilde is load-bearing: an estimate never renders as a bare amount,
-       so a glance can never read it as a figure someone was charged. */
-    const display = known ? `${kind === "estimate" ? "~" : ""}${usdText(cell.value)}` : cell.class;
+       so a glance can never read it as a figure someone was charged. An actual
+       charge that was itself reconstructed from tokens and a price list is
+       approximate too, and says so the same way; only a figure the provider
+       reported is shown bare. */
+    const reported = cell.basis === "reported";
+    /* A reconstructed charge is approximate and says so. A $0.00 the billing
+       class establishes is not -- it is an assertion, and a tilde would make a
+       definite claim look uncertain. */
+    const approximate =
+      kind === "estimate" || (known && cell.basis === "tokens-and-pricing");
+    const display = known
+      ? `${approximate ? "~" : ""}${usdText(cell.value, { reported })}`
+      : cell.class;
 
     return el("div", { class: `usage-money-cell is-${kind}${known ? "" : " is-unavailable"}` }, [
       el("span", { class: "usage-money-label", text: label }),
       el("span", { class: "usage-money-value", text: display }),
+      kind === "actual" && known && ACTUAL_PROVENANCE[cell.basis]
+        ? el("span", {
+            class: `usage-money-provenance is-${reported ? "reported" : "derived"}`,
+            text: ACTUAL_PROVENANCE[cell.basis],
+            title: cell.source || cell.formula || "",
+          })
+        : null,
       el("span", {
         class: "usage-money-note",
         text: note || (known ? cell.formula || "" : cell.reason || ""),
