@@ -12,7 +12,6 @@ rest of ``control_plane`` already provides.
 from __future__ import annotations
 
 import json
-import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,7 +131,12 @@ def usable_reported_cost(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)
-    if not math.isfinite(number) or number < 0:
+    # One comparison covers both requirements. NaN fails every comparison, so
+    # it falls out here; the upper bound excludes +inf and the lower bound
+    # excludes -inf and every negative figure. Written without ``math`` so the
+    # Control Plane's declared-import surface (ENG-CP-02) gains nothing for a
+    # single predicate.
+    if not 0 <= number < float("inf"):
         return None
     return number
 
