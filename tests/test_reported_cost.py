@@ -303,11 +303,15 @@ def test_the_endpoint_keeps_a_subscription_row_at_zero_despite_a_reported_cost(c
             "telemetry_quality": "exact",
             "input_tokens": 1000,
             "output_tokens": 100,
-            "reported_cost_usd": 9.99,
-            "reported_cost_source": SOURCE_WORKER_CLI,
+            # On the attempt, which is the only place the read model looks.
+            # Re-review (Grok Build) caught this seeded on the record instead:
+            # after the relocation nothing persisted it there, so the attempt
+            # carried no figure and the test had stopped exercising
+            # billing-class-first at all while still passing.
             "route_history": [
                 {"worker": "claude-code", "provider": "Anthropic",
-                 "cost_class": "premium-subscription", "status": "SUCCEEDED"},
+                 "cost_class": "premium-subscription", "status": "SUCCEEDED",
+                 "reported_cost_usd": 9.99, "reported_cost_source": SOURCE_WORKER_CLI},
             ],
         }
     )
@@ -317,3 +321,118 @@ def test_the_endpoint_keeps_a_subscription_row_at_zero_despite_a_reported_cost(c
     assert row["billing"]["label"] == "Included with subscription"
     assert row["metrics"]["actual_cost_usd"]["value"] == 0.0
     assert row["metrics"]["actual_cost_usd"]["basis"] == "billing-class"
+
+
+# ------------------------------------------- the sequence a real run follows
+
+
+def test_finalizing_an_attempt_preserves_the_cost_it_captured(tmp_path):
+    """The production order: capture, then terminalize. Nothing may drop it.
+
+    Re-review (Grok Build) noted every other test seeds an already-SUCCEEDED
+    attempt that already carries the figure, so a history rewriter that
+    rebuilt an attempt without spreading its existing keys would strip MEASURED
+    cost from every completed run and still pass all of them. This runs the
+    real sequence instead.
+    """
+
+    from scripts.agents.control_plane.models import Task
+    from scripts.agents.control_plane.usage_policy import finalize_route_attempt
+
+    registry = load_registry()
+    state = State(":memory:")
+    state.upsert_usage_governance(
+        {"runbook_id": "rb-seq", "classification": "routine", "codex_policy": "conserve",
+         "route_history": [{"worker": "grok-build", "status": "RUNNING"}]}
+    )
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    task = Task(id="t-seq", task_ref="X", role="primary-implementation", worker="grok-build",
+                runbook_id="rb-seq", command=("grok",), state="SUCCEEDED", result="PASS")
+
+    supervisor._record_usage(task, payload(**{REPORTED_COST_FIELD: 0.75}))
+    assert finalize_route_attempt(state, task) is True
+
+    attempt = state.get_usage_governance("rb-seq")["route_history"][-1]
+    assert attempt["status"] == "SUCCEEDED", "the attempt really was terminalized"
+    assert attempt["ended_at"], "...with its end time recorded"
+    assert attempt["reported_cost_usd"] == pytest.approx(0.75), "and its cost survived"
+    assert attempt["reported_cost_source"] == SOURCE_WORKER_CLI
+
+
+def test_a_run_captured_then_finalized_is_served_as_measured_end_to_end(ctx, tmp_path):
+    """The same sequence, then read back through the endpoint."""
+
+    from scripts.agents.control_plane.models import Task
+    from scripts.agents.control_plane.usage_policy import finalize_route_attempt
+
+    ctx.state.upsert_usage_governance(
+        {"runbook_id": "rb-e2e", "classification": "routine", "codex_policy": "conserve",
+         "route_history": [
+             {"worker": "grok-build", "provider": "xAI", "model": "grok-4.6",
+              "cost_class": "metered-configured", "status": "RUNNING"},
+         ]}
+    )
+    task = Task(id="t-e2e", task_ref="X", role="primary-implementation", worker="grok-build",
+                runbook_id="rb-e2e", command=("grok",), state="SUCCEEDED", result="PASS")
+    ctx.supervisor._record_usage(task, payload(**{REPORTED_COST_FIELD: 0.75}))
+    finalize_route_attempt(ctx.state, task)
+
+    app = create_app(ctx, roadmap_path=tmp_path / "R.md", pricing_loader=lambda: FIXED_BOOK)
+    cost = TestClient(app).get("/api/usage-telemetry").json()["rows"][0]["metrics"]["actual_cost_usd"]
+    assert cost["value"] == pytest.approx(0.75)
+    assert cost["class"] == "MEASURED"
+    assert cost["basis"] == "reported"
+
+
+# ------------------------------------------ supervisor attempt selection
+
+
+def capture_into(tmp_path, history, worker="grok-build"):
+    """Run one capture against ``history`` and return the resulting history."""
+
+    from scripts.agents.control_plane.models import Task
+
+    state = State(":memory:")
+    state.upsert_usage_governance(
+        {"runbook_id": "rb-sel", "classification": "routine", "codex_policy": "conserve",
+         "route_history": history}
+    )
+    supervisor = Supervisor(registry=load_registry(), repo_root=tmp_path, state=state)
+    task = Task(id="t-sel", task_ref="X", role="primary-implementation", worker=worker,
+                runbook_id="rb-sel", command=("grok",))
+    supervisor._record_usage(task, payload(**{REPORTED_COST_FIELD: 0.9}))
+    return state.get_usage_governance("rb-sel")["route_history"]
+
+
+def test_no_attempt_to_attach_to_means_nothing_is_written(tmp_path):
+    """Fail closed. Without an attempt there is no attribution either."""
+
+    assert capture_into(tmp_path, []) == []
+
+
+def test_a_cost_is_not_attached_to_another_workers_attempt(tmp_path):
+    """The whole point of the relocation, at the write boundary."""
+
+    history = capture_into(tmp_path, [{"worker": "claude-code", "status": "RUNNING"}])
+    assert "reported_cost_usd" not in history[0]
+
+
+def test_an_already_terminal_attempt_is_not_rewritten(tmp_path):
+    """A finished attempt's evidence is not amended by a later reconcile."""
+
+    history = capture_into(tmp_path, [{"worker": "grok-build", "status": "SUCCEEDED"}])
+    assert "reported_cost_usd" not in history[0]
+
+
+def test_the_newest_live_attempt_wins_when_a_worker_appears_twice(tmp_path):
+    """A worker retried after its own failure: the live attempt takes it."""
+
+    history = capture_into(
+        tmp_path,
+        [
+            {"worker": "grok-build", "status": "FAILED"},
+            {"worker": "grok-build", "status": "RUNNING"},
+        ],
+    )
+    assert "reported_cost_usd" not in history[0], "the failed attempt keeps none"
+    assert history[1]["reported_cost_usd"] == pytest.approx(0.9)
