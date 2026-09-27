@@ -49,14 +49,6 @@ test('cache and context metrics are labelled unavailable with a reason', async (
   }
 });
 
-test('a subscription route shows no dollar figure', async ({ page }) => {
-  /* Subscription usage is not API billing; $0.00 would imply pricing that
-     does not apply to a subscription-backed CLI invocation. */
-  const cost = page.locator('.usage-row').first().locator('.usage-metric', { hasText: 'Cost' });
-  await expect(cost).toContainText('NOT_APPLICABLE');
-  await expect(cost).not.toContainText('$');
-});
-
 test('a run with no recorded counts says unknown rather than zero', async ({ page }) => {
   const row = page.locator('.usage-row', { hasText: 'fx-rb-running' });
   const input = row.locator('.usage-metric', { hasText: 'Input' }).first();
@@ -103,11 +95,11 @@ test('an unestablished metric never renders as a figure, even with a stray value
 
 test('a metric missing from the payload is shown as unknown, not omitted', async ({ page, request, baseURL }) => {
   await serveMutatedUsage(page, request, baseURL, (body) => {
-    delete body.rows[0].metrics.cost_usd;
+    delete body.rows[0].metrics.duration_seconds;
   });
 
   // Dropping it silently would hide that it was never established.
-  const cell = page.locator('.usage-row').first().locator('.usage-metric', { hasText: 'Cost' });
+  const cell = page.locator('.usage-row').first().locator('.usage-metric', { hasText: 'Duration' });
   await expect(cell).toBeVisible();
   await expect(cell).toContainText('UNKNOWN');
 });
@@ -118,5 +110,281 @@ test('the route pill does not borrow run-state styling', async ({ page }) => {
   await expect(pill).toBeVisible();
   // Billable vs subscription is a routing fact, not "running"/"idle".
   await expect(pill).not.toHaveClass(/st-running|st-available/);
+});
+
+/* --------------------------------------------------------------------------
+   OCTAREL-UI-07 (issue #42): approximate API-equivalent value, kept visibly
+   and semantically apart from what was actually charged.
+
+   The fixture seeds one run per billing class and pins its own price list
+   (see serve_fixture's _fixture_pricing_book), so nothing here depends on the
+   host's cached catalog and no provider is ever contacted. */
+
+const SUBSCRIPTION_ROW = { hasText: 'fx-rb-fallback' };
+const API_ROW = { hasText: 'fx-usage-api-billed' };
+const FREE_ROW = { hasText: 'fx-usage-free-route' };
+const UNCLASSIFIED_ROW = { hasText: 'fx-usage-unclassified' };
+
+test('subscription usage shows an equivalent value, included billing, and zero cost', async ({ page }) => {
+  /* The headline requirement from issue #42, and the one most likely to be
+     got wrong: the value is worth showing, and it is not spend. */
+  const row = page.locator('.usage-row', SUBSCRIPTION_ROW);
+  const money = row.locator('.usage-money');
+
+  const estimate = money.locator('.usage-money-cell.is-estimate');
+  await expect(estimate).toContainText('Estimated API-equivalent value');
+  // The tilde is what makes it unreadable as an exact charge.
+  await expect(estimate.locator('.usage-money-value')).toContainText('~$');
+  await expect(estimate).toContainText('Not a charge');
+
+  await expect(money.locator('.billing-chip')).toHaveText('Included with subscription');
+
+  const actual = money.locator('.usage-money-cell.is-actual');
+  await expect(actual).toContainText('Actual incremental API cost');
+  await expect(actual.locator('.usage-money-value')).toHaveText('$0.00');
+});
+
+test('the estimate and the actual charge are different elements, never one figure', async ({ page }) => {
+  /* Issue #42 requires two fields, not one number formatted twice. If a
+     redesign ever collapsed them, this fails. */
+  const money = page.locator('.usage-row', API_ROW).locator('.usage-money');
+  await expect(money.locator('.usage-money-cell.is-estimate')).toHaveCount(1);
+  await expect(money.locator('.usage-money-cell.is-actual')).toHaveCount(1);
+
+  // On an API row the arithmetic matches, so only the presentation separates
+  // them -- exactly the case where confusion would be easiest.
+  await expect(money.locator('.usage-money-cell.is-estimate .usage-money-value')).toContainText('~$0.30');
+  await expect(money.locator('.usage-money-cell.is-actual .usage-money-value')).toHaveText('$0.30');
+});
+
+test('an API-billed run is labelled as API-billed, not as subscription-included', async ({ page }) => {
+  const chip = page.locator('.usage-row', API_ROW).locator('.billing-chip');
+  await expect(chip).toHaveText('API-billed');
+  await expect(chip).toHaveClass(/is-api/);
+});
+
+test('a free route is called free, never included with a subscription', async ({ page }) => {
+  /* Both cost nothing. Only one of them is covered by something the operator
+     is paying for, and saying otherwise misdescribes the account. */
+  const row = page.locator('.usage-row', FREE_ROW);
+  await expect(row.locator('.billing-chip')).toHaveText('Free tier');
+  await expect(row.locator('.billing-chip')).not.toContainText(/subscription/i);
+  await expect(row.locator('.usage-money-cell.is-actual .usage-money-value')).toHaveText('$0.00');
+});
+
+test('a run whose billing cannot be established never shows zero cost', async ({ page }) => {
+  /* The most dangerous default in the whole panel: "we do not know" must not
+     render as "it was free". */
+  const row = page.locator('.usage-row', UNCLASSIFIED_ROW);
+  await expect(row.locator('.billing-chip')).toHaveText('Billing not established');
+
+  const actual = row.locator('.usage-money-cell.is-actual');
+  await expect(actual).toContainText('UNKNOWN');
+  await expect(actual.locator('.usage-money-value')).not.toContainText('$');
+});
+
+test('a model with no catalog price reports the estimate as unavailable', async ({ page }) => {
+  // Anthropic is not carried by the OpenCode catalog, so claude-code runs
+  // cannot be priced -- and say so rather than guessing.
+  const row = page.locator('.usage-row', { hasText: 'fx-rb-running' });
+  const estimate = row.locator('.usage-money-cell.is-estimate');
+  await expect(estimate).toContainText('UNKNOWN');
+  await expect(estimate.locator('.usage-money-value')).not.toContainText('$');
+  await expect(row.locator('.usage-pricing-source')).toContainText('Rates unavailable');
+  // Pricing failing does not make the billing fact unknown: they are separate.
+  await expect(row.locator('.billing-chip')).toHaveText('Included with subscription');
+});
+
+test('each row says where its rates came from, separately from how it was billed', async ({ page }) => {
+  const row = page.locator('.usage-row', API_ROW);
+  await expect(row.locator('.usage-pricing-source')).toContainText('OpenCode model catalog');
+  await expect(row.locator('.usage-pricing-source')).toContainText('xai/grok-4.6');
+  // A pricing snapshot makes no claim about who paid.
+  await expect(row.locator('.usage-pricing-source')).not.toContainText(/subscription|API-billed/);
+});
+
+test('the aggregates keep value and spend in separate rows for every window', async ({ page }) => {
+  const windows = page.locator('#usage-aggregates .usage-window');
+  await expect(windows).toHaveCount(3);
+
+  for (const label of ['Today', 'This week', 'This month']) {
+    const window = page.locator('.usage-window', { hasText: label });
+    await expect(window.locator('.usage-agg.is-estimate')).toHaveCount(3);
+    await expect(window.locator('.usage-agg.is-actual')).toHaveCount(1);
+    // Every estimated total is marked approximate; spend never is.
+    await expect(window.locator('.usage-agg.is-estimate dd').first()).toContainText('~');
+    await expect(window.locator('.usage-agg.is-actual dd')).not.toContainText('~');
+  }
+});
+
+test('subscription value is not added into actual API spend', async ({ page }) => {
+  /* The fixture has one API-billed run at $0.30 and subscription/free runs
+     worth roughly another $0.28 of equivalent value. If the two totals were
+     ever combined, spend would read about $0.58. */
+  const today = page.locator('.usage-window', { hasText: 'Today' });
+  await expect(today.locator('.usage-agg.is-actual dd')).toHaveText('$0.30');
+  await expect(today.locator('.usage-agg', { hasText: 'Included value' }).locator('dd')).toContainText('~$0.27');
+});
+
+test('the panel states the separation rule it is enforcing', async ({ page }) => {
+  await expect(page.locator('#usage-aggregate-invariant')).toContainText('never added to actual API spend');
+  await expect(page.locator('#usage-pricing-provenance')).toContainText('OpenCode model catalog');
+});
+
+test('a failed read clears the totals rather than leaving stale money on screen', async ({ page }) => {
+  await page.route('**/api/usage-telemetry', (route) => route.fulfill({ status: 503, body: '{}' }));
+  await page.reload();
+  await navTo(page, 'view-providers');
+
+  await expect(page.locator('#usage-telemetry-rows')).toContainText('could not be read');
+  // Stale figures beside a failure message would be worse than no figures.
+  await expect(page.locator('#usage-aggregates')).toBeEmpty();
+  await expect(page.locator('#usage-aggregate-invariant')).toBeEmpty();
+});
+
+/* Independent review follow-ups (Grok Build, issue #42). */
+
+test('money is no longer one of the interchangeable metric cells', async ({ page }) => {
+  /* It moved out of the grid deliberately. If a later change put a money
+     figure back among cells that all look alike, the distinction this panel
+     exists to make would quietly erode. */
+  const row = page.locator('.usage-row', API_ROW);
+  await expect(row.locator('.usage-metric', { hasText: 'Cost' })).toHaveCount(0);
+  await expect(row.locator('.usage-money')).toHaveCount(1);
+});
+
+test('a money field missing from the payload is shown as unknown, not omitted', async ({ page, request, baseURL }) => {
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    delete body.rows[0].metrics.actual_cost_usd;
+  });
+
+  const actual = page.locator('.usage-row').first().locator('.usage-money-cell.is-actual');
+  await expect(actual).toBeVisible();
+  await expect(actual).toContainText('UNKNOWN');
+  await expect(actual.locator('.usage-money-value')).not.toContainText('$');
+});
+
+test('a spend total nothing could supply reads unknown, not zero', async ({ page, request, baseURL }) => {
+  /* The aggregate form of "we do not know is not free". Beside a count of
+     API-billed runs, a $0.00 total would read as "they cost nothing" when it
+     means "none of them could be priced". */
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    Object.values(body.aggregates.windows).forEach((window) => {
+      window.actual_api_spend_usd = {
+        value: null,
+        class: 'UNKNOWN',
+        reason: 'none of the 2 row(s) in this window could supply this figure',
+        unit: 'usd',
+        coverage: { contributed: 0, rows: 2, complete: false },
+      };
+    });
+  });
+
+  const spend = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-agg.is-actual');
+  await expect(spend).toContainText('UNKNOWN');
+  await expect(spend.locator('dd')).not.toContainText('$');
+});
+
+test('a partial total states its shortfall on screen, not only on hover', async ({ page, request, baseURL }) => {
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    Object.values(body.aggregates.windows).forEach((window) => {
+      window.actual_api_spend_usd = {
+        ...window.actual_api_spend_usd,
+        value: 0.3,
+        class: 'DERIVED',
+        coverage: { contributed: 1, rows: 4, complete: false },
+      };
+    });
+  });
+
+  const spend = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-agg.is-actual');
+  // Visible text, so a total that is small only because most rows could not
+  // be priced cannot be mistaken for a total that is small because little was
+  // spent.
+  await expect(spend.locator('.usage-agg-shortfall')).toHaveText('1 of 4 priced');
+});
+
+test('a complete total shows no shortfall note', async ({ page }) => {
+  const today = page.locator('.usage-window', { hasText: 'Today' });
+  await expect(today.locator('.usage-agg.is-actual .usage-agg-shortfall')).toHaveCount(0);
+});
+
+test('an API-billed row is not told it was never billed', async ({ page }) => {
+  // The caveat on the estimate has to be true of the run it sits on.
+  const estimate = page.locator('.usage-row', API_ROW).locator('.usage-money-cell.is-estimate');
+  await expect(estimate).toContainText('reported separately');
+  await expect(estimate).not.toContainText('Not a charge and not billed');
+
+  const included = page.locator('.usage-row', SUBSCRIPTION_ROW).locator('.usage-money-cell.is-estimate');
+  await expect(included).toContainText('Not a charge and not billed');
+});
+
+test('the unestablished billing chip stays visible against its own panel', async ({ page }) => {
+  /* It used to take --surface-2 on a --surface-2 parent, so the one billing
+     state an operator most needs to notice was the least visible. */
+  const chip = page.locator('.usage-row', UNCLASSIFIED_ROW).locator('.billing-chip');
+  await expect(chip).toBeVisible();
+  const outlined = await chip.evaluate((node) => getComputedStyle(node).boxShadow);
+  expect(outlined).not.toBe('none');
+});
+
+/* Round-2 review follow-ups (Grok Build, issue #42): three strings that were
+   changed without any assertion holding them in place. */
+
+test('a priced run whose billing is unknown is not told it was never billed', async ({ page, request, baseURL }) => {
+  /* The fixture's unclassified row uses a model the catalog cannot price, so
+     its estimate is unavailable and the note never renders. The dangerous
+     combination is an unclassified row that *can* be priced: it would have
+     claimed "Not a charge and not billed" about a run nobody classified. */
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    const row = body.rows.find((candidate) => candidate.billing.class === 'UNKNOWN');
+    row.metrics.estimated_api_equivalent_usd = {
+      value: 0.042, class: 'DERIVED', formula: 'x', source: null, reason: null, unit: 'usd',
+    };
+  });
+
+  const estimate = page
+    .locator('.usage-row', UNCLASSIFIED_ROW)
+    .locator('.usage-money-cell.is-estimate');
+  await expect(estimate.locator('.usage-money-value')).toContainText('~$0.04');
+  await expect(estimate).toContainText('not established');
+  // The claim it must never make about a run nobody could classify.
+  await expect(estimate).not.toContainText('not billed');
+});
+
+test('the window breakdown counts unclassified runs instead of dropping them', async ({ page }) => {
+  /* The parts used to sum to less than the stated total with nothing saying
+     why. The fixture seeds one run whose billing cannot be established. */
+  const count = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-window-count');
+  await expect(count).toContainText('billing unknown');
+  await expect(count).toContainText('5 run(s)');
+});
+
+test('runs counted in no window at all are stated, not silently dropped', async ({ page, request, baseURL }) => {
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    body.aggregates.excluded_undated_rows = 2;
+    body.aggregates.excluded_future_rows = 1;
+    body.aggregates.excluded_reason = 'no recorded end time';
+  });
+
+  const note = page.locator('#usage-aggregate-invariant');
+  await expect(note).toContainText('3 run(s) are counted in no window');
+  await expect(note).toContainText('no recorded end time');
+  // The separation rule is still stated alongside it.
+  await expect(note).toContainText('never added to actual API spend');
+});
+
+test('an unestablished money cell never renders as an amount', async ({ page, request, baseURL }) => {
+  /* Same rule as the metric grid, applied where it matters most: a cell
+     carrying a stray number with an UNKNOWN class must not become a figure. */
+  await serveMutatedUsage(page, request, baseURL, (body) => {
+    body.rows[0].metrics.actual_cost_usd = {
+      value: 42.5, class: 'UNKNOWN', reason: 'billing not established', unit: 'usd',
+    };
+  });
+
+  const actual = page.locator('.usage-row').first().locator('.usage-money-cell.is-actual');
+  await expect(actual).toContainText('UNKNOWN');
+  await expect(actual).not.toContainText('42.5');
 });
 

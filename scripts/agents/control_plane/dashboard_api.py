@@ -24,7 +24,7 @@ import subprocess
 import termios
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import model_catalog, native_models
 from ..redaction import redact_text
 from . import manager_chat as _manager_chat
+from . import pricing as _pricing
 from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .commands import CommandContext, CommandError, apply_command
@@ -830,6 +831,7 @@ def create_app(
     roadmap_path: Path | None = None,
     remote: RemoteAccessState | None = None,
     manager_invoker: _manager_chat.Invoker = _manager_chat.subprocess_invoker,
+    pricing_loader: Callable[[], _pricing.PricingBook] = _pricing.load_pricing_book,
 ) -> FastAPI:
     """Build the dashboard FastAPI app for a given command context.
 
@@ -844,6 +846,12 @@ def create_app(
     uses to run one bounded interpretation command. It is injected so tests and
     the Playwright fixture drive natural-language routing with a deterministic
     fake and never make a live or billable provider call.
+
+    ``pricing_loader`` is the equivalent seam for API-equivalent pricing
+    (OCTAREL-UI-07, issue #42). It defaults to reading the cached OpenCode
+    catalog snapshot from disk; tests and the fixture inject a fixed book so
+    money figures in the browser suite do not depend on a developer's local
+    catalog. It never discovers, spawns, or contacts a provider.
     """
 
     if remote is None:
@@ -1934,7 +1942,7 @@ def create_app(
 
     @app.get("/api/usage-telemetry")
     def usage_telemetry() -> dict[str, Any]:
-        """AO-style per-run model/session usage, context and cost (OCTAREL-UI-06, issue #25).
+        """AO-style per-run model/session usage, context and cost (issues #25, #42).
 
         A read model over the durable usage-governance records the supervisor
         already writes, joined with registry facts for the worker that ran.
@@ -1942,9 +1950,16 @@ def create_app(
         DERIVED, UNKNOWN, NOT_EXPOSED or NOT_APPLICABLE -- so a figure Octarel
         cannot establish is stated as unavailable rather than estimated.
 
-        Nothing here probes a provider or runs a worker.
+        Money is two separate things here and stays that way through the whole
+        payload: an approximate API-equivalent *value* priced from the catalog
+        snapshot, and the *actual* incremental charge implied by the run's
+        billing class. The aggregates never add one to the other.
+
+        Nothing here probes a provider or runs a worker. Pricing is read from
+        the cached catalog snapshot on disk.
         """
 
+        book = pricing_loader()
         rows: list[dict[str, Any]] = []
         for record in ctx.state.list_usage_governance():
             # The worker that actually ran is the most recent route-history
@@ -1978,12 +1993,28 @@ def create_app(
                 model_from_record=bool(recorded_model),
                 cost_class_from_record=bool(recorded_cost_class),
             )
+            # Priced from the model this run is attributed to -- including a
+            # fallback run, which is attributed to the worker that actually
+            # executed, so its value is priced at that worker's model rather
+            # than the one originally preferred.
+            lookup = book.lookup(provider=facts.provider, model=facts.model)
             rows.append(
-                _usage_telemetry.build_row(record, facts=facts, project_id=ctx.selected_project_id)
+                _usage_telemetry.build_row(
+                    record,
+                    facts=facts,
+                    project_id=ctx.selected_project_id,
+                    pricing=lookup.pricing,
+                    pricing_reason=lookup.reason,
+                )
             )
 
         return {
             "rows": rows,
+            "aggregates": _usage_telemetry.build_aggregates(rows),
+            # Snapshot provenance, kept beside the rows rather than inside
+            # them: it describes where rates came from, and is never evidence
+            # about how anything was billed.
+            "pricing_source": book.provenance(),
             "unavailable_metrics": _usage_telemetry.unavailable_metrics(),
             "note": (
                 "Cache-category tokens and effective context limits are not reported by any worker runtime "

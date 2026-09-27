@@ -7,6 +7,23 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 
+/* Serve a mutated copy of a polled endpoint without racing teardown.
+   Calling route.fetch() inside the handler issues a fresh request per
+   invocation, and these panels re-poll every 2s -- so a fetch still in flight
+   when the test ends throws "Test ended"/"Response has been disposed", and
+   Playwright attributes it to whichever test is running by then. Read the real
+   payload once through the `request` fixture instead, then fulfil every later
+   invocation from that fixed body. Same established pattern as
+   usage-telemetry.spec.js's serveMutatedUsage. */
+async function serveMutated(page, request, baseURL, endpoint, mutate) {
+  const real = await (await request.get(`${baseURL}${endpoint}`)).json();
+  const mutated = mutate(real) ?? real;
+  const body = JSON.stringify(mutated);
+  await page.route(`**${endpoint}`, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body }),
+  );
+}
+
 const TASK_REF = 'ENG-AGENT-02';
 const WORKER = 'grok-build';
 
@@ -52,12 +69,10 @@ test('task cards lead with ID, title, state, stage, agent and elapsed; schedulin
   await expect(card.locator('.entity-more')).toHaveAttribute('open', '');
 });
 
-test('blocked tasks state their reason on the card without opening anything', async ({ page }) => {
+test('blocked tasks state their reason on the card without opening anything', async ({ page, request, baseURL }) => {
   // The Tasks view lists ACTIVE-projection tasks; present one that is waiting on a dependency.
-  await page.route('**/api/tasks', async (route) => {
-    const tasks = await (await route.fetch()).json();
+  await serveMutated(page, request, baseURL, '/api/tasks', (tasks) => {
     tasks[0] = { ...tasks[0], state: 'BLOCKED', projection: 'ACTIVE', dependencies: ['fx-upstream-1'], last_error: null, admission_reason: null, failure_reason_sanitized: null };
-    await route.fulfill({ json: tasks });
   });
   await navTo(page, 'view-tasks');
   const blocked = page.locator('#tasks-cards .task-card[data-task-state="BLOCKED"]').first();
@@ -105,15 +120,22 @@ test('telemetry table stacks into labelled rows on narrow screens and stays a ta
   await expect(row).toBeVisible({ timeout: 15000 });
   const cell = row.locator('td').first();
   await expect(cell).toHaveAttribute('data-label', 'Provider');
-  const display = await cell.evaluate((n) => getComputedStyle(n).display);
+  /* This panel re-renders every 2s and rebuilds the whole tbody
+     (`tbody.innerHTML = ""`), so a node resolved before an await can be
+     detached by the time it is evaluated -- getComputedStyle then reports ""
+     for a row that is rendering perfectly well. Poll the style rather than
+     sampling it once; the locator re-resolves on each attempt. Every
+     assertion is unchanged, minus the assumption that a single sample lands
+     between two rebuilds. */
   if (width(page) <= 767) {
-    expect(display).toBe('flex');
-    const before = await cell.evaluate((n) => getComputedStyle(n, '::before').content);
-    expect(before).toContain('Provider');
+    await expect.poll(() => cell.evaluate((n) => getComputedStyle(n).display)).toBe('flex');
+    await expect
+      .poll(() => cell.evaluate((n) => getComputedStyle(n, '::before').content))
+      .toContain('Provider');
     // Every value is still present: all three labelled fields per row.
-    expect(await row.locator('td[data-label]').count()).toBe(3);
+    await expect(row.locator('td[data-label]')).toHaveCount(3);
   } else {
-    expect(display).toBe('table-cell');
+    await expect.poll(() => cell.evaluate((n) => getComputedStyle(n).display)).toBe('table-cell');
   }
   expect(await overflows(page)).toBe(false);
 });
@@ -335,12 +357,10 @@ test('system page separates runtime, repository, environment, services and diagn
 
 // 11 ------------------------------------------------------------- accepted task is not startable
 
-test('Quick Start shows why an already-accepted task cannot be started again', async ({ page }) => {
+test('Quick Start shows why an already-accepted task cannot be started again', async ({ page, request, baseURL }) => {
   const reason = 'V1-08 was already implemented and accepted by run RB-x (every acceptance stage passed). Octarel will not start it again.';
-  await page.route('**/api/quickstart', async (route) => {
-    const options = await (await route.fetch()).json();
+  await serveMutated(page, request, baseURL, '/api/quickstart', (options) => {
     options[0] = { ...options[0], ready: false, unavailable_reason: reason, dependency_state: 'Blocked — already accepted; awaiting merge/reconciliation' };
-    await route.fulfill({ json: options });
   });
   await page.goto('/');
   await navTo(page, 'view-runs');
@@ -352,13 +372,11 @@ test('Quick Start shows why an already-accepted task cannot be started again', a
   await expect(page.locator('#prepared-run-feedback')).toContainText('will not start it again');
 });
 
-test('Active Work does not present a finished task as the current one', async ({ page }) => {
-  await page.route('**/api/workflow', async (route) => {
-    const wf = await (await route.fetch()).json();
+test('Active Work does not present a finished task as the current one', async ({ page, request, baseURL }) => {
+  await serveMutated(page, request, baseURL, '/api/workflow', (wf) => {
     wf.task = { ...wf.task, state: 'SUCCEEDED' };
     wf.stages = wf.stages.map((stage) => ({ ...stage, state: 'SUCCEEDED' }));
     wf.orchestrator = { ...wf.orchestrator, state: 'SUCCEEDED' };
-    await route.fulfill({ json: wf });
   });
   await page.goto('/');
   const active = page.locator('#overview-active-work');
