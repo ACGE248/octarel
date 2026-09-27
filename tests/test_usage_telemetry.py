@@ -15,6 +15,7 @@ still gets no figure at all.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 import pytest
 
@@ -725,21 +726,21 @@ def test_the_cost_metric_is_no_longer_part_of_the_generic_metric_grid():
 REPORTED = ("worker CLI structured total_cost_usd",)
 
 
-def reported_record(usd, source=REPORTED[0], **over):
-    base = {
-        "telemetry_quality": "exact",
-        "input_tokens": 100_000,
-        "output_tokens": 10_000,
-        "reported_cost_usd": usd,
-        "reported_cost_source": source,
-    }
+def reported_record(**over):
+    base = {"telemetry_quality": "exact", "input_tokens": 100_000, "output_tokens": 10_000}
     base.update(over)
     return record(**base)
 
 
+def with_cost(facts, usd, source=REPORTED[0]):
+    """The attributed attempt's own reported cost, as the endpoint supplies it."""
+
+    return replace(facts, reported_cost_usd=usd, reported_cost_source=source)
+
+
 def actual(facts, usd, **over):
     return build_row(
-        reported_record(usd, **over), facts=facts, project_id="p", pricing=FLASH_RATES
+        reported_record(**over), facts=with_cost(facts, usd), project_id="p", pricing=FLASH_RATES
     )["metrics"]["actual_cost_usd"]
 
 
@@ -793,7 +794,9 @@ def test_a_subscription_route_cannot_become_api_spend_because_a_figure_exists():
     assert cell["basis"] == "billing-class"
     assert "subscription" in cell["formula"]
     # The reported figure is not smuggled in anywhere on the row either.
-    row = build_row(reported_record(12.34), facts=SUBSCRIPTION, project_id="p", pricing=FLASH_RATES)
+    row = build_row(
+        reported_record(), facts=with_cost(SUBSCRIPTION, 12.34), project_id="p", pricing=FLASH_RATES
+    )
     assert row["billing"]["class"] == BILLING_SUBSCRIPTION
     assert row["metrics"]["actual_cost_usd"]["value"] == 0.0
 
@@ -834,7 +837,7 @@ def test_the_equivalent_value_is_untouched_by_a_reported_cost():
     """Issue #44 must not change what estimated_api_equivalent_usd means."""
 
     metrics = build_row(
-        reported_record(0.69791188), facts=METERED, project_id="p", pricing=FLASH_RATES
+        reported_record(), facts=with_cost(METERED, 0.69791188), project_id="p", pricing=FLASH_RATES
     )["metrics"]
     equivalent = metrics["estimated_api_equivalent_usd"]
     assert equivalent["value"] == pytest.approx(0.055)
@@ -856,11 +859,8 @@ def test_a_measured_row_counts_once_in_actual_spend():
     """Measured and derived are the same field, so no execution is double-counted."""
 
     measured = build_row(
-        reported_record(
-            0.69791188,
-            route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}],
-        ),
-        facts=METERED,
+        reported_record(route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}]),
+        facts=with_cost(METERED, 0.69791188),
         project_id="p",
         pricing=FLASH_RATES,
     )
@@ -878,10 +878,8 @@ def test_aggregate_spend_prefers_the_measured_figure_for_a_row():
     """The window total reflects what was reported, not what was reconstructed."""
 
     measured = build_row(
-        reported_record(
-            2.5, route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}]
-        ),
-        facts=METERED,
+        reported_record(route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}]),
+        facts=with_cost(METERED, 2.5),
         project_id="p",
         pricing=FLASH_RATES,
     )

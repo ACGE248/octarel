@@ -225,6 +225,12 @@ class WorkerFacts:
     cost_class: str | None = None
     model_from_record: bool = False
     cost_class_from_record: bool = False
+    # OCTAREL-UI-08 (issue #44): the cost the attributed attempt's own worker
+    # reported. Carried beside the other attempt-scoped facts because cost and
+    # attribution must come from the same attempt -- a figure read from
+    # anywhere else can be served against a worker that never produced it.
+    reported_cost_usd: float | None = None
+    reported_cost_source: str | None = None
 
 
 def _token_metrics(record: dict[str, Any]) -> dict[str, Any]:
@@ -458,13 +464,13 @@ def _actual_cost_metric(
 
     # API-billed. Strongest evidence first: what the worker itself reported
     # this run cost beats what a price list implies it should have cost.
-    reported = usable_reported_cost(record.get("reported_cost_usd"))
+    reported = usable_reported_cost(facts.reported_cost_usd)
     if reported is not None:
         return _with_basis(
             metric(
                 reported,
                 klass=CLASS_MEASURED,
-                source=str(record.get("reported_cost_source") or SOURCE_WORKER_CLI),
+                source=str(facts.reported_cost_source or SOURCE_WORKER_CLI),
                 unit="usd",
             ),
             BASIS_REPORTED,

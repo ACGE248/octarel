@@ -77,88 +77,46 @@ def test_human_readable_prose_is_never_scraped():
     assert extract_reported_cost("Total cost: $0.69 for this run").usd is None
 
 
-# ------------------------------------------------------------ persistence
+# ------------------------------------------------- persistence (attempt-scoped)
 
 
-def test_a_reported_cost_round_trips_through_usage_governance():
-    """Persisted with the run so history never depends on today's catalog."""
-
-    state = State(":memory:")
+def governance(state, runbook_id, history):
     state.upsert_usage_governance(
         {
-            "runbook_id": "rb-1",
+            "runbook_id": runbook_id,
             "classification": "routine",
             "codex_policy": "conserve",
-            "reported_cost_usd": 0.69791188,
-            "reported_cost_source": SOURCE_WORKER_CLI,
+            "route_history": history,
         }
     )
-    stored = state.get_usage_governance("rb-1")
-    assert stored["reported_cost_usd"] == pytest.approx(0.69791188)
-    assert stored["reported_cost_source"] == SOURCE_WORKER_CLI
 
 
-@pytest.mark.parametrize("bad", [-1, float("nan"), "0.5", True])
-def test_the_store_refuses_a_value_that_cannot_stand_as_money(bad):
-    """Validated at the boundary, so a bad figure never reaches the column."""
+def test_a_reported_cost_round_trips_on_the_attempt_that_produced_it():
+    """Stored with the attempt, so it travels with its own worker.
+
+    Independent review (Grok Build) found a record-level column misattributing
+    across a fallback: the figure outlived the attempt that reported it and was
+    served as the next worker's spend. route_history is already durable JSON,
+    so the attempt carries it with no schema change.
+    """
 
     state = State(":memory:")
-    state.upsert_usage_governance(
-        {"runbook_id": "rb-bad", "classification": "routine", "codex_policy": "conserve",
-         "reported_cost_usd": bad, "reported_cost_source": SOURCE_WORKER_CLI}
-    )
-    stored = state.get_usage_governance("rb-bad")
-    assert stored["reported_cost_usd"] is None
-    # The source is dropped with it rather than left describing nothing.
-    assert stored["reported_cost_source"] is None
+    governance(state, "rb-1", [
+        {"worker": "grok-build", "reported_cost_usd": 0.69791188,
+         "reported_cost_source": SOURCE_WORKER_CLI},
+    ])
+    attempt = state.get_usage_governance("rb-1")["route_history"][-1]
+    assert attempt["reported_cost_usd"] == pytest.approx(0.69791188)
+    assert attempt["reported_cost_source"] == SOURCE_WORKER_CLI
 
 
-def test_a_record_written_without_a_cost_simply_has_none():
+def test_no_schema_column_was_added_for_the_reported_cost():
+    """Two homes for one fact is the drift risk this deliberately avoids."""
+
     state = State(":memory:")
-    state.upsert_usage_governance(
-        {"runbook_id": "rb-none", "classification": "routine", "codex_policy": "conserve"}
-    )
-    assert state.get_usage_governance("rb-none")["reported_cost_usd"] is None
-
-
-def test_an_existing_database_gains_the_columns_without_a_manual_step():
-    """A pre-#44 on-disk database must keep opening."""
-
-    import sqlite3
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        db = Path(tmp) / "old.sqlite3"
-        # A usage_governance table exactly as it shipped before this change.
-        conn = sqlite3.connect(db)
-        conn.execute(
-            "CREATE TABLE usage_governance (runbook_id TEXT PRIMARY KEY, task_id TEXT, "
-            "classification TEXT NOT NULL, codex_policy TEXT NOT NULL, "
-            "codex_auto_eligible INTEGER NOT NULL DEFAULT 0, "
-            "max_codex_invocations INTEGER NOT NULL DEFAULT 1, "
-            "codex_invocations INTEGER NOT NULL DEFAULT 0, "
-            "telemetry_quality TEXT NOT NULL DEFAULT 'unknown', input_tokens INTEGER, "
-            "output_tokens INTEGER, escalation_state TEXT NOT NULL DEFAULT 'none', "
-            "escalation_reason TEXT, route_history TEXT NOT NULL DEFAULT '[]', "
-            "escalation_history TEXT NOT NULL DEFAULT '[]', "
-            "context_manifest TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT INTO usage_governance (runbook_id, classification, codex_policy, updated_at) "
-            "VALUES ('legacy', 'routine', 'conserve', '2026-09-01T00:00:00+00:00')"
-        )
-        conn.commit()
-        conn.close()
-
-        state = State(str(db))
-        legacy = state.get_usage_governance("legacy")
-        assert legacy is not None
-        assert legacy["reported_cost_usd"] is None
-        # ...and the migrated database accepts a new one.
-        legacy["reported_cost_usd"] = 0.25
-        legacy["reported_cost_source"] = SOURCE_WORKER_CLI
-        state.upsert_usage_governance(legacy)
-        assert state.get_usage_governance("legacy")["reported_cost_usd"] == pytest.approx(0.25)
+    columns = {row[1] for row in state._conn.execute("PRAGMA table_info(usage_governance)")}
+    assert "reported_cost_usd" not in columns
+    assert "reported_cost_source" not in columns
 
 
 # ------------------------------------------------------------- capture
@@ -172,7 +130,8 @@ def test_the_supervisor_records_the_cost_alongside_the_token_counts(tmp_path):
     registry = load_registry()
     state = State(":memory:")
     state.upsert_usage_governance(
-        {"runbook_id": "rb-s", "classification": "routine", "codex_policy": "conserve"}
+        {"runbook_id": "rb-s", "classification": "routine", "codex_policy": "conserve",
+         "route_history": [{"worker": "grok-build", "status": "RUNNING"}]}
     )
     supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
     task = Task(id="t-s", task_ref="X", role="primary-implementation", worker="grok-build",
@@ -181,8 +140,10 @@ def test_the_supervisor_records_the_cost_alongside_the_token_counts(tmp_path):
     supervisor._record_usage(task, payload(**{REPORTED_COST_FIELD: 0.69791188}))
 
     stored = state.get_usage_governance("rb-s")
-    assert stored["reported_cost_usd"] == pytest.approx(0.69791188)
-    assert stored["reported_cost_source"] == SOURCE_WORKER_CLI
+    attempt = stored["route_history"][-1]
+    assert attempt["worker"] == "grok-build"
+    assert attempt["reported_cost_usd"] == pytest.approx(0.69791188)
+    assert attempt["reported_cost_source"] == SOURCE_WORKER_CLI
     # The token counts it has always captured are unaffected.
     assert stored["telemetry_quality"] == "exact"
     assert stored["input_tokens"] == 5
@@ -196,16 +157,43 @@ def test_a_later_pass_without_the_field_never_erases_a_captured_cost(tmp_path):
     registry = load_registry()
     state = State(":memory:")
     state.upsert_usage_governance(
-        {"runbook_id": "rb-k", "classification": "routine", "codex_policy": "conserve"}
+        {"runbook_id": "rb-k", "classification": "routine", "codex_policy": "conserve",
+         "route_history": [{"worker": "grok-build", "status": "RUNNING"}]}
     )
     supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
     task = Task(id="t-k", task_ref="X", role="primary-implementation", worker="grok-build",
                 runbook_id="rb-k", command=("grok",))
 
     supervisor._record_usage(task, payload(**{REPORTED_COST_FIELD: 0.5}))
-    supervisor._record_usage(task, payload())  # same run, output without the field
+    supervisor._record_usage(task, payload())  # same attempt, output without the field
 
-    assert state.get_usage_governance("rb-k")["reported_cost_usd"] == pytest.approx(0.5)
+    attempt = state.get_usage_governance("rb-k")["route_history"][-1]
+    assert attempt["reported_cost_usd"] == pytest.approx(0.5)
+
+
+def test_a_cost_is_written_to_the_running_attempt_not_an_older_finished_one(tmp_path):
+    """The figure must land on the worker that produced it, mid-fallback."""
+
+    from scripts.agents.control_plane.models import Task
+
+    registry = load_registry()
+    state = State(":memory:")
+    state.upsert_usage_governance(
+        {"runbook_id": "rb-fb2", "classification": "routine", "codex_policy": "conserve",
+         "route_history": [
+             {"worker": "claude-code", "status": "FAILED"},
+             {"worker": "grok-build", "status": "RUNNING"},
+         ]}
+    )
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    task = Task(id="t-fb2", task_ref="X", role="primary-implementation", worker="grok-build",
+                runbook_id="rb-fb2", command=("grok",))
+
+    supervisor._record_usage(task, payload(**{REPORTED_COST_FIELD: 0.33}))
+
+    history = state.get_usage_governance("rb-fb2")["route_history"]
+    assert "reported_cost_usd" not in history[0], "the failed attempt must not acquire a cost"
+    assert history[1]["reported_cost_usd"] == pytest.approx(0.33)
 
 
 # -------------------------------------------------------------- endpoint
@@ -226,10 +214,12 @@ def ctx(tmp_path: Path) -> CommandContext:
 
 
 def test_the_endpoint_attributes_a_reported_cost_to_the_worker_that_ran(ctx, tmp_path):
-    """A fallback run's cost belongs to the replacement, not the worker that failed.
+    """A fallback run's cost belongs to the replacement that reported it.
 
-    Pricing is deliberately unavailable here, so a MEASURED figure can only
-    come from the recorded cost -- there is no derived path to confuse it with.
+    Pricing is deliberately unavailable, so a MEASURED figure can only come
+    from the attempt's recorded cost -- there is no derived path to confuse it
+    with. The failed attempt carries a *different* figure, so a row serving the
+    wrong one would be visible in the value rather than merely plausible.
     """
 
     ctx.state.upsert_usage_governance(
@@ -240,12 +230,13 @@ def test_the_endpoint_attributes_a_reported_cost_to_the_worker_that_ran(ctx, tmp
             "telemetry_quality": "exact",
             "input_tokens": 1000,
             "output_tokens": 100,
-            "reported_cost_usd": 0.42,
-            "reported_cost_source": SOURCE_WORKER_CLI,
             "route_history": [
-                {"worker": "claude-code", "provider": "Anthropic", "status": "FAILED"},
+                {"worker": "claude-code", "provider": "Anthropic", "status": "FAILED",
+                 "cost_class": "premium-subscription",
+                 "reported_cost_usd": 0.99, "reported_cost_source": SOURCE_WORKER_CLI},
                 {"worker": "grok-build", "provider": "xAI", "model": "grok-4.6",
-                 "cost_class": "metered-configured", "status": "SUCCEEDED"},
+                 "cost_class": "metered-configured", "status": "SUCCEEDED",
+                 "reported_cost_usd": 0.42, "reported_cost_source": SOURCE_WORKER_CLI},
             ],
         }
     )
@@ -255,9 +246,52 @@ def test_the_endpoint_attributes_a_reported_cost_to_the_worker_that_ran(ctx, tmp
     assert row["attribution"]["worker"] == "grok-build"
     assert row["billing"]["class"] == "API_BILLED"
     cost = row["metrics"]["actual_cost_usd"]
-    assert cost["value"] == pytest.approx(0.42)
+    assert cost["value"] == pytest.approx(0.42), "must be the replacement's own figure"
+    assert cost["value"] != pytest.approx(0.99), "never the failed attempt's figure"
     assert cost["class"] == "MEASURED"
     assert cost["basis"] == "reported"
+
+
+def test_a_subscription_attempts_figure_never_becomes_a_later_workers_api_spend(ctx, tmp_path):
+    """The blocker this design exists to make impossible.
+
+    A subscription CLI's total_cost_usd means "what this would have cost on
+    the API", not a charge. With the figure stored per-runbook it outlived the
+    attempt that reported it: once a fallback to an API-billed worker became
+    the attributed attempt, that value was served as the replacement's
+    MEASURED spend -- someone else's number, on the wrong worker, summed into
+    actual API spend. Binding it to the attempt makes that unrepresentable.
+    """
+
+    ctx.state.upsert_usage_governance(
+        {
+            "runbook_id": "rb-cross",
+            "classification": "routine",
+            "codex_policy": "conserve",
+            "telemetry_quality": "exact",
+            "input_tokens": 1000,
+            "output_tokens": 100,
+            "route_history": [
+                {"worker": "claude-code", "provider": "Anthropic",
+                 "cost_class": "premium-subscription", "status": "FAILED",
+                 "reported_cost_usd": 0.51, "reported_cost_source": SOURCE_WORKER_CLI},
+                # The replacement reported nothing of its own.
+                {"worker": "grok-build", "provider": "xAI", "model": "grok-4.6",
+                 "cost_class": "metered-configured", "status": "SUCCEEDED"},
+            ],
+        }
+    )
+    app = create_app(ctx, roadmap_path=tmp_path / "R.md", pricing_loader=lambda: FIXED_BOOK)
+    body = TestClient(app).get("/api/usage-telemetry").json()
+    row = body["rows"][0]
+
+    assert row["attribution"]["worker"] == "grok-build"
+    cost = row["metrics"]["actual_cost_usd"]
+    assert cost["value"] is None, "the subscription attempt's figure must not appear here"
+    assert cost["class"] == "UNKNOWN"
+    # ...and it must not reach the spend aggregate either.
+    spend = body["aggregates"]["windows"]["month"]["actual_api_spend_usd"]
+    assert spend["value"] != pytest.approx(0.51)
 
 
 def test_the_endpoint_keeps_a_subscription_row_at_zero_despite_a_reported_cost(ctx, tmp_path):

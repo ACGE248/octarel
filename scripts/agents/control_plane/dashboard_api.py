@@ -1992,6 +1992,11 @@ def create_app(
                 cost_class=recorded_cost_class or getattr(worker, "cost_class", None),
                 model_from_record=bool(recorded_model),
                 cost_class_from_record=bool(recorded_cost_class),
+                # OCTAREL-UI-08 (issue #44): from the same attempt that supplies
+                # the worker above, so a cost can never be reported against a
+                # worker that did not produce it.
+                reported_cost_usd=entry.get("reported_cost_usd"),
+                reported_cost_source=entry.get("reported_cost_source"),
             )
             # Priced from the model this run is attributed to -- including a
             # fallback run, which is attributed to the worker that actually

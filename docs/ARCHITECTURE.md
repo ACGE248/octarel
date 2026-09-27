@@ -130,8 +130,12 @@ pattern-matching prose.
 subscription-backed CLI may itself print a cost meaning "what this would have cost on the API"; reading it
 before classifying the route would turn a subscription session into reported API spend. Only an API-billed
 route ever reaches the monetary evidence. The reported figure is read from the same structured payload as the
-token counts, from one agreed top-level field, and is persisted with the run so a historical figure never
-depends on today's registry or catalog. Prose is never scraped: a number in free text is a guess.
+token counts, from one agreed top-level field, and is persisted **on the route-history attempt that produced
+it** rather than on the runbook. That placement is the point: the read model attributes a row to the newest
+attempt, so a record-level figure would be served against whichever worker ran last -- after a fallback, a
+subscription worker's number could surface as the replacement's measured API spend. Taking the worker and the
+cost from the same attempt makes that unrepresentable, and a historical figure never depends on today's
+registry or catalog. Prose is never scraped: a number in free text is a guess.
 
 Rates come from the OpenCode model catalog (`control_plane/pricing.py`), which is already the authority
 `model_catalog.classify_cost` uses to decide whether a route is metered -- there is no second price table to

@@ -656,10 +656,16 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
                 "telemetry_quality": "exact",
                 "input_tokens": tokens[0],
                 "output_tokens": tokens[1],
-                "route_history": [{**history[0], "status": "SUCCEEDED", "ended_at": utc_now_iso()}],
+                # OCTAREL-UI-08 (issue #44): a reported cost belongs to the
+                # attempt that produced it, not to the record.
+                "route_history": [{
+                    **history[0],
+                    "status": "SUCCEEDED",
+                    "ended_at": utc_now_iso(),
+                    **({"reported_cost_usd": reported[0], "reported_cost_source": reported[1]}
+                       if reported else {}),
+                }],
                 "context_manifest": {},
-                "reported_cost_usd": reported[0] if reported else None,
-                "reported_cost_source": reported[1] if reported else None,
             }
         )
 
