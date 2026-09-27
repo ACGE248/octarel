@@ -411,17 +411,28 @@ def test_no_attempt_to_attach_to_means_nothing_is_written(tmp_path):
 
 
 def test_a_cost_is_not_attached_to_another_workers_attempt(tmp_path):
-    """The whole point of the relocation, at the write boundary."""
+    """The whole point of the relocation, at the write boundary.
 
-    history = capture_into(tmp_path, [{"worker": "claude-code", "status": "RUNNING"}])
-    assert "reported_cost_usd" not in history[0]
+    Asserted as "the history is unchanged", not merely "this attempt lacks the
+    key". Re-review (Grok Build) noted the weaker form passes if the figure is
+    written anywhere else -- appended as a new attempt, say -- which is the
+    same misattribution in a different shape.
+    """
+
+    seeded = [{"worker": "claude-code", "status": "RUNNING"}]
+    assert capture_into(tmp_path, [dict(seeded[0])]) == seeded
 
 
 def test_an_already_terminal_attempt_is_not_rewritten(tmp_path):
-    """A finished attempt's evidence is not amended by a later reconcile."""
+    """A finished attempt's evidence is not amended by a later reconcile.
 
-    history = capture_into(tmp_path, [{"worker": "grok-build", "status": "SUCCEEDED"}])
-    assert "reported_cost_usd" not in history[0]
+    Again the whole history must be untouched: appending a fresh attempt to
+    carry the figure would leave the terminal one clean and still be a write
+    that should not have happened.
+    """
+
+    seeded = [{"worker": "grok-build", "status": "SUCCEEDED"}]
+    assert capture_into(tmp_path, [dict(seeded[0])]) == seeded
 
 
 def test_the_newest_live_attempt_wins_when_a_worker_appears_twice(tmp_path):
