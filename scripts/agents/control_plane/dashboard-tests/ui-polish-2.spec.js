@@ -120,15 +120,22 @@ test('telemetry table stacks into labelled rows on narrow screens and stays a ta
   await expect(row).toBeVisible({ timeout: 15000 });
   const cell = row.locator('td').first();
   await expect(cell).toHaveAttribute('data-label', 'Provider');
-  const display = await cell.evaluate((n) => getComputedStyle(n).display);
+  /* This panel re-renders every 2s and rebuilds the whole tbody
+     (`tbody.innerHTML = ""`), so a node resolved before an await can be
+     detached by the time it is evaluated -- getComputedStyle then reports ""
+     for a row that is rendering perfectly well. Poll the style rather than
+     sampling it once; the locator re-resolves on each attempt. Every
+     assertion is unchanged, minus the assumption that a single sample lands
+     between two rebuilds. */
   if (width(page) <= 767) {
-    expect(display).toBe('flex');
-    const before = await cell.evaluate((n) => getComputedStyle(n, '::before').content);
-    expect(before).toContain('Provider');
+    await expect.poll(() => cell.evaluate((n) => getComputedStyle(n).display)).toBe('flex');
+    await expect
+      .poll(() => cell.evaluate((n) => getComputedStyle(n, '::before').content))
+      .toContain('Provider');
     // Every value is still present: all three labelled fields per row.
-    expect(await row.locator('td[data-label]').count()).toBe(3);
+    await expect(row.locator('td[data-label]')).toHaveCount(3);
   } else {
-    expect(display).toBe('table-cell');
+    await expect.poll(() => cell.evaluate((n) => getComputedStyle(n).display)).toBe('table-cell');
   }
   expect(await overflows(page)).toBe(false);
 });
