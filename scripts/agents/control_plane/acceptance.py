@@ -348,6 +348,27 @@ def _advance_test_and_review(
         evidence[STAGE_TEST] = _evidence(EVIDENCE_FAIL, f"unable to resolve an exact-tree candidate: {exc}")
         return
 
+    # ENG-AO-10: gate_candidate is the established writer boundary. The index
+    # is stable here and no review subprocess is in flight (guarded above), so
+    # prepare advisory context for this exact candidate before review dispatch.
+    # Refresh failure is recorded and deliberately cannot turn a valid
+    # candidate into an acceptance failure.
+    try:
+        from ..graph_lifecycle import request_refresh, state_event_recorder
+
+        request_refresh(
+            worktree,
+            project_id=runbook.project_id,
+            trigger="implementation-checkpoint",
+            event_recorder=state_event_recorder(state, runbook.project_id),
+            wait=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - advisory refresh must not block acceptance
+        state.record_event(
+            category="graphify", level="error", project_id=runbook.project_id,
+            message=f"Graphify checkpoint refresh failed safely before dispatch: {type(exc).__name__}",
+        )
+
     risk = classify(paths)
     review_required = risk.review_level in {"high", "critical"}
     review_record = evidence.get(STAGE_REVIEW)

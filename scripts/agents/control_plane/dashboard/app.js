@@ -4701,6 +4701,10 @@
     if (repo.unpushed_worktrees > 0) problems.push(["Repository", `${repo.unpushed_worktrees} worktree${repo.unpushed_worktrees === 1 ? " has" : "s have"} unpushed commits`]);
     const app = state.appStatus || {};
     if (app.last_exit_code != null && app.last_exit_code !== 0) problems.push(["Services", `Development app last exited with code ${app.last_exit_code}`]);
+    const graphify = state.graphify || {};
+    if (graphify.status && graphify.status !== "READY" && graphify.status !== "UNKNOWN") {
+      problems.push(["Graphify", `${graphify.status}: ${graphify.reason || "repository intelligence is degraded"}`]);
+    }
     const gate = state.gate;
     if (gate && !gate.ready && gate.status !== "IDLE") problems.push(["Diagnostics", `Local gate not ready: ${gate.reason || "no reason recorded"}`]);
     const errors = (state.events || []).filter((e) => e.level === "error");
@@ -4952,6 +4956,27 @@
     (data.recent_merges || []).forEach((merge) => root.appendChild(el("div", { class: "entity-meta", text: `${merge.sha.slice(0, 8)} · ${merge.merged_at} · ${merge.subject}` })));
   }
 
+  async function refreshGraphify() {
+    const data = await getJSON("/api/graphify");
+    state.graphify = data;
+    const run = data.active_run_graph_context;
+    renderKV("graphify-body", [
+      ["Status", data.status || "UNKNOWN", ["MISSING", "STALE", "FAILED_SAFE", "OUTDATED"].includes(data.status) ? "warn" : undefined],
+      ["Version", data.graphify_version || data.version || "—"],
+      ["Selected project", data.selected_project || "—"],
+      ["Branch / worktree", [data.branch, data.worktree_id].filter(Boolean).join(" · ") || "—"],
+      ["Indexed tree", data.tree_id || "—"],
+      ["Current tree", data.current_tree_id || "—"],
+      ["Last refresh", data.finished_at || "—"],
+      ["Duration", data.duration_seconds == null ? "—" : `${data.duration_seconds}s`],
+      ["Graph age", data.graph_age_seconds == null ? "—" : `${Math.round(data.graph_age_seconds)}s`],
+      ["Files / nodes / edges", `${data.files ?? "—"} / ${data.nodes ?? "—"} / ${data.edges ?? "—"}`],
+      ["Active run received context", run == null ? "no active recorded attempt" : (run.injected ? "yes" : "no")],
+      ["Reason", data.reason || "—"],
+    ]);
+    renderSystemHealth();
+  }
+
   async function refreshTerminalHistory() {
     const limit = document.getElementById("terminal-history-limit")?.value || "50";
     const rows = await getJSON(`/api/terminal/history?limit=${encodeURIComponent(limit)}`);
@@ -5040,6 +5065,7 @@
         refreshOperations,
         refreshAppLifecycle,
         refreshRepositoryHealth,
+        refreshGraphify,
         refreshTerminalHistory,
       ];
       let results = await Promise.allSettled(foundationJobs.map((job) => job()));
@@ -5228,6 +5254,16 @@
     document.getElementById("app-start")?.addEventListener("click", () => postJSON("/api/app-lifecycle/start", {}).then(refreshAppLifecycle));
     document.getElementById("app-stop")?.addEventListener("click", () => confirmAndRun("Stop only the OctaScene development process started by Control Center?", () => postJSON("/api/app-lifecycle/stop", { confirm: true }).then(refreshAppLifecycle)));
     document.getElementById("app-restart")?.addEventListener("click", () => confirmAndRun("Restart the managed local OctaScene development process?", () => postJSON("/api/app-lifecycle/restart", { confirm: true }).then(refreshAppLifecycle)));
+    document.getElementById("graphify-refresh")?.addEventListener("click", async () => {
+      const result = await postJSON("/api/graphify/refresh", {});
+      document.getElementById("graphify-action-result").textContent = result.reason || result.status;
+      await refreshGraphify();
+    });
+    document.getElementById("graphify-check")?.addEventListener("click", async () => {
+      const result = await postJSON("/api/graphify/check", {});
+      document.getElementById("graphify-action-result").textContent = result.reason || result.status;
+      await refreshGraphify();
+    });
   }
 
   // --------------------------------------------------------------------- steering

@@ -90,6 +90,49 @@ def test_overview_endpoint(client):
     assert body["octascene_app_status"] in {"RUNNING", "STOPPED", "UNKNOWN"}
 
 
+def test_graphify_dashboard_read_uses_cached_status_and_never_builds(client, monkeypatch):
+    from scripts.agents.control_plane import dashboard_api
+
+    calls = []
+    monkeypatch.setattr(
+        dashboard_api,
+        "graphify_cached_status",
+        lambda root, *, project_id, verify_tree: calls.append((root, project_id, verify_tree)) or {
+            "status": "READY", "tree_id": "abc123", "reason": "cached"
+        },
+    )
+    monkeypatch.setattr(
+        dashboard_api,
+        "graphify_request_refresh",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("GET must never queue a refresh")),
+    )
+    body = client.get("/api/graphify").json()
+    assert body["status"] == "READY"
+    assert body["tree_id"] == "abc123"
+    assert len(calls) == 1
+    assert calls[0][2] is False
+
+
+def test_graphify_manual_refresh_is_bounded_and_audited(client, ctx, monkeypatch):
+    from scripts.agents.control_plane import dashboard_api
+
+    captured = []
+
+    def request(root, *, project_id, trigger, event_recorder):
+        captured.append((root, project_id, trigger))
+        event_recorder({
+            "status": "READY", "trigger": trigger, "worktree_id": "wt", "tree_id": "tree",
+            "duration_seconds": 0.1, "reason": "current",
+        })
+
+    monkeypatch.setattr(dashboard_api, "graphify_request_refresh", request)
+    response = client.post("/api/graphify/refresh", json={})
+    assert response.status_code == 200
+    assert response.json()["status"] == "REFRESHING"
+    assert captured == [(ctx.project_root, None, "manual")]
+    assert any(event.category == "graphify" and "trigger=manual" in event.message for event in ctx.state.list_events())
+
+
 def test_agent_and_provider_endpoints_expose_registry_driven_human_metadata(client):
     agent = next(item for item in client.get("/api/models").json() if item["worker"] == "claude-code")
     assert agent["display_name"] == "Claude Code"
@@ -1417,4 +1460,3 @@ def test_quickstart_option_is_never_substituted_when_no_key_is_given(ctx, roadma
 
     assert body["status"] == "UNRECOGNIZED"
     assert "quickstart_option" not in body
-

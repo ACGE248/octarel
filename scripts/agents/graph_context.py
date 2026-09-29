@@ -28,6 +28,7 @@ Safety properties:
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import os
@@ -35,14 +36,18 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+import weakref
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from .redaction import redact_text
 from .validation import _FORBIDDEN_NAMES, _FORBIDDEN_PARTS, _SECRET_MARKERS
 
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 2
 GRAPH_DIRNAME = "graph-context"
 
 STATUS_USED = "used"
@@ -63,6 +68,9 @@ MAX_ITEMS = 12
 MAX_CONTEXT_CHARS = 6_000
 BUILD_TIMEOUT_SECONDS = 120.0
 KEEP_TREES_PER_WORKTREE = 2
+
+_BUILD_LOCKS_GUARD = threading.Lock()
+_BUILD_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 
 _SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx", ".db", ".sqlite", ".sqlite3")
 # Provider credentials must never reach Graphify: it then has no paid/LLM path to take.
@@ -205,7 +213,9 @@ def _scrubbed_env(base: Mapping[str, str]) -> dict[str, str]:
         for key, value in base.items()
         if key not in _SCRUBBED_ENV_NAMES and not any(marker in key.upper() for marker in _SCRUBBED_ENV_MARKERS)
     }
-    env["GRAPHIFY_NO_LLM"] = "1"
+    # GRAPHIFY_NO_LLM is intentionally not set: upstream does not implement it.
+    # The supported ``extract --code-only`` command below is the actual no-LLM
+    # contract; credential scrubbing is an independent fail-closed backstop.
     env["NO_COLOR"] = "1"
     return env
 
@@ -235,36 +245,125 @@ def _write_snapshot(root: Path, files: Iterable[str], destination: Path) -> None
         shutil.copyfile(root / relative, target)
 
 
-def _build_graph(binary: str, root: Path, files: dict[str, str], cache_dir: Path, meta: dict[str, Any]) -> str:
+def _graph_counts(graph_path: Path) -> tuple[int, int]:
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    if not isinstance(graph, dict):
+        raise TypeError("graph is not an object")
+    nodes = graph.get("nodes") or []
+    edges = graph.get("links") or graph.get("edges") or []
+    return len(nodes) if isinstance(nodes, list) else 0, len(edges) if isinstance(edges, list) else 0
+
+
+def _build_graph(
+    binary: str,
+    root: Path,
+    files: dict[str, str],
+    cache_dir: Path,
+    meta: dict[str, Any],
+    *,
+    trigger: str = "context-on-demand",
+    graphify_version: str | None = None,
+    incremental_from: Path | None = None,
+) -> str:
+    """Coalesce in-process builds for one exact cache key."""
+
+    key = str(cache_dir.resolve())
+    with _BUILD_LOCKS_GUARD:
+        lock = _BUILD_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        expected_keys = ("schema", "project_key", "project_id", "repo_id", "worktree_id", "tree_id", "llm_enrichment")
+        expected = {name: meta[name] for name in expected_keys if name in meta}
+        if _load_valid_cache(cache_dir, expected)[0] is not None:
+            return ""
+        return _build_graph_unlocked(
+            binary,
+            root,
+            files,
+            cache_dir,
+            meta,
+            trigger=trigger,
+            graphify_version=graphify_version,
+            incremental_from=incremental_from,
+        )
+
+
+def _build_graph_unlocked(
+    binary: str,
+    root: Path,
+    files: dict[str, str],
+    cache_dir: Path,
+    meta: dict[str, Any],
+    *,
+    trigger: str = "context-on-demand",
+    graphify_version: str | None = None,
+    incremental_from: Path | None = None,
+) -> str:
     """Build into ``cache_dir``; returns ``""`` on success or a failure reason."""
 
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".build-", dir=cache_dir.parent))
     try:
         snapshot = staging / "snapshot"
-        snapshot.mkdir()
+        previous_snapshot = incremental_from / "snapshot" if incremental_from is not None else None
+        incremental = bool(previous_snapshot and (previous_snapshot / "graphify-out" / "graph.json").is_file())
+        if incremental and previous_snapshot is not None:
+            shutil.copytree(previous_snapshot, snapshot)
+            # Keep only Graphify's local incremental machinery/output, then
+            # materialize the complete newly filtered source snapshot. This
+            # makes deletions and newly-sensitive paths disappear before the
+            # pinned deterministic ``update`` command observes the tree.
+            retained = {"graphify-out", "cache", ".graphify_root", ".graphify_python", "needs_update"}
+            for child in snapshot.iterdir():
+                if child.name in retained:
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        else:
+            snapshot.mkdir()
         _write_snapshot(root, files, snapshot)
+        started = time.time()
+        command = [binary, "update", str(snapshot)] if incremental else [binary, "extract", str(snapshot), "--code-only"]
         completed = subprocess.run(
-            [binary, "update", str(snapshot)],
+            command,
             cwd=snapshot,
             capture_output=True,
             text=True,
             timeout=BUILD_TIMEOUT_SECONDS,
             env=_scrubbed_env(os.environ),
             stdin=subprocess.DEVNULL,
+            check=False,
         )
         if completed.returncode != 0:
             return f"graphify exited {completed.returncode}"
         graph_path = snapshot / "graphify-out" / "graph.json"
         if not graph_path.is_file():
             return "graphify produced no graph.json"
-        json.loads(graph_path.read_text(encoding="utf-8"))
-        (staging / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        nodes, edges = _graph_counts(graph_path)
+        finished = time.time()
+        recorded = {
+            **meta,
+            "graphify_version": graphify_version or "unknown",
+            "trigger": trigger,
+            "started_at": dt.datetime.fromtimestamp(started, tz=dt.UTC).isoformat().replace("+00:00", "Z"),
+            "started_epoch": started,
+            "finished_at": dt.datetime.fromtimestamp(finished, tz=dt.UTC).isoformat().replace("+00:00", "Z"),
+            "finished_epoch": finished,
+            "duration_seconds": round(finished - started, 6),
+            "status": "READY",
+            "reason": "tree-matched code-only graph refreshed",
+            "nodes": nodes,
+            "edges": edges,
+            "api_llm_disabled": True,
+            "refresh_mode": "incremental-update" if incremental else "code-only-extract",
+        }
+        (staging / "meta.json").write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if cache_dir.exists():
             shutil.rmtree(cache_dir)
         staging.rename(cache_dir)
         return ""
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError) as exc:
         return f"graphify build failed: {type(exc).__name__}"
     finally:
         if staging.exists():
@@ -273,17 +372,31 @@ def _build_graph(binary: str, root: Path, files: dict[str, str], cache_dir: Path
 
 def _prune(worktree_dir: Path, keep: Path) -> None:
     trees = sorted((p for p in worktree_dir.iterdir() if p.is_dir() and not p.name.startswith(".")), key=lambda p: p.stat().st_mtime)
-    for old in trees[: max(0, len(trees) - KEEP_TREES_PER_WORKTREE)]:
+    # A build directory is renamed atomically only after generation completes,
+    # so pruning can never remove an active build.  The currently selected tree
+    # is also always retained even if mtimes tie.
+    removable = [tree for tree in trees if tree != keep]
+    for old in removable[: max(0, len(trees) - KEEP_TREES_PER_WORKTREE)]:
         if old != keep:
             shutil.rmtree(old, ignore_errors=True)
+
+
+def _previous_cache(worktree_dir: Path, current: Path) -> Path | None:
+    if not worktree_dir.is_dir():
+        return None
+    candidates = [
+        path for path in worktree_dir.iterdir()
+        if path.is_dir() and path != current and not path.name.startswith(".")
+        and (path / "snapshot" / "graphify-out" / "graph.json").is_file()
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
 
 
 def _normalize_path(raw: Any, snapshot_paths: set[str]) -> str | None:
     if not isinstance(raw, str) or not raw:
         return None
     normalized = PurePosixPath(raw.replace("\\", "/")).as_posix()
-    if normalized.startswith("./"):
-        normalized = normalized[2:]
+    normalized = normalized.removeprefix("./")
     # Only files that exist in the current, filtered tree count; anything else the graph names
     # (absolute paths, stale files, secret paths) is dropped because the source tree is authoritative.
     if normalized in snapshot_paths and not is_sensitive_path(normalized):
@@ -533,7 +646,24 @@ def _prepare(root: Path, seed_paths: list[str], project_id: str | None, state_ro
     status, reason = STATUS_USED, "tree-matched cached graph"
     if graph is None:
         had_prior = worktree_dir.is_dir() and any(worktree_dir.iterdir())
-        failure = _build_graph(binary, root, files, cache_dir, {**expected, "files": len(files)})
+        from .graph_lifecycle import capability_status
+
+        capability = capability_status(probe=True)
+        if capability["status"] != "READY":
+            return _result(
+                STATUS_FAILED_SAFE,
+                f"{why}; refresh refused ({capability['reason']}); falling back to repository inspection",
+                **base,
+            )
+        failure = _build_graph(
+            binary,
+            root,
+            files,
+            cache_dir,
+            {**expected, "files": len(files), "files_excluded": skipped},
+            graphify_version=capability.get("version"),
+            incremental_from=_previous_cache(worktree_dir, cache_dir),
+        )
         if failure and _load_valid_cache(cache_dir, expected)[0] is not None:
             failure = ""  # a concurrent worker built the identical tree-matched graph first
         if failure:
@@ -545,6 +675,13 @@ def _prepare(root: Path, seed_paths: list[str], project_id: str | None, state_ro
         status = STATUS_REFRESHED if had_prior else STATUS_USED
         reason = "stale graph refreshed for the current tree" if had_prior else "graph built for the current tree"
         _prune(worktree_dir, cache_dir)
+
+    try:
+        from .graph_lifecycle import record_context_cache
+
+        record_context_cache(worktree_dir, cache_dir)
+    except Exception:  # noqa: BLE001, S110 - lifecycle projection cannot break worker context
+        pass  # lifecycle projection is advisory; the validated context remains usable
 
     snapshot_paths = set(files)
     seeds = _seed_files(seed_paths, snapshot_paths)

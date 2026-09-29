@@ -520,13 +520,31 @@ def advance_after_success(
         record, option = _evaluate(
             state=state, runbook=runbook, registry=registry, github_issue_fetcher=github_issue_fetcher
         )
-        if record["state"] != ADV_NEXT_SELECTED or record["started_runbook_id"]:
-            _persist(state, record, previous)
-            return state.get_advancement(runbook.id) or record
-
         from .project_registry import get_project
 
         project = get_project(state, runbook.project_id)
+        # ENG-AO-10: repository truth has been re-read by _evaluate. Warm the
+        # canonical checkout before a successor can start; Graphify remains
+        # advisory, so a failed/missing refresh records degradation but never
+        # blocks an otherwise valid advancement.
+        try:
+            from ..graph_lifecycle import request_refresh, state_event_recorder
+
+            request_refresh(
+                project.local_repo_root,
+                project_id=project.project_id,
+                trigger="post-merge",
+                event_recorder=state_event_recorder(state, project.project_id),
+                wait=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - advisory refresh must not block advancement
+            state.record_event(
+                category="graphify", level="error", project_id=project.project_id,
+                message=f"Graphify post-merge refresh failed safely: {type(exc).__name__}",
+            )
+        if record["state"] != ADV_NEXT_SELECTED or record["started_runbook_id"]:
+            _persist(state, record, previous)
+            return state.get_advancement(runbook.id) or record
         if auto_start is None:
             auto_start = (project.capabilities.get(AUTO_ADVANCE_CAPABILITY) or "").strip().lower() in {"true", "1", "yes"}
         start = starter or (

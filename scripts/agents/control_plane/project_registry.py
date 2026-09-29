@@ -591,10 +591,10 @@ def selected_project_id(state: State) -> str | None:
 def select_project(state: State, project_id: str) -> ProjectContract:
     """Make ``project_id`` the selected project.
 
-    Selection is pure Control Plane state: it changes what the operator is
-    looking at and what subsequent work is scoped to. It never checks out a
-    branch, never runs Git in either repository, and therefore cannot mutate any
-    managed repository.
+    Selection changes what the operator is looking at and what subsequent work
+    is scoped to. It never checks out a branch or mutates a managed repository.
+    ENG-AO-10 may queue a read-only Git identity/tree scan and isolated Graphify
+    warm-up under Octarel state after the selection is durable.
     """
 
     row = state.get_project(project_id)
@@ -606,7 +606,25 @@ def select_project(state: State, project_id: str) -> ProjectContract:
     state.record_event(
         category="project_registry", message=f"selected project {project_id!r}", project_id=project_id
     )
-    return row_to_contract(row)
+    contract = row_to_contract(row)
+    # ENG-AO-10: selection stays non-blocking, but it opportunistically warms
+    # the canonical checkout. Missing/incompatible Graphify degrades only its
+    # own cached health and event; selecting the project always succeeds.
+    try:
+        from ..graph_lifecycle import request_refresh, state_event_recorder
+
+        request_refresh(
+            contract.local_repo_root,
+            project_id=contract.project_id,
+            trigger="project-selected",
+            event_recorder=state_event_recorder(state, contract.project_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - project selection must survive advisory warm-up failure
+        state.record_event(
+            category="graphify", level="error", project_id=contract.project_id,
+            message=f"Graphify project-selection warm-up failed safely: {type(exc).__name__}",
+        )
+    return contract
 
 
 def selected_project(state: State) -> ProjectContract | None:

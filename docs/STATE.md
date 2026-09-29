@@ -20,7 +20,10 @@ Rows that belong to a project carry `project_id`. Switching projects does not
 rewrite another project's history.
 
 Graphify cache (optional, derived): `<state dir>/graph-context/<project>/<worktree>/<tree>/`. It is
-disposable; delete it freely. It is never a source of task or repository truth.
+disposable; delete it freely. Each worktree directory also has an atomic `status.json` containing only its
+latest lifecycle health/evidence. At most two completed tree directories are retained per worktree; hidden
+staging builds are never pruned as completed caches. Tree identity, not age or `status.json`, decides whether a
+graph is current. This derived cache is never a source of task or repository truth.
 
 ## Backup
 

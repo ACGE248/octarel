@@ -34,6 +34,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import model_catalog, native_models
+from ..graph_lifecycle import cached_status as graphify_cached_status
+from ..graph_lifecycle import capability_status as graphify_capability_status
+from ..graph_lifecycle import request_refresh as graphify_request_refresh
+from ..graph_lifecycle import state_event_recorder as graphify_state_event_recorder
 from ..redaction import redact_text
 from . import manager_chat as _manager_chat
 from . import pricing as _pricing
@@ -1610,6 +1614,49 @@ def create_app(
     @app.get("/api/repository-health")
     def repository_health_endpoint() -> dict[str, Any]:
         return repository_health(ctx)
+
+    @app.get("/api/graphify")
+    def graphify_health_endpoint() -> dict[str, Any]:
+        """Cached selected-project health only; this read never runs Graphify."""
+
+        project = ctx.selected_project
+        project_id = project.project_id if project is not None else ctx.selected_project_id
+        body = graphify_cached_status(ctx.project_root, project_id=project_id, verify_tree=False)
+        body["selected_project"] = project_id
+        body["active_run_graph_context"] = None
+        # Reuse #26's manifest read shape when an active task has a recorded
+        # attempt; never generate graph data to fill this field.
+        for task in current_tasks():
+            if not task.worker:
+                continue
+            attempts = list_attempts(ctx.project_root, task.task_ref, task.worker)
+            if not attempts:
+                continue
+            attempt = read_attempt(ctx.project_root, task.task_ref, task.worker, attempts[0]["run_id"])
+            details = attempt.get("details") or {}
+            body["active_run_graph_context"] = details.get("graph_context")
+            break
+        return body
+
+    @app.post("/api/graphify/check")
+    def graphify_check_endpoint() -> dict[str, Any]:
+        """Explicit, read-only installation probe; never builds a graph."""
+
+        return graphify_capability_status(probe=True)
+
+    @app.post("/api/graphify/refresh")
+    def graphify_refresh_endpoint() -> dict[str, Any]:
+        """Queue one bounded manual refresh for the selected checkout."""
+
+        project = ctx.selected_project
+        project_id = project.project_id if project is not None else ctx.selected_project_id
+        graphify_request_refresh(
+            ctx.project_root,
+            project_id=project_id,
+            trigger="manual",
+            event_recorder=graphify_state_event_recorder(ctx.state, project_id),
+        )
+        return {"status": "REFRESHING", "reason": "bounded manual refresh queued", "selected_project": project_id}
 
     @app.get("/api/tests")
     def tests_summary() -> dict[str, Any]:

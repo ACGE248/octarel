@@ -32,6 +32,12 @@ ELIGIBLE = "serious-integration"
 FAKE_GRAPHIFY = """#!{python}
 import json, sys
 from pathlib import Path
+if sys.argv[1:] == ["--version"]:
+    print("graphify 0.9.71")
+    sys.exit(0)
+if sys.argv[1:] == ["--help"]:
+    print("graphify extract PATH --code-only")
+    sys.exit(0)
 snapshot = Path(sys.argv[2])
 graph = {{
     "nodes": [
@@ -52,7 +58,7 @@ graph = {{
     ],
 }}
 out = snapshot / "graphify-out"
-out.mkdir()
+out.mkdir(exist_ok=True)
 (out / "graph.json").write_text(json.dumps(graph))
 """
 

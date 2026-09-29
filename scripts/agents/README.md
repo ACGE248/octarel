@@ -113,7 +113,7 @@ See [`docs/engineering/ENG-AGENT-10.md`](../../docs/engineering/ENG-AGENT-10.md)
   violation.
 - **Never in CI.** No GitHub workflow invokes this tooling or any worker CLI.
 
-## Graphify repository intelligence (optional, ENG-AO-01)
+## Graphify repository intelligence (ENG-AO-01 + ENG-AO-10 lifecycle)
 
 `scripts/agents/graph_context.py` is one generic, optional adapter that gives every worker the same
 bounded, graph-derived code context. It is **derived, advisory context only**; it never becomes a source of
@@ -121,11 +121,19 @@ task status, policy, roadmap, ADRs, validation, or exact-tree acceptance. Truth 
 (1) the current managed-project source tree, (2) the managed project's AGENTS/policy and maintained docs,
 (3) task/program/ADR contracts, (4) Graphify context, (5) agent inference.
 
-- **Optional.** Detected locally (`graphify` on `PATH`, or `OCTAREL_GRAPHIFY_BIN`); never auto-installed;
+- **Pinned capability.** The reviewed supported release is Graphify `v0.9.71` / PyPI `graphifyy`, release commit
+  `d6eaa8aae8df155874ebb1044302c055c286342a`; upstream `v8` was reviewed at
+  `9fd5aadfd8ff7c2de95c78ef90f9b9f2721cbd98` on 2026-09-29. Detected locally (`graphify` on `PATH`, or
+  `OCTAREL_GRAPHIFY_BIN`); never auto-installed. `python -m octarel graphify status` reports `MISSING` with the
+  exact explicit operator commands `uv tool install graphifyy` and `pipx install graphifyy`; `graphify install`
+  only prints those commands and never executes them.
+- **Optional at runtime.**
   `OCTAREL_GRAPHIFY=off` disables it. Absent, stale, or failing Graphify only records a reason
   (`unavailable`, `stale`, `skipped`, `failed-safe`) and AO proceeds with ordinary repository inspection.
-- **Local and free.** Only the deterministic AST `graphify update` verb runs, with provider/API credential
-  variables scrubbed from its environment. No API billing, LLM or semantic enrichment, or premium
+- **Local and free.** The first isolated tree runs `graphify extract <snapshot> --code-only`; a later tree uses
+  the pinned deterministic AST `graphify update` path against a prior isolated snapshot after its filtered
+  sources have been replaced. Provider/API credential
+  variables are scrubbed from its environment. No API billing, LLM or semantic enrichment, or premium
   infrastructure; Graphify's own provider installers/hooks are never run, so no `AGENTS.md`, `CLAUDE.md`,
   provider policy, or `.opencode` file is written.
 - **Selected project only.** The graph is built from the explicit selected checkout/worktree (never Octarel's
@@ -136,6 +144,11 @@ task status, policy, roadmap, ADRs, validation, or exact-tree acceptance. Truth 
 - **Freshness.** A cache is used only when project, repository, worktree, and content-tree identity all
   match. A changed tree is refreshed deterministically (`refreshed`); if it cannot be, the graph is skipped
   (`stale`) and the reason recorded. Graph nodes naming files missing from the current tree are dropped.
+- **Lifecycle.** Selecting a project queues a canonical warm refresh. The acceptance pipeline waits for the
+  exact candidate refresh after its writer boundary and before review planning. Post-merge/reconciliation
+  advancement waits for canonical refresh before starting the next task. A bounded coordinator coalesces
+  identical requests, supersedes an older queued tree for the same worktree, and cancels queued work safely at
+  shutdown. Graphify failure records an event and never fails an otherwise valid acceptance or advancement.
 - **Delivery.** `orchestrate.run_delegation` and `run_session` append one bounded (~6 KB), redacted,
   clearly-labelled advisory section after the composed policy bundle. It is plain prompt text, so Claude Code,
   Codex, Gemini through OpenCode/Antigravity, native Grok (`grok-build`, `grok-build-review`), and Grok/xAI (or
@@ -143,7 +156,12 @@ task status, policy, roadmap, ADRs, validation, or exact-tree acceptance. Truth 
   per-provider implementation and routing preference is unchanged. It never alters the preserved policy
   identity used for provider fallback.
 - **Evidence.** The status, reason, tree/worktree/project keys, sizes, and `authoritative: false` are recorded
-  in the run manifest under `policy_manifest.graph_context`.
+  in the run manifest under `policy_manifest.graph_context`. Lifecycle refreshes additionally record their
+  trigger, pinned CLI version, start/end/duration, filtered/excluded counts, node/edge counts, cache key, and
+  `api_llm_disabled: true` in the tree metadata/current status and the existing Control Plane event ledger.
+- **Operations.** `python -m octarel graphify refresh [--project ID] [--worktree PATH]` is the explicit bounded
+  refresh. The worktree must belong to the selected project's Git repository. Control Center GETs are cached
+  reads only; its Check installation and Refresh graph buttons are explicit POST actions.
 - **Exact-tree acceptance** (`scripts/ci/local_gate.py`) never reads graph data; it verifies the real
   candidate tree.
 

@@ -48,6 +48,29 @@ def test_project_cli_add_select_remove(tmp_path: Path, monkeypatch: pytest.Monke
     assert octarel_main(["project", "remove", "proj", "--confirm"]) == 0
 
 
+def test_project_selection_queues_canonical_graph_warmup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.agents import graph_lifecycle
+    from scripts.agents.control_plane.project_registry import (
+        register_project,
+        select_project,
+    )
+
+    state = State(tmp_path / "state.db")
+    repo = _init_repo(tmp_path / "project")
+    register_project(state, {"project_id": "project", "display_name": "Project", "local_repo_root": str(repo)})
+    calls = []
+    monkeypatch.setattr(
+        graph_lifecycle,
+        "request_refresh",
+        lambda root, **kwargs: calls.append((root, kwargs)),
+    )
+    select_project(state, "project")
+    assert calls[0][0] == repo.resolve()
+    assert calls[0][1]["project_id"] == "project"
+    assert calls[0][1]["trigger"] == "project-selected"
+    assert "wait" not in calls[0][1]
+
+
 def test_project_cli_add_declares_the_managed_python_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts.agents.control_plane.project_registry import get_project
     from scripts.agents.control_plane.state import State as CpState
@@ -70,6 +93,30 @@ def test_providers_status_is_local_and_never_enables_billing(capsys: pytest.Capt
     assert "claude-code" in out
     assert "allow_api_billing=false" in out
     assert "deepseek-overflow" in out
+
+
+def test_graphify_cli_install_is_instruction_only_and_status_is_truthful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.agents import graph_lifecycle
+
+    monkeypatch.setenv("OCTAREL_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("OCTAREL_OCTASCENE_ROOT", raising=False)
+    repo = _init_repo(tmp_path / "managed")
+    assert octarel_main(["project", "add", "--id", "managed", "--path", str(repo)]) == 0
+    capsys.readouterr()
+
+    assert octarel_main(["graphify", "install"]) == 0
+    instructions = capsys.readouterr().out
+    assert "never installs" in instructions
+    assert "uv tool install graphifyy" in instructions
+    assert "pipx install graphifyy" in instructions
+
+    monkeypatch.setattr(graph_lifecycle, "_binary", lambda: None)
+    assert octarel_main(["graphify", "status"]) == 1
+    status = capsys.readouterr().out
+    assert '"status": "MISSING"' in status
+    assert "uv tool install graphifyy" in status
 
 
 def test_canonicalize_copies_and_preserves_source(tmp_path: Path) -> None:

@@ -444,6 +444,11 @@ def test_in_flight_review_task_prevents_test_and_gate_candidate(tmp_path, monkey
     monkeypatch.setattr(
         acceptance, "run_gate", lambda **k: (_ for _ in ()).throw(AssertionError("run_gate must not run either"))
     )
+    from scripts.agents import graph_lifecycle
+    monkeypatch.setattr(
+        graph_lifecycle, "request_refresh",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Graphify refresh must not race an in-flight review")),
+    )
 
     acceptance.advance_acceptance_pipeline(
         state=state, repo_root=repo, registry=load_registry(), scheduler=Scheduler(), supervisor=FakeSupervisor(),
@@ -607,6 +612,41 @@ def test_no_in_flight_review_first_dispatch_tick_still_calls_gate_candidate(tmp_
     assert review_evidence["status"] == "NOT_REPORTED"
     review_task = state.get_task(review_evidence["task_id"])
     assert review_task is not None and review_task.role == "diff-review"
+
+
+def test_candidate_graph_refresh_runs_after_writer_boundary_before_review_dispatch(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    state = State(":memory:")
+    rb, task = _implementation_runbook(state, repo)
+    acceptance.start_acceptance(runbook=rb, task=task)
+    order = []
+
+    from scripts.agents import graph_lifecycle
+    from scripts.ci.local_gate import candidate as real_candidate
+
+    def candidate(*args, **kwargs):
+        order.append("writer-boundary")
+        return real_candidate(*args, **kwargs)
+
+    def refresh(root, *, project_id, trigger, event_recorder, wait):
+        order.append("graph-refresh")
+        assert root == repo
+        assert trigger == "implementation-checkpoint"
+        assert wait is True
+        return {"status": "READY"}
+
+    monkeypatch.setattr(acceptance, "gate_candidate", candidate)
+    monkeypatch.setattr(graph_lifecycle, "request_refresh", refresh)
+    monkeypatch.setattr(
+        acceptance,
+        "classify",
+        lambda paths: order.append("review-planning") or type("R", (), {"review_level": "high"})(),
+    )
+    acceptance.advance_acceptance_pipeline(
+        state=state, repo_root=repo, registry=load_registry(), scheduler=Scheduler(), supervisor=FakeSupervisor(),
+        runbook=rb, task=task, base_ref="HEAD",
+    )
+    assert order[:3] == ["writer-boundary", "graph-refresh", "review-planning"]
 
 
 def test_resolved_review_status_never_triggers_the_in_flight_guard(tmp_path, monkeypatch):

@@ -123,6 +123,17 @@ test('agent/provider names are human-readable and locally cached icons load', as
   expect(await icon.evaluate((node) => node.naturalWidth)).toBeGreaterThan(0);
 });
 
+test('System shows selected-project Graphify operational health without a second page', async ({ page }) => {
+  await navTo(page, 'view-system');
+  const card = page.locator('#card-graphify');
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Graphify operational overlay');
+  await expect(card).toContainText('Page reads never generate a graph');
+  await expect(card.locator('#graphify-body')).toContainText('Status');
+  await expect(card.locator('#graphify-check')).toBeVisible();
+  await expect(card.locator('#graphify-refresh')).toBeVisible();
+});
+
 test('terminal connects to the allowlisted repository PTY and resizes', async ({ page }) => {
   await navTo(page, 'view-terminal');
   await expect(page.locator('#terminal-state')).toHaveText('Connected', { timeout: 5000 });
