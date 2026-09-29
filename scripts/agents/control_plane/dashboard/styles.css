@@ -3124,6 +3124,22 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
 }
 .usage-money-note { font-size: 10px; line-height: 1.4; color: var(--muted); }
 .usage-money-note:empty { display: none; }
+
+/* How an actual charge was established (OCTAREL-UI-08, issue #44). A figure
+   the provider reported and one reconstructed from tokens and a price list are
+   different kinds of claim, so the distinction is readable at a glance rather
+   than only in a tooltip. Deliberately quiet: it sits under the amount at
+   label size, adding a word rather than a new visual element. Both colours are
+   existing tokens declared in all three theme blocks. */
+.usage-money-provenance {
+  justify-self: start;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.usage-money-provenance.is-reported { color: var(--ok); }
+.usage-money-provenance.is-derived { color: var(--muted); }
 .usage-pricing-source {
   grid-column: 1 / -1;
   margin: 0;

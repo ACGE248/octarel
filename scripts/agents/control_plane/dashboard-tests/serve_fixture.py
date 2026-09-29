@@ -595,11 +595,35 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
     # they are. The route history records cost_class the way a real run now
     # does, which is also what makes these rows independent of whatever
     # workers.json happens to say today.
-    for runbook_id, history, tokens in (
+    for runbook_id, history, tokens, reported in (
         (
             "fx-usage-api-billed",
             [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
             (80_000, 4_000),
+            None,
+        ),
+        (
+            # OCTAREL-UI-08 (issue #44): an API-billed run whose CLI reported
+            # its own cost. Deliberately a figure the derived path could not
+            # produce, so a row showing the derived number here would be
+            # visible as a bug rather than a coincidence.
+            "fx-usage-reported-cost",
+            [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
+            (61_000, 3_100),
+            (0.69791188, "worker CLI structured total_cost_usd"),
+        ),
+        (
+            # A subscription-backed run whose CLI also reports a cost. The
+            # Claude CLI emits total_cost_usd meaning "what this would have
+            # cost on the API", not "what you were charged". It must stay
+            # $0.00 incremental: the route decides, never the monetary field.
+            "fx-usage-subscription-reported",
+            [{
+                "worker": "claude-code", "provider": "Anthropic",
+                "model": "claude-sonnet-5", "cost_class": "premium-subscription",
+            }],
+            (44_000, 2_200),
+            (0.51234567, "worker CLI structured total_cost_usd"),
         ),
         (
             "fx-usage-free-route",
@@ -612,6 +636,7 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
                 }
             ],
             (51_000, 2_400),
+            None,
         ),
         (
             # No cost_class anywhere, so billing cannot be established. This
@@ -619,6 +644,7 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             "fx-usage-unclassified",
             [{"worker": "retired-worker", "provider": "Somebody", "model": "mystery-model"}],
             (12_000, 800),
+            None,
         ),
     ):
         state.upsert_usage_governance(
@@ -630,7 +656,15 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
                 "telemetry_quality": "exact",
                 "input_tokens": tokens[0],
                 "output_tokens": tokens[1],
-                "route_history": [{**history[0], "status": "SUCCEEDED", "ended_at": utc_now_iso()}],
+                # OCTAREL-UI-08 (issue #44): a reported cost belongs to the
+                # attempt that produced it, not to the record.
+                "route_history": [{
+                    **history[0],
+                    "status": "SUCCEEDED",
+                    "ended_at": utc_now_iso(),
+                    **({"reported_cost_usd": reported[0], "reported_cost_source": reported[1]}
+                       if reported else {}),
+                }],
                 "context_manifest": {},
             }
         )

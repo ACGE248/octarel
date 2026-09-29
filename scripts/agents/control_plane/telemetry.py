@@ -83,6 +83,84 @@ def estimated_token_usage(*, input_tokens: int, output_tokens: int) -> TokenUsag
     return TokenUsage(mode=TOKEN_ESTIMATED, input_tokens=input_tokens, output_tokens=output_tokens)
 
 
+# -------------------------------------------------- worker-reported cost
+
+# OCTAREL-UI-08 (issue #44). Some worker CLIs state, in their own structured
+# output, what the run they just performed cost. That is stronger evidence
+# than reconstructing a figure from token counts and a cached price list: it
+# is what the tool says was spent, not what a rate card implies should have
+# been.
+#
+# The field name below is deliberately the only thing this module knows about
+# any particular vendor. Both the Grok CLI and the Claude CLI already emit a
+# top-level ``total_cost_usd`` in their JSON result alongside the
+# ``modelUsage`` block :func:`extract_token_usage` reads, so reading one
+# agreed key is the smallest seam that serves more than one worker. A CLI that
+# does not emit it simply reports nothing and the existing derived path stands
+# -- support is never invented for a tool that does not actually report cost.
+#
+# What this deliberately does not do is scrape prose. If a tool prints "cost:
+# $0.69" in human-readable output but has no structured field, that is not
+# read: a regex over free text is a guess wearing a number's clothing, and
+# money is the last place to guess.
+REPORTED_COST_FIELD = "total_cost_usd"
+SOURCE_WORKER_CLI = f"worker CLI structured {REPORTED_COST_FIELD}"
+
+
+@dataclass(frozen=True)
+class ReportedCost:
+    """A per-run cost a worker CLI stated about itself, or nothing."""
+
+    usd: float | None = None
+    source: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"usd": self.usd, "source": self.source}
+
+
+def usable_reported_cost(value: Any) -> float | None:
+    """The value if it can honestly stand as money, otherwise nothing.
+
+    Rejects what is not a real, finite, non-negative number. ``bool`` is
+    excluded explicitly because it is an ``int`` in Python and ``True`` would
+    otherwise become ``$1.00``. A negative or non-finite figure is not missing
+    evidence but wrong evidence, and reporting it would understate or corrupt
+    spend; the derived path is the better answer in that case.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    # One comparison covers both requirements. NaN fails every comparison, so
+    # it falls out here; the upper bound excludes +inf and the lower bound
+    # excludes -inf and every negative figure. Written without ``math`` so the
+    # Control Plane's declared-import surface (ENG-CP-02) gains nothing for a
+    # single predicate.
+    if not 0 <= number < float("inf"):
+        return None
+    return number
+
+
+def extract_reported_cost(output: str) -> ReportedCost:
+    """Read an explicit per-run cost from a worker CLI's structured JSON.
+
+    Conservative by construction, exactly like :func:`extract_token_usage`:
+    only a top-level, structured, plainly numeric field is accepted, and
+    anything else yields an empty result rather than an approximation.
+    """
+
+    try:
+        payload, _ = json.JSONDecoder().raw_decode((output or "").lstrip())
+    except (json.JSONDecodeError, TypeError):
+        return ReportedCost()
+    if not isinstance(payload, dict):
+        return ReportedCost()
+    usd = usable_reported_cost(payload.get(REPORTED_COST_FIELD))
+    if usd is None:
+        return ReportedCost()
+    return ReportedCost(usd=usd, source=SOURCE_WORKER_CLI)
+
+
 # --------------------------------------------------------- execution routes
 
 ROUTE_SUBSCRIPTION = "SUBSCRIPTION"

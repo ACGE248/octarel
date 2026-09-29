@@ -151,6 +151,16 @@ rather than an implied API rate. Both documents are reconciled. The
 `NOT_APPLICABLE` class remains in the published vocabulary — consumers render
 it — but no cost cell produces it any more.
 
+## Superseded in part by OCTAREL-UI-08 (issue #44)
+
+The precedence for `actual_cost_usd` on an API-billed route gained a stronger
+first source. Where a worker CLI states its own per-run cost in structured
+output, that figure is used and classed `MEASURED`; the tokens-times-pricing
+reconstruction described above remains the fallback, classed `DERIVED`. Nothing
+else here changes -- `estimated_api_equivalent_usd` keeps its meaning, billing
+class still decides `$0.00` before any monetary field is read, and the two
+money fields are still never summed.
+
 ## Deliberate non-goals
 
 - **No live pricing lookup.** Rates come from the cached snapshot on disk.

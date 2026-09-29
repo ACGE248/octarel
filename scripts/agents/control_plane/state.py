@@ -314,6 +314,13 @@ _RUNBOOKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("stop_after_current_requested", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+# OCTAREL-UI-08 (issue #44) deliberately adds no column here. A CLI-reported
+# per-run cost belongs to the route-history *attempt* that produced it, not to
+# the runbook as a whole: the read model attributes a row to the newest
+# attempt, so a record-level figure would be served against whichever worker
+# ran last rather than the one that reported it. route_history is already
+# durable JSON on this table, so the attempt carries it with no schema change.
+
 
 # ENG-CP-03 (issue #165): the tables that carry per-project records and so gain
 # a ``project_id``. Everything omitted here is deliberately *global* Control

@@ -15,6 +15,7 @@ still gets no figure at all.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 import pytest
 
@@ -713,3 +714,174 @@ def test_the_cost_metric_is_no_longer_part_of_the_generic_metric_grid():
     assert "cost_usd" not in metrics
     assert "estimated_api_equivalent_usd" in metrics
     assert "actual_cost_usd" in metrics
+
+
+# --------------------------------------------------------------------------
+# OCTAREL-UI-08 (issue #44): a cost the worker CLI reported about itself.
+#
+# The rule is precedence, and one safety property underneath it: billing class
+# decides *whether* there is a charge before any monetary field is consulted,
+# so a subscription CLI printing a dollar figure can never become API spend.
+
+REPORTED = ("worker CLI structured total_cost_usd",)
+
+
+def reported_record(**over):
+    base = {"telemetry_quality": "exact", "input_tokens": 100_000, "output_tokens": 10_000}
+    base.update(over)
+    return record(**base)
+
+
+def with_cost(facts, usd, source=REPORTED[0]):
+    """The attributed attempt's own reported cost, as the endpoint supplies it."""
+
+    return replace(facts, reported_cost_usd=usd, reported_cost_source=source)
+
+
+def actual(facts, usd, **over):
+    return build_row(
+        reported_record(**over), facts=with_cost(facts, usd), project_id="p", pricing=FLASH_RATES
+    )["metrics"]["actual_cost_usd"]
+
+
+def test_an_api_billed_run_prefers_the_cost_its_worker_reported():
+    """The headline case: what the tool says it spent beats what a rate card implies."""
+
+    cell = actual(METERED, 0.69791188)
+    assert cell["value"] == pytest.approx(0.69791188)
+    assert cell["class"] == CLASS_MEASURED
+    assert cell["source"] == "worker CLI structured total_cost_usd"
+    assert cell["basis"] == "reported"
+
+
+def test_a_reported_cost_is_never_overwritten_by_the_derived_figure():
+    """Both are available here; the stronger evidence must win.
+
+    The derived path would produce $0.055 from these tokens and rates. If the
+    precedence ever inverted, this value would silently change to that.
+    """
+
+    derived_only = money(METERED)["actual_cost_usd"]
+    assert derived_only["value"] == pytest.approx(0.055)
+    assert derived_only["class"] == CLASS_DERIVED
+
+    measured = actual(METERED, 0.69791188)
+    assert measured["value"] == pytest.approx(0.69791188)
+    assert measured["value"] != pytest.approx(derived_only["value"])
+
+
+def test_an_api_billed_run_without_a_reported_cost_keeps_the_derived_fallback():
+    """Absence of the new field must change nothing that worked before."""
+
+    cell = money(METERED)["actual_cost_usd"]
+    assert cell["value"] == pytest.approx(0.055)
+    assert cell["class"] == CLASS_DERIVED
+    assert cell["basis"] == "tokens-and-pricing"
+    assert "provider-reported tokens x" in cell["formula"]
+
+
+def test_a_subscription_route_cannot_become_api_spend_because_a_figure_exists():
+    """The safety property this feature is most likely to get wrong.
+
+    The Claude CLI emits total_cost_usd meaning "what this would have cost on
+    the API", not "what you were charged". Billing class is decided before any
+    monetary field is read, so a subscription session stays $0.00 incremental
+    however large that figure is.
+    """
+
+    cell = actual(SUBSCRIPTION, 12.34)
+    assert cell["value"] == 0.0
+    assert cell["basis"] == "billing-class"
+    assert "subscription" in cell["formula"]
+    # The reported figure is not smuggled in anywhere on the row either.
+    row = build_row(
+        reported_record(), facts=with_cost(SUBSCRIPTION, 12.34), project_id="p", pricing=FLASH_RATES
+    )
+    assert row["billing"]["class"] == BILLING_SUBSCRIPTION
+    assert row["metrics"]["actual_cost_usd"]["value"] == 0.0
+
+
+def test_a_free_route_stays_zero_incremental_cost_with_a_reported_figure():
+    cell = actual(FREE, 3.21)
+    assert cell["value"] == 0.0
+    assert cell["basis"] == "billing-class"
+    assert "free route" in cell["formula"]
+
+
+def test_unknown_billing_stays_unknown_even_with_a_reported_figure():
+    """A monetary field does not establish who paid."""
+
+    cell = actual(UNCLASSIFIED, 4.56)
+    assert cell["value"] is None
+    assert cell["class"] == CLASS_UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [-0.5, float("nan"), float("inf"), float("-inf"), True, False, "0.69", None, {}, []],
+)
+def test_a_monetary_value_that_cannot_stand_as_money_is_refused(bad):
+    """Rejected at the read model, so a bad row falls back rather than lying.
+
+    ``True`` matters specifically: it is an ``int`` in Python and would
+    otherwise render as $1.00.
+    """
+
+    cell = actual(METERED, bad)
+    # Falls back to the derived figure rather than reporting the bad value.
+    assert cell["value"] == pytest.approx(0.055)
+    assert cell["class"] == CLASS_DERIVED
+
+
+def test_the_equivalent_value_is_untouched_by_a_reported_cost():
+    """Issue #44 must not change what estimated_api_equivalent_usd means."""
+
+    metrics = build_row(
+        reported_record(), facts=with_cost(METERED, 0.69791188), project_id="p", pricing=FLASH_RATES
+    )["metrics"]
+    equivalent = metrics["estimated_api_equivalent_usd"]
+    assert equivalent["value"] == pytest.approx(0.055)
+    assert equivalent["class"] == CLASS_DERIVED
+    # Still the public-rate approximation, never the reported charge.
+    assert equivalent["value"] != pytest.approx(metrics["actual_cost_usd"]["value"])
+
+
+def test_a_reported_cost_of_zero_is_a_figure_not_a_missing_one():
+    """$0.00 reported by the tool is evidence, not absence of evidence."""
+
+    cell = actual(METERED, 0.0)
+    assert cell["value"] == 0.0
+    assert cell["class"] == CLASS_MEASURED
+    assert cell["basis"] == "reported"
+
+
+def test_a_measured_row_counts_once_in_actual_spend():
+    """Measured and derived are the same field, so no execution is double-counted."""
+
+    measured = build_row(
+        reported_record(route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}]),
+        facts=with_cost(METERED, 0.69791188),
+        project_id="p",
+        pricing=FLASH_RATES,
+    )
+    derived = dated_row(METERED, NOW)  # contributes its derived $0.055
+    today = build_aggregates([measured, derived], now=NOW)["windows"]["today"]
+
+    spend = today["actual_api_spend_usd"]
+    assert spend["value"] == pytest.approx(0.69791188 + 0.055)
+    assert spend["coverage"] == {"contributed": 2, "rows": 2, "complete": True}
+    # Neither row contributed twice: two rows, two contributions.
+    assert today["counts"]["api_billed"] == 2
+
+
+def test_aggregate_spend_prefers_the_measured_figure_for_a_row():
+    """The window total reflects what was reported, not what was reconstructed."""
+
+    measured = build_row(
+        reported_record(route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}]),
+        facts=with_cost(METERED, 2.5),
+        project_id="p",
+        pricing=FLASH_RATES,
+    )
+    spend = build_aggregates([measured], now=NOW)["windows"]["today"]["actual_api_spend_usd"]
+    assert spend["value"] == pytest.approx(2.5)

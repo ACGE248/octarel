@@ -413,7 +413,11 @@ class Supervisor:
         record = self.state.get_usage_governance(task.runbook_id)
         if not record:
             return
-        from .telemetry import estimated_token_usage, extract_token_usage
+        from .telemetry import (
+            estimated_token_usage,
+            extract_reported_cost,
+            extract_token_usage,
+        )
 
         payload = stdout
         pointer = re.search(r"^LOG:\s+(.+)$", stdout, re.MULTILINE)
@@ -438,6 +442,43 @@ class Supervisor:
         record["telemetry_quality"] = usage.mode.lower()
         record["input_tokens"] = usage.input_tokens
         record["output_tokens"] = usage.output_tokens
+
+        # OCTAREL-UI-08 (issue #44): a cost the worker CLI stated about itself,
+        # read from the same structured payload as the token counts above.
+        #
+        # Written onto the *attempt* that produced it, never onto the record as
+        # a whole. Independent review (Grok Build) found a record-level figure
+        # misattributing across a fallback: a subscription worker's number --
+        # which means "what this would have cost on the API", not a charge --
+        # outlived the attempt that reported it, and once a later API-billed
+        # attempt became the attributed one it was served as that worker's
+        # MEASURED spend and summed into actual API spend. Binding the cost to
+        # the attempt makes that unrepresentable, because the reader takes the
+        # worker and the cost from the same attempt.
+        #
+        # Within one attempt it is still only ever written, never cleared: a
+        # later reconcile over output that no longer carries the field (a
+        # truncated tail, a re-read that found only the pointer) must not
+        # demote that attempt to the derived path.
+        reported = extract_reported_cost(payload)
+        if reported.usd is not None:
+            history = list(record.get("route_history") or [])
+            for index in range(len(history) - 1, -1, -1):
+                attempt = history[index]
+                # The newest still-live attempt for this worker: the same one
+                # finalize_route_attempt terminalizes, so the two can never
+                # disagree about which attempt a completing task belongs to.
+                if not isinstance(attempt, dict) or attempt.get("worker") != task.worker:
+                    continue
+                if attempt.get("status") not in {None, "STARTING", "RUNNING"}:
+                    continue
+                history[index] = {
+                    **attempt,
+                    "reported_cost_usd": reported.usd,
+                    "reported_cost_source": reported.source,
+                }
+                record["route_history"] = history
+                break
         self.state.upsert_usage_governance(record)
 
     def _record_route_outcome(self, task: Task) -> None:
