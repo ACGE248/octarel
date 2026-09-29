@@ -896,6 +896,11 @@ def start_runbook(
             "worker": launch_worker.name,
             "provider": launch_worker.provider,
             "model": launch_worker.effective_model,
+            # OCTAREL-UI-07 (issue #42): record the billing class with the
+            # attempt. Reading it back off the registry later would describe
+            # the worker as configured *now*, so a workers.json edit would
+            # silently relabel what past runs cost.
+            "cost_class": launch_worker.cost_class,
             "intensity": launch_worker.default_intensity,
             "reason": reason,
             "alternatives": [name for name in registry.route(role) if name != launch_worker.name],
@@ -951,6 +956,11 @@ def start_runbook(
             "worker": launch_worker.name,
             "provider": launch_worker.provider,
             "model": launch_worker.effective_model,
+            # OCTAREL-UI-07 (issue #42): record the billing class with the
+            # attempt. Reading it back off the registry later would describe
+            # the worker as configured *now*, so a workers.json edit would
+            # silently relabel what past runs cost.
+            "cost_class": launch_worker.cost_class,
             "intensity": launch_worker.default_intensity,
             "reason": why,
             "alternatives": [name for name in registry.route(role) if name != launch_worker.name],
@@ -1147,6 +1157,9 @@ def retry_runbook(
         "worker": worker_name,
         "provider": worker.provider,
         "model": worker.effective_model,
+        # Recorded with the attempt for the same reason as above: a fallback
+        # must be attributed to the billing class that actually executed.
+        "cost_class": worker.cost_class,
         "intensity": worker.default_intensity,
         "reason": f"{'automatic' if automatic else 'operator'} retry after {failure_kind}",
         "alternatives": [name for name in registry.route(role) if name != worker_name],

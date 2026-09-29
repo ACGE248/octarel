@@ -314,6 +314,13 @@ _RUNBOOKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("stop_after_current_requested", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+# OCTAREL-UI-08 (issue #44) deliberately adds no column here. A CLI-reported
+# per-run cost belongs to the route-history *attempt* that produced it, not to
+# the runbook as a whole: the read model attributes a row to the newest
+# attempt, so a record-level figure would be served against whichever worker
+# ran last rather than the one that reported it. route_history is already
+# durable JSON on this table, so the attempt carries it with no schema change.
+
 
 # ENG-CP-03 (issue #165): the tables that carry per-project records and so gain
 # a ``project_id``. Everything omitted here is deliberately *global* Control
@@ -574,8 +581,20 @@ class State:
     # ----------------------------------------------------------------- tasks
 
     @_serialized
-    def upsert_task(self, task: Task) -> None:
-        task.updated_at = utc_now_iso()
+    def upsert_task(self, task: Task, *, updated_at: str | None = None) -> None:
+        """Write ``task``, stamping ``updated_at`` with the current second.
+
+        ``updated_at`` overrides that stamp and exists for deterministic
+        seeding (OCTAREL-TEST-02, issue #45, upholding OCTAREL-TEST-01's shared-
+        fixture contract).  An ordinary write means "this row was
+        touched now", but a fixture that seeds several task references in one
+        pass needs their *relative* recency to be intentional rather than a
+        function of how long the seed happened to take: ``utc_now_iso()`` has
+        one-second resolution, so a seed that crosses a wall-clock second
+        silently reorders which reference looks most recent.
+        """
+
+        task.updated_at = updated_at or utc_now_iso()
         row = task.to_row()
         columns = ", ".join(row)
         placeholders = ", ".join(f":{key}" for key in row)

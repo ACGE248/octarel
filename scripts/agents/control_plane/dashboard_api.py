@@ -24,7 +24,7 @@ import subprocess
 import termios
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +35,9 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import model_catalog, native_models
 from ..redaction import redact_text
+from . import manager_chat as _manager_chat
+from . import pricing as _pricing
+from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .commands import CommandContext, CommandError, apply_command
 from .operations import (
@@ -827,6 +830,8 @@ def create_app(
     *,
     roadmap_path: Path | None = None,
     remote: RemoteAccessState | None = None,
+    manager_invoker: _manager_chat.Invoker = _manager_chat.subprocess_invoker,
+    pricing_loader: Callable[[], _pricing.PricingBook] = _pricing.load_pricing_book,
 ) -> FastAPI:
     """Build the dashboard FastAPI app for a given command context.
 
@@ -836,6 +841,17 @@ def create_app(
     :class:`RemoteAccessConfig`'s own disabled-by-default), so every existing
     caller (the CLI, the Playwright fixture, existing tests) that never passes
     it keeps today's pure-local behavior exactly as before ENG-AGENT-02-S6.
+
+    ``manager_invoker`` is the seam Manager Chat (OCTAREL-UI-05, issue #24)
+    uses to run one bounded interpretation command. It is injected so tests and
+    the Playwright fixture drive natural-language routing with a deterministic
+    fake and never make a live or billable provider call.
+
+    ``pricing_loader`` is the equivalent seam for API-equivalent pricing
+    (OCTAREL-UI-07, issue #42). It defaults to reading the cached OpenCode
+    catalog snapshot from disk; tests and the fixture inject a fixed book so
+    money figures in the browser suite do not depend on a developer's local
+    catalog. It never discovers, spawns, or contacts a provider.
     """
 
     if remote is None:
@@ -1416,6 +1432,99 @@ def create_app(
             ],
         }
 
+    @app.get("/api/priority-matrix")
+    def priority_matrix(mode: str = MODE_SINGLE_PRIMARY) -> dict[str, Any]:
+        """Every configured role's ordered fallback chain, for the Priority & Fallback Matrix.
+
+        OCTAREL-UI-04 (issue #23). Strictly a read model: it reuses
+        ``registry.route()`` and the stored provider states that ``/api/routing``
+        already uses, and computes nothing new. Routing semantics, preference
+        order and eligibility rules are unchanged -- this endpoint only presents
+        them for every role in one request instead of one request per role.
+
+        Priority is the candidate's position in its role's configured route
+        (P1, P2, P3, ...), which is the actual fallback order rather than a
+        ranking invented for display. A candidate the router cannot currently
+        use is reported with ``routable: false`` and the reason, not hidden.
+        """
+
+        provider_map = {p.name: p for p in ctx.state.list_provider_states()}
+        roles: list[dict[str, Any]] = []
+
+        for role in sorted(ctx.registry.routes):
+            try:
+                order = ctx.registry.route(role)
+            except Exception as exc:  # noqa: BLE001 - one bad role must not break the page
+                # Reported rather than skipped: a role whose route cannot be
+                # resolved is a real configuration problem, and silently
+                # dropping it would make the matrix look complete when it is not.
+                roles.append(
+                    {
+                        "role": role,
+                        "candidate_count": 0,
+                        "routable_count": 0,
+                        "candidates": [],
+                        "error": f"route could not be resolved: {exc}",
+                    }
+                )
+                continue
+            result = compute_routing(mode, provider_map, order)
+            shares = dict(result.percentages)
+            selected = set(result.order)
+
+            candidates: list[dict[str, Any]] = []
+            for position, name in enumerate(order, start=1):
+                worker = ctx.registry.workers.get(name)
+                provider_state = provider_map.get(name)
+                state = provider_state.state if provider_state else "UNKNOWN"
+                routable = name in selected or name in shares
+                candidates.append(
+                    {
+                        "priority": position,
+                        "worker": name,
+                        "display_name": (
+                            worker.raw.get("display_name", name.replace("-", " ").title())
+                            if worker
+                            else name
+                        ),
+                        # A provider and an agent are distinct concepts and the
+                        # design specification requires showing both.
+                        "provider": worker.provider if worker else "UNKNOWN",
+                        "execution_system": worker.execution_system if worker else "UNKNOWN",
+                        "model": (worker.effective_model or worker.default_model) if worker else None,
+                        "capability": worker.capability if worker else "UNKNOWN",
+                        "cost_class": worker.cost_class if worker else "UNKNOWN",
+                        "auth_mode": worker.auth_mode if worker else None,
+                        "enabled": worker.enabled if worker else None,
+                        "cli_available": worker.cli_available() if worker else None,
+                        "provider_state": state,
+                        "routable": routable,
+                        "share_percent": shares.get(name),
+                        "excluded_reason": (
+                            None
+                            if routable
+                            else (
+                                f"provider state {state}"
+                                if state in NON_ROUTABLE_STATES
+                                else "not the selected candidate for this mode"
+                                if provider_state
+                                else "no provider state recorded"
+                            )
+                        ),
+                    }
+                )
+
+            roles.append(
+                {
+                    "role": role,
+                    "candidate_count": len(candidates),
+                    "routable_count": sum(1 for c in candidates if c["routable"]),
+                    "candidates": candidates,
+                }
+            )
+
+        return {"mode": mode, "roles": roles}
+
     @app.get("/api/opencode-models")
     def opencode_models() -> dict[str, Any]:
         """Cached OpenCode-discovered model inventory beside the configured OpenCode workers (ENG-AO-03).
@@ -1831,6 +1940,93 @@ def create_app(
             "policy_note": "Role/workflow policy is provider-independent. Quota may use an equivalent eligible provider; context is minimized first; safeguards block; none silently strengthens a model.",
         }
 
+    @app.get("/api/usage-telemetry")
+    def usage_telemetry() -> dict[str, Any]:
+        """AO-style per-run model/session usage, context and cost (issues #25, #42).
+
+        A read model over the durable usage-governance records the supervisor
+        already writes, joined with registry facts for the worker that ran.
+        Every metric carries the class that established it -- MEASURED,
+        DERIVED, UNKNOWN, NOT_EXPOSED or NOT_APPLICABLE -- so a figure Octarel
+        cannot establish is stated as unavailable rather than estimated.
+
+        Money is two separate things here and stays that way through the whole
+        payload: an approximate API-equivalent *value* priced from the catalog
+        snapshot, and the *actual* incremental charge implied by the run's
+        billing class. The aggregates never add one to the other.
+
+        Nothing here probes a provider or runs a worker. Pricing is read from
+        the cached catalog snapshot on disk.
+        """
+
+        book = pricing_loader()
+        rows: list[dict[str, Any]] = []
+        for record in ctx.state.list_usage_governance():
+            # The worker that actually ran is the most recent route-history
+            # entry; attributing usage to a configured default would misreport
+            # a run that fell back to a different worker.
+            history = record.get("route_history") or []
+            entry: dict[str, Any] = {}
+            worker_name = None
+            for candidate in reversed(history):
+                if isinstance(candidate, dict) and candidate.get("worker"):
+                    entry = candidate
+                    worker_name = str(candidate["worker"])
+                    break
+            worker = ctx.registry.workers.get(worker_name) if worker_name else None
+
+            # Prefer what the run itself recorded. The registry describes the
+            # worker as configured *now*: a pool worker resolves a different
+            # model per run, and a later workers.json edit would otherwise
+            # silently relabel history. A registry-sourced value is still shown,
+            # but marked as derived rather than as this run's measurement.
+            recorded_model = entry.get("model") or None
+            recorded_cost_class = entry.get("cost_class") or None
+            facts = _usage_telemetry.WorkerFacts(
+                worker=worker_name or "UNKNOWN",
+                provider=entry.get("provider") or getattr(worker, "provider", None),
+                execution_system=getattr(worker, "execution_system", None),
+                model=recorded_model
+                or (getattr(worker, "effective_model", None) or getattr(worker, "default_model", None))
+                or None,
+                cost_class=recorded_cost_class or getattr(worker, "cost_class", None),
+                model_from_record=bool(recorded_model),
+                cost_class_from_record=bool(recorded_cost_class),
+                # OCTAREL-UI-08 (issue #44): from the same attempt that supplies
+                # the worker above, so a cost can never be reported against a
+                # worker that did not produce it.
+                reported_cost_usd=entry.get("reported_cost_usd"),
+                reported_cost_source=entry.get("reported_cost_source"),
+            )
+            # Priced from the model this run is attributed to -- including a
+            # fallback run, which is attributed to the worker that actually
+            # executed, so its value is priced at that worker's model rather
+            # than the one originally preferred.
+            lookup = book.lookup(provider=facts.provider, model=facts.model)
+            rows.append(
+                _usage_telemetry.build_row(
+                    record,
+                    facts=facts,
+                    project_id=ctx.selected_project_id,
+                    pricing=lookup.pricing,
+                    pricing_reason=lookup.reason,
+                )
+            )
+
+        return {
+            "rows": rows,
+            "aggregates": _usage_telemetry.build_aggregates(rows),
+            # Snapshot provenance, kept beside the rows rather than inside
+            # them: it describes where rates came from, and is never evidence
+            # about how anything was billed.
+            "pricing_source": book.provenance(),
+            "unavailable_metrics": _usage_telemetry.unavailable_metrics(),
+            "note": (
+                "Cache-category tokens and effective context limits are not reported by any worker runtime "
+                "in this stack, so those metrics are NOT_EXPOSED rather than estimated."
+            ),
+        }
+
     @app.get("/api/runbooks/presets")
     def runbook_presets() -> list[dict[str, Any]]:
         """Zero-AI, static preset catalog (Overnight Development, Finish PR, ...)."""
@@ -1945,6 +2141,31 @@ def create_app(
         _record_remote_audit(ctx, request, verb=verb, target=target, result="OK" if result.ok else "FAIL")
         return {"ok": result.ok, "message": result.message, "data": result.data}
 
+    def _attach_quickstart_option(proposal: Any, body: dict[str, Any]) -> None:
+        """Two-stage steering (ENG-AGENT-02-S7, issue #97): a PARSED proposal alone
+        is not enough detail for the operator to approve, so attach the same fully
+        resolved Prepared Run the Quick Start button shows, re-derived fresh from
+        current repository truth. Shared by /api/steering/parse and the Manager
+        endpoint so the two cannot drift apart.
+        """
+
+        if proposal.verb != "quickstart_start":
+            return
+        key = proposal.args.get("key")
+        if not key:
+            # No substituted default: attaching a Prepared Run the proposal did
+            # not identify would show the operator resolved work they never
+            # asked for.
+            return
+        option = resolve_quickstart_option(
+            ctx.project_root,
+            str(key),
+            project=ctx.selected_project,
+            state=ctx.state,
+            registry=ctx.registry,
+        )
+        body["quickstart_option"] = option.as_dict()
+
     @app.post("/api/steering/parse")
     def steering_parse(payload: dict[str, Any]) -> dict[str, Any]:
         """Parse steering text into a proposal. Zero AI, never executes anything.
@@ -1960,20 +2181,8 @@ def create_app(
         body = proposal.as_dict()
         if proposal.status != "PARSED":
             body["ai_escalation"] = nl_ai_route_available(ctx.registry)
-        elif proposal.verb == "quickstart_start":
-            # Two-stage steering (ENG-AGENT-02-S7, issue #97): a PARSED proposal
-            # alone is not enough detail for the operator to approve — attach
-            # the same fully resolved Prepared Run the Quick Start button shows,
-            # re-derived fresh from current repository truth, so the confirm
-            # card the frontend renders here is never just a bare verb name.
-            option = resolve_quickstart_option(
-                ctx.project_root,
-                str(proposal.args.get("key", "continue-video-editor")),
-                project=ctx.selected_project,
-                state=ctx.state,
-                registry=ctx.registry,
-            )
-            body["quickstart_option"] = option.as_dict()
+        else:
+            _attach_quickstart_option(proposal, body)
         ctx.state.record_event(
             category="steering",
             level="warning" if proposal.status != "PARSED" else "info",
@@ -2027,6 +2236,80 @@ def create_app(
         )
         _record_remote_audit(ctx, request, verb=verb, target=target, result="OK" if result.ok else "FAIL")
         return {"ok": result.ok, "message": result.message, "data": result.data}
+
+    @app.get("/api/manager/route")
+    def manager_route() -> dict[str, Any]:
+        """Which worker/provider/model would interpret a Manager Chat sentence right now.
+
+        OCTAREL-UI-05 (issue #24). Read-only: it inspects the registry, the
+        configured route order and stored provider state, and never invokes a
+        worker or calls a model. The Manager surface uses it to show the route
+        before the operator sends anything.
+        """
+
+        provider_map = {p.name: p for p in ctx.state.list_provider_states()}
+        return _manager_chat.select_route(ctx.registry, provider_map).as_dict()
+
+    @app.post("/api/manager/message")
+    def manager_message(payload: dict[str, Any]) -> dict[str, Any]:
+        """Turn one Manager Chat message into a proposal. Never executes anything.
+
+        OCTAREL-UI-05 (issue #24). Deterministic parsing is tried first, so a
+        slash command or a high-confidence bounded intent stays a zero-AI fast
+        path. Only genuinely unrecognized text is routed to an eligible
+        interpreter, along the role's normal configured route.
+
+        The result is always a *proposal*. Execution still goes through
+        ``/api/steering/execute``, which re-derives destructiveness itself, so
+        a natural-language request for a destructive action cannot skip the
+        confirmation gate.
+        """
+
+        text = str(payload.get("text", ""))
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="message text is required")
+
+        deterministic = parse_steering_text(text)
+        if deterministic.status == "PARSED":
+            body = deterministic.as_dict()
+            _attach_quickstart_option(deterministic, body)
+            body["route"] = {"kind": "deterministic", "eligible": True, "reason": "matched without any model call"}
+            body["interpretation_status"] = "PARSED"
+            ctx.state.record_event(
+                category="steering",
+                message=f"manager message parsed deterministically: {text!r} -> {deterministic.verb}",
+            )
+            return body
+
+        provider_map = {p.name: p for p in ctx.state.list_provider_states()}
+        interpretation = _manager_chat.interpret(
+            text,
+            registry=ctx.registry,
+            provider_states=provider_map,
+            invoker=manager_invoker,
+        )
+        body = interpretation.as_dict()
+        body["route"]["kind"] = "model"
+        # Same two-stage treatment as the deterministic branch: a PARSED
+        # quickstart must arrive with its fully resolved Prepared Run so the
+        # operator reviews real branch/worktree/objective detail before
+        # anything starts, never a bare verb.
+        if interpretation.proposal.status == "PARSED":
+            _attach_quickstart_option(interpretation.proposal, body)
+
+        route = interpretation.route
+        # Route evidence goes into the same event log every other execution
+        # decision uses, so a fallback is auditable after the fact.
+        ctx.state.record_event(
+            category="steering",
+            level="info" if interpretation.status == "PARSED" else "warning",
+            message=(
+                f"manager message interpreted ({interpretation.status}) via "
+                f"{route.worker or 'no-route'}/{route.provider or '-'}/{route.model or '-'}: "
+                f"{text!r} -> {interpretation.proposal.verb or 'none'}"
+            ),
+        )
+        return body
 
     @app.get("/api/steering/ai-route")
     def steering_ai_route() -> dict[str, Any]:

@@ -42,6 +42,10 @@ Invariants:
 - Failed lanes keep their fixture state, traces, and screenshots; the aggregate `summary.json` records project,
   port, duration, counts, and artifact path per lane.
 - Lanes receive an allowlisted environment: no secrets, no provider/API credentials, no live daemon state.
+- The shared fixture seed is deterministic in *relative* task recency, not just in content. Whichever single
+  task reference the Live Workflow card is meant to render must be stamped explicitly, because `utc_now_iso()`
+  resolves to whole seconds and a seed slowed by concurrency otherwise crosses a clock second mid-write and
+  silently reassigns that card. Seed timestamps are never left to how long seeding happened to take.
 
 Test-scope selection stays with `scripts/ci/test_impact.py`; the runner only executes the matrix.
 

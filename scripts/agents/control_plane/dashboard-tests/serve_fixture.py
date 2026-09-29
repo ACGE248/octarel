@@ -23,6 +23,7 @@ since "dashboard-tests" is not a valid Python package identifier.)
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import signal
@@ -278,6 +279,20 @@ def _git_add_review_fixture_worktree(root: Path) -> tuple[Path, str]:
 
 
 def build_fixture_context(root: Path, *, state_path: Path | None = None) -> CommandContext:
+    # OCTAREL-TEST-02 (issue #45): stamp the whole seed from one instant so the
+    # fixture's *relative* task recency is intentional instead of a function of
+    # how long seeding took. ``dashboard_api.workflow()`` renders the single most
+    # recently updated active task reference, and ``utc_now_iso()`` resolves to
+    # whole seconds, so a seed that happened to cross a clock second between
+    # ENG-AGENT-02's fx-* tasks and ENG-AGENT-07's fallback session silently
+    # handed the Live Workflow card to ENG-AGENT-07 -- and every test locating
+    # ``.workflow-stage-card[data-stage-id="fx-*"]`` then found no such card.
+    # Under the concurrent viewport matrix that seed is slower, so the flip was
+    # load-dependent. ENG-AGENT-02 is the reference the browser suite inspects,
+    # so it keeps "now" and every other reference is stamped one second older.
+    seeded_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    current_ref_at = seeded_at.isoformat(timespec="seconds")
+    other_ref_at = (seeded_at - dt.timedelta(seconds=1)).isoformat(timespec="seconds")
     _git_init_fixture_root(root)
     second_worktree = _git_add_second_fixture_worktree(root)
     video_editor_worktree = _git_add_video_editor_fixture_worktree(root)
@@ -311,7 +326,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             # overcounted the managed-dispatch write cap (ENG-AGENT-10)
             # against fixture data seeded before that cap existed.
             kind=KIND_READ,
-        )
+        ),
+        updated_at=current_ref_at,
     )
     state.upsert_task(
         Task(
@@ -321,10 +337,12 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             worker="opencode2-gemini-flash-lite",
             state="RUNNING",
             kind=KIND_READ,
-        )
+        ),
+        updated_at=current_ref_at,
     )
     state.upsert_task(
-        Task(id="fx-queued-1", task_ref="ENG-CI-04", role="focused-tests", worker="grok-build", state="QUEUED")
+        Task(id="fx-queued-1", task_ref="ENG-CI-04", role="focused-tests", worker="grok-build", state="QUEUED"),
+        updated_at=other_ref_at,
     )
     state.upsert_task(
         Task(
@@ -334,7 +352,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             worker="grok-build-review",
             state="BLOCKED",
             dependencies=("fx-running-1",),
-        )
+        ),
+        updated_at=current_ref_at,
     )
     state.upsert_task(
         Task(
@@ -343,7 +362,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             role="focused-tests",
             worker="opencode2-gemini-flash-lite",
             state="SUCCEEDED",
-        )
+        ),
+        updated_at=current_ref_at,
     )
 
     grok = state.get_provider_state("grok-build-review")
@@ -383,7 +403,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             state="RUNNING",
             launch_mode="session",
             worktree=str(root),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     overnight_preset = PRESETS["overnight-development"]
     running_rb = Runbook(
@@ -427,7 +448,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             result="PASS",
             launch_mode="session",
             worktree=str(root),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     test_fix_preset = PRESETS["test-fix"]
     done_rb = Runbook(
@@ -466,7 +488,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             failure_reset_source="provider diagnostic",
             launch_mode="session",
             worktree=str(video_editor_worktree),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     failed_rb = Runbook(
         id="fx-rb-failed",
@@ -507,7 +530,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             launch_mode="session",
             runbook_id="fx-rb-fallback",
             worktree=str(root),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     fallback_rb = Runbook(
         id="fx-rb-fallback",
@@ -555,9 +579,95 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
                     "failure_category": "QUOTA",
                 },
             ],
+            # OCTAREL-UI-06 (issue #25): exact CLI-reported counts on this
+            # record so the usage panel's MEASURED path is exercised alongside
+            # the UNKNOWN one on the other fixture runbook.
+            "telemetry_quality": "exact",
+            "input_tokens": 142800,
+            "output_tokens": 9310,
             "context_manifest": {},
         }
     )
+
+    # OCTAREL-UI-07 (issue #42): one usage record per billing class, so the
+    # browser suite can assert that a subscription-included run, an API-billed
+    # run, a free-route run and an unclassified one are each presented as what
+    # they are. The route history records cost_class the way a real run now
+    # does, which is also what makes these rows independent of whatever
+    # workers.json happens to say today.
+    for runbook_id, history, tokens, reported in (
+        (
+            "fx-usage-api-billed",
+            [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
+            (80_000, 4_000),
+            None,
+        ),
+        (
+            # OCTAREL-UI-08 (issue #44): an API-billed run whose CLI reported
+            # its own cost. Deliberately a figure the derived path could not
+            # produce, so a row showing the derived number here would be
+            # visible as a bug rather than a coincidence.
+            "fx-usage-reported-cost",
+            [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
+            (61_000, 3_100),
+            (0.69791188, "worker CLI structured total_cost_usd"),
+        ),
+        (
+            # A subscription-backed run whose CLI also reports a cost. The
+            # Claude CLI emits total_cost_usd meaning "what this would have
+            # cost on the API", not "what you were charged". It must stay
+            # $0.00 incremental: the route decides, never the monetary field.
+            "fx-usage-subscription-reported",
+            [{
+                "worker": "claude-code", "provider": "Anthropic",
+                "model": "claude-sonnet-5", "cost_class": "premium-subscription",
+            }],
+            (44_000, 2_200),
+            (0.51234567, "worker CLI structured total_cost_usd"),
+        ),
+        (
+            "fx-usage-free-route",
+            [
+                {
+                    "worker": "opencode2-gemini-flash-lite",
+                    "provider": "Google",
+                    "model": "google/gemini-3.5-flash-lite",
+                    "cost_class": "free-verified",
+                }
+            ],
+            (51_000, 2_400),
+            None,
+        ),
+        (
+            # No cost_class anywhere, so billing cannot be established. This
+            # row exists to prove the panel says so instead of showing $0.00.
+            "fx-usage-unclassified",
+            [{"worker": "retired-worker", "provider": "Somebody", "model": "mystery-model"}],
+            (12_000, 800),
+            None,
+        ),
+    ):
+        state.upsert_usage_governance(
+            {
+                "runbook_id": runbook_id,
+                "task_id": f"{runbook_id}-task",
+                "classification": "routine",
+                "codex_policy": "conserve",
+                "telemetry_quality": "exact",
+                "input_tokens": tokens[0],
+                "output_tokens": tokens[1],
+                # OCTAREL-UI-08 (issue #44): a reported cost belongs to the
+                # attempt that produced it, not to the record.
+                "route_history": [{
+                    **history[0],
+                    "status": "SUCCEEDED",
+                    "ended_at": utc_now_iso(),
+                    **({"reported_cost_usd": reported[0], "reported_cost_source": reported[1]}
+                       if reported else {}),
+                }],
+                "context_manifest": {},
+            }
+        )
 
     # This fixture deliberately seeds more concurrently RUNNING work (two
     # plain tasks plus two write session runbooks) than production's default
@@ -704,6 +814,67 @@ def _mount_test_token_route(app, private_key) -> None:
         return {"token": token}
 
 
+def _fixture_manager_invoker(argv, timeout):
+    """Deterministic stand-in for a natural-language interpreter.
+
+    Recognizes a couple of fixture phrases so the Manager Chat UI can be driven
+    end to end, and returns "no single matching command" for anything else.
+    Never spawns a process and never contacts a provider.
+    """
+
+    # Not argv[-1]: a worker's CLI template may place {prompt} anywhere, so
+    # scan the whole command rather than assuming it is the final argument.
+    lowered = " ".join(str(part) for part in (argv or [])).lower()
+    if "wind things down" in lowered:
+        # Maps to a destructive verb on purpose: the browser suite asserts that
+        # a natural-language destructive request still has to be confirmed.
+        reply = {"verb": "stop", "args": {"task_id": "fx-running-1"}, "summary": "Stop task fx-running-1"}
+    elif "take a break" in lowered:
+        reply = {"verb": "pause", "args": {"task_id": "fx-running-1"}, "summary": "Pause task fx-running-1"}
+    else:
+        reply = {"verb": None, "summary": "no single matching command"}
+    return 0, json.dumps(reply), ""
+
+
+def _fixture_pricing_book():
+    """A fixed API-equivalent price list (OCTAREL-UI-07, issue #42).
+
+    The real loader reads whatever OpenCode catalog snapshot happens to be
+    cached on the machine, which would make every money assertion in the
+    browser suite depend on a developer's local state. This book is pinned
+    instead, and deliberately omits Anthropic so the "model the catalog does
+    not carry" path stays exercised alongside the priced ones.
+
+    Rates are the catalog's own units: US dollars per million tokens.
+    """
+
+    from scripts.agents.control_plane import pricing as _pricing
+    from scripts.agents.model_catalog import Catalog, CatalogModel
+
+    def model(model_id: str, cost: dict) -> CatalogModel:
+        provider_id, _, bare = model_id.partition("/")
+        return CatalogModel(
+            id=model_id, provider_id=provider_id, model_id=bare, display_name=bare, family="",
+            status="active", api_url="", context_limit=200000, output_limit=8192, cost=cost,
+            credential="api", cost_class="metered", cost_reason="", capable=True, capability_reasons=(),
+        )
+
+    return _pricing.book_from_catalog(
+        Catalog(
+            status="ok",
+            reason="fixture",
+            opencode_version="fixture",
+            refreshed_at=utc_now_iso(),
+            credentials_status="ok",
+            models=(
+                model("xai/grok-4.6", {"input": 3.0, "output": 15.0}),
+                model("openai/gpt-5.6-sol", {"input": 1.25, "output": 10.0}),
+                model("google/gemini-3.5-flash-lite", {"input": 0.1, "output": 0.4}),
+            ),
+        )
+    )
+
+
 def _mount_test_repo_root_route(app, ctx) -> None:
     """Test-only route: expose this fixture process's isolated repo_root so a
     Playwright spec running in the same host process's filesystem (see the
@@ -732,7 +903,19 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=True)
     ctx = build_fixture_context(root)
     remote_state, private_key = _build_remote_state(f"{args.host}:{args.port}")
-    app = create_app(ctx, roadmap_path=root / "docs" / "PRODUCT_ROADMAP.md", remote=remote_state)
+    app = create_app(
+        ctx,
+        roadmap_path=root / "docs" / "PRODUCT_ROADMAP.md",
+        remote=remote_state,
+        # OCTAREL-UI-05 (issue #24): Manager Chat's natural-language interpreter
+        # is a deterministic fake in the fixture. The browser suite must never
+        # make a live or billable provider call, and a fixed reply also keeps
+        # the assertions deterministic.
+        manager_invoker=_fixture_manager_invoker,
+        # OCTAREL-UI-07 (issue #42): a pinned price list, so money figures in
+        # the browser suite never depend on the host's cached catalog.
+        pricing_loader=_fixture_pricing_book,
+    )
     _mount_test_token_route(app, private_key)
     _mount_test_repo_root_route(app, ctx)
 

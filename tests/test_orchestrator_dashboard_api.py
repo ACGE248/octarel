@@ -396,6 +396,66 @@ def test_routing_endpoint_rejects_unknown_role(client):
     assert resp.status_code == 400
 
 
+def test_priority_matrix_reports_every_role_in_configured_route_order(client, ctx):
+    """OCTAREL-UI-04 (issue #23): the Priority & Fallback Matrix read model.
+
+    It must present the registry's own route order rather than a ranking
+    invented for display, and must not change routing semantics.
+    """
+
+    body = client.get("/api/priority-matrix").json()
+    roles = {role["role"]: role for role in body["roles"]}
+
+    # Every configured route is represented, none invented.
+    assert set(roles) == set(ctx.registry.routes)
+
+    for name, role in roles.items():
+        configured = list(ctx.registry.route(name))
+        # Priority is position in the configured route, in order, 1-based.
+        assert [c["worker"] for c in role["candidates"]] == configured
+        assert [c["priority"] for c in role["candidates"]] == list(range(1, len(configured) + 1))
+        assert role["candidate_count"] == len(configured)
+        assert role["routable_count"] == sum(1 for c in role["candidates"] if c["routable"])
+
+
+def test_priority_matrix_keeps_unroutable_candidates_with_a_reason(client):
+    """A candidate the router cannot use stays visible and explains why."""
+
+    body = client.get("/api/priority-matrix").json()
+    candidates = [c for role in body["roles"] for c in role["candidates"]]
+    excluded = [c for c in candidates if not c["routable"]]
+
+    # The fixture registry seeds non-routable provider states.
+    assert excluded, "expected at least one non-routable candidate in the fixture"
+    for candidate in excluded:
+        assert candidate["excluded_reason"], candidate["worker"]
+        assert candidate["share_percent"] is None
+
+
+def test_priority_matrix_single_primary_gives_one_candidate_all_traffic(client):
+    body = client.get("/api/priority-matrix", params={"mode": "A"}).json()
+    assert body["mode"] == "A"
+    for role in body["roles"]:
+        with_share = [c for c in role["candidates"] if c["share_percent"] is not None]
+        if role["routable_count"]:
+            assert len(with_share) == 1
+            assert with_share[0]["share_percent"] == 100.0
+        else:
+            assert with_share == []
+
+
+def test_priority_matrix_distinguishes_provider_agent_and_model(client):
+    """The design specification requires provider and agent to stay distinct."""
+
+    body = client.get("/api/priority-matrix").json()
+    impl = next(r for r in body["roles"] if r["role"] == "primary-implementation")
+    claude = next(c for c in impl["candidates"] if c["worker"] == "claude-code")
+    assert claude["provider"] == "Anthropic"
+    assert claude["execution_system"] == "Claude Code"
+    assert claude["model"]
+    assert claude["capability"] == "write"
+
+
 def test_models_endpoint_reflects_workers_json(client):
     models = client.get("/api/models").json()
     names = {m["worker"] for m in models}
@@ -1234,3 +1294,127 @@ def test_telemetry_checkpoints_are_scoped_to_the_selected_project(ctx, roadmap_f
     pr.select_project(ctx.state, "proj-b")
     paths = {row["worktree"] for row in client.get("/api/telemetry").json()["checkpoints"]}
     assert str(other) in paths and str(mine) not in paths
+
+
+# ----------------------------------------------------- Manager Chat endpoints
+
+
+def _manager_client(ctx, roadmap_file, reply: dict | None):
+    """A dashboard client whose Manager interpreter is a deterministic fake.
+
+    OCTAREL-UI-05 (issue #24): no test may make a live or billable provider
+    call, so the invoker seam is always filled with a local function here.
+    """
+
+    import json as _json
+
+    calls: list = []
+
+    def _invoke(argv, timeout):
+        calls.append(list(argv))
+        if reply is None:
+            return 1, "", "interpreter unavailable"
+        return 0, _json.dumps(reply), ""
+
+    app = create_app(ctx, roadmap_path=roadmap_file, manager_invoker=_invoke)
+    return TestClient(app), calls
+
+
+def test_manager_route_is_read_only_and_names_the_interpreter(client):
+    body = client.get("/api/manager/route").json()
+    assert "eligible" in body
+    assert "considered" in body
+    if body["eligible"]:
+        # Provider and model must be visible so the operator knows who read it.
+        assert body["worker"] and body["provider"] and body["model"]
+
+
+def test_manager_message_uses_the_deterministic_fast_path_without_any_model_call(ctx, roadmap_file):
+    client, calls = _manager_client(ctx, roadmap_file, reply={"verb": "stop", "args": {}})
+    body = client.post("/api/manager/message", json={"text": "/pause T1"}).json()
+
+    assert body["status"] == "PARSED"
+    assert body["verb"] == "pause"
+    assert body["route"]["kind"] == "deterministic"
+    # The interpreter was never reached: a recognized command costs zero AI.
+    assert calls == []
+
+
+def test_manager_message_routes_unrecognized_text_and_reports_the_route(ctx, roadmap_file):
+    client, calls = _manager_client(
+        ctx, roadmap_file, reply={"verb": "pause", "args": {"task_id": "T7"}, "summary": "pause T7"}
+    )
+    body = client.post("/api/manager/message", json={"text": "give T7 a rest please"}).json()
+
+    if body["route"].get("eligible"):
+        assert len(calls) == 1
+        assert body["status"] == "PARSED"
+        assert body["verb"] == "pause"
+        assert body["route"]["kind"] == "model"
+        assert body["route"]["worker"]
+    else:
+        # No eligible interpreter in this environment is an honest outcome.
+        assert body["status"] == "UNRECOGNIZED"
+        assert calls == []
+
+
+def test_manager_message_never_executes_a_destructive_proposal(ctx, roadmap_file):
+    """Natural language may propose a destructive action, never perform one."""
+
+    client, _ = _manager_client(
+        ctx, roadmap_file, reply={"verb": "stop", "args": {"task_id": "T1"}, "summary": "stop T1"}
+    )
+    body = client.post("/api/manager/message", json={"text": "shut it all down"}).json()
+
+    if body["status"] == "PARSED" and body["verb"] == "stop":
+        assert body["destructive"] is True
+        # The proposal carries no confirmation; execute still demands one.
+        blocked = client.post(
+            "/api/steering/execute", json={"verb": "stop", "args": {"task_id": "T1"}}
+        )
+        assert blocked.status_code == 409
+
+
+def test_manager_message_rejects_an_unknown_verb_from_the_interpreter(ctx, roadmap_file):
+    """A model reply is untrusted input and can never introduce a new verb."""
+
+    client, _ = _manager_client(ctx, roadmap_file, reply={"verb": "delete_everything", "args": {}})
+    body = client.post("/api/manager/message", json={"text": "do the thing"}).json()
+
+    assert body["status"] == "UNRECOGNIZED"
+    assert body["verb"] is None
+
+
+def test_manager_message_requires_text(client):
+    assert client.post("/api/manager/message", json={"text": "   "}).status_code == 400
+
+
+def test_manager_interpreted_quickstart_carries_its_resolved_prepared_run(ctx, roadmap_file):
+    """Re-review follow-up (issue #24): allowing `key` let an interpreted
+    quickstart be PARSED, but only the deterministic branch attached the
+    resolved Prepared Run — so the client would have offered a bare Run for
+    work whose branch/worktree/objective the operator never saw.
+    """
+
+    client, _ = _manager_client(
+        ctx,
+        roadmap_file,
+        reply={"verb": "quickstart_start", "args": {"key": "continue-video-editor"}, "summary": "continue"},
+    )
+    body = client.post("/api/manager/message", json={"text": "carry on with the video editor"}).json()
+
+    if body["route"].get("eligible") and body["status"] == "PARSED":
+        assert body["verb"] == "quickstart_start"
+        # The same two-stage detail the deterministic path guarantees.
+        assert "quickstart_option" in body
+
+
+def test_quickstart_option_is_never_substituted_when_no_key_is_given(ctx, roadmap_file):
+    """A proposal without a key must not be given a default option."""
+
+    client, _ = _manager_client(ctx, roadmap_file, reply={"verb": "quickstart_start", "args": {}})
+    body = client.post("/api/manager/message", json={"text": "just start something"}).json()
+
+    assert body["status"] == "UNRECOGNIZED"
+    assert "quickstart_option" not in body
+
