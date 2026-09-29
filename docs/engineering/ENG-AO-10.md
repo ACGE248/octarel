@@ -45,7 +45,12 @@ identity, cache validation/retention, graph normalization/redaction, and the onl
 3. Advancement re-reads canonical repository truth. Only when a successor will actually auto-start does it
    queue a non-blocking `post-merge` refresh; it never holds the advancement lock/lease for a graph build, and
    the successor's existing context seam refreshes its exact tree on demand if the warm-up is incomplete.
-4. A dashboard or CLI manual action queues the same coordinator. Dashboard GETs only read cached status.
+4. A dashboard or CLI manual action queues the same coordinator. Dashboard GETs only read cached status. The
+   dashboard locates that status with the path-derived worktree key and, for a registered project, the
+   project-id-derived project key; it runs neither Git nor a content-tree fingerprint. Consequently it reports a
+   recorded `READY` index as `STALE` with `tree_verification: UNVERIFIED`, preserves the indexed tree and recorded
+   branch for diagnosis, and never claims that tree is current until a deliberate verifying path or refresh has
+   matched it to the checkout.
 
 The coordinator has one local worker. An identical project/worktree/tree request shares one future; a newer
 tree replaces an older queued request for that worktree; shutdown resolves queued requests as failed-safe. An
@@ -59,8 +64,8 @@ convert an otherwise valid merge, acceptance, or advancement into failure.
 
 ## Control Center
 
-System / Operational Overlays shows selected-project Graphify health, version, branch/worktree/tree, last
-refresh/duration/age, counts, reason and the active run's existing #26 injection evidence. There is no second
+System / Operational Overlays shows selected-project Graphify health, version, recorded branch/worktree/indexed
+tree, explicit tree-currency verification, last refresh/duration/age, counts, reason and the active run's existing #26 injection evidence. There is no second
 Graphify page. `GET /api/graphify` never probes or generates; Check installation and Refresh graph are explicit
 operator POST actions.
 The API omits Graphify executable/worktree absolute paths, including paths present in internal cached evidence.

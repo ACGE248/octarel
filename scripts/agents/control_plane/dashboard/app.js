@@ -4967,6 +4967,7 @@
       ["Branch / worktree", [data.branch, data.worktree_id].filter(Boolean).join(" · ") || "—"],
       ["Indexed tree", data.tree_id || "—"],
       ["Current tree", data.current_tree_id || "—"],
+      ["Tree currency", data.tree_verification === "UNVERIFIED" ? "Unverified on this non-blocking read" : (data.currency_verified ? "Verified" : "—"), data.tree_verification === "UNVERIFIED" ? "warn" : undefined],
       ["Last refresh", data.finished_at || "—"],
       ["Duration", data.duration_seconds == null ? "—" : `${data.duration_seconds}s`],
       ["Graph age", data.graph_age_seconds == null ? "—" : `${Math.round(data.graph_age_seconds)}s`],

@@ -130,6 +130,7 @@ test('System shows selected-project Graphify operational health without a second
   await expect(card).toContainText('Graphify operational overlay');
   await expect(card).toContainText('Page reads never generate a graph');
   await expect(card.locator('#graphify-body')).toContainText('Status');
+  await expect(card.locator('#graphify-body')).toContainText('Unverified on this non-blocking read');
   await expect(card.locator('#graphify-check')).toBeVisible();
   await expect(card.locator('#graphify-refresh')).toBeVisible();
 });

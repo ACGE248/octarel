@@ -138,7 +138,10 @@ def test_selected_project_is_indexed_not_octarel_cwd(project, graphify, tmp_path
     # generated data lives in Octarel state, never in the managed repository
     assert not (project / "graphify-out").exists()
     assert (tmp_path / "state" / "graph-context").is_dir()
-    assert graph_lifecycle.cached_status(project, project_id="octascene", verify_tree=False)["status"] == "READY"
+    dashboard_status = graph_lifecycle.cached_status(project, project_id="octascene", verify_tree=False)
+    assert dashboard_status["status"] == "STALE"
+    assert dashboard_status["indexed_status"] == "READY"
+    assert dashboard_status["tree_verification"] == "UNVERIFIED"
     assert subprocess.run(
         ["git", "-C", str(project), "status", "--porcelain"], capture_output=True, text=True, check=False
     ).stdout == ""
@@ -253,6 +256,25 @@ def test_cached_status_marks_changed_tree_stale_without_running_graphify(project
     assert len(_calls(graphify)) == calls
 
 
+def test_unverified_cached_status_never_runs_git_or_reports_ready(project, graphify, monkeypatch):
+    refreshed = graph_lifecycle.refresh_graph(project, project_id="demo", trigger="manual")
+    (project / "src/app.py").write_text("changed after indexing\n")
+
+    def fail_git(*args, **kwargs):
+        raise AssertionError("non-verifying cached status must not run git")
+
+    monkeypatch.setattr(graph_context, "_git", fail_git)
+    status = graph_lifecycle.cached_status(project, project_id="demo", verify_tree=False)
+
+    assert status["status"] == "STALE"
+    assert status["indexed_status"] == "READY"
+    assert status["tree_id"] == refreshed["tree_id"]
+    assert status["current_tree_id"] is None
+    assert status["tree_verification"] == "UNVERIFIED"
+    assert status["currency_verified"] is False
+    assert "unverified" in status["reason"]
+
+
 def test_refresh_coordinator_coalesces_duplicates(project, monkeypatch):
     entered = threading.Event()
     release = threading.Event()
@@ -308,6 +330,39 @@ def test_refresh_request_fingerprints_only_on_coordinator_worker(project, monkey
         assert future.result(2)["status"] == "READY"
     finally:
         release.set()
+        queue.shutdown()
+
+
+def test_same_tree_requests_before_fingerprinting_share_one_result(project, monkeypatch):
+    fingerprint_entered = threading.Event()
+    release_fingerprint = threading.Event()
+    refresh_calls = []
+    original_coordinates = graph_lifecycle._coordinates
+
+    def blocked_coordinates(root, project_id):
+        fingerprint_entered.set()
+        release_fingerprint.wait(2)
+        return original_coordinates(root, project_id)
+
+    def fake_refresh(root, *, project_id, trigger, event_recorder=None):
+        refresh_calls.append((root, project_id, trigger))
+        return {"status": "READY", "trigger": trigger}
+
+    monkeypatch.setattr(graph_lifecycle, "_coordinates", blocked_coordinates)
+    monkeypatch.setattr(graph_lifecycle, "refresh_graph", fake_refresh)
+    queue = graph_lifecycle.RefreshCoordinator()
+    try:
+        first = queue.request(project, project_id="demo", trigger="manual")
+        assert fingerprint_entered.wait(1)
+        second = queue.request(project, project_id="demo", trigger="implementation-checkpoint")
+        assert not first.done()
+        assert not second.done()
+        release_fingerprint.set()
+        assert first.result(2)["status"] == "READY"
+        assert second.result(2) == first.result(2)
+        assert len(refresh_calls) == 1
+    finally:
+        release_fingerprint.set()
         queue.shutdown()
 
 

@@ -182,6 +182,39 @@ def _read_status(worktree_dir: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _cached_status_without_git(
+    root: Path, project_id: str | None
+) -> tuple[dict[str, Any] | None, str | None, str]:
+    """Locate one worktree's recorded status using path-derived keys only.
+
+    ``worktree_id`` has always been derived from the real checkout path.  A
+    registered project's ``project_key`` is likewise derived from its stable
+    project id, so dashboard reads can address the same status file without
+    rediscovering Git's common directory.  The unregistered fallback searches
+    project-key directories for the exact recorded worktree id; it is used by
+    fresh/test Control Plane contexts where no project contract exists.
+    """
+
+    worktree_id = graph_context._sha("worktree", os.path.realpath(root))[:16]
+    state_root = graph_context.graph_state_root()
+    if project_id:
+        project_key = graph_context._sha("project", project_id)[:16]
+        candidates = (state_root / project_key / worktree_id,)
+    else:
+        project_key = None
+        candidates = tuple(state_root.glob(f"*/{worktree_id}")) if state_root.is_dir() else ()
+    for worktree_dir in candidates:
+        saved = _read_status(worktree_dir)
+        if saved is None or saved.get("worktree_id") != worktree_id:
+            continue
+        if project_id and saved.get("project_key") != project_key:
+            continue
+        if not project_id and saved.get("project_id") not in (None, ""):
+            continue
+        return saved, str(saved.get("project_key") or project_key or "") or None, worktree_id
+    return None, project_key, worktree_id
+
+
 def record_context_cache(worktree_dir: Path, cache_dir: Path) -> None:
     """Project a validated on-demand context build into lifecycle current health."""
 
@@ -218,26 +251,45 @@ def cached_status(root: Path, *, project_id: str | None = None, verify_tree: boo
 
     root = Path(root).resolve()
     capability = capability_status(probe=False)
-    if capability["status"] == "MISSING":
-        return {**capability, "project_id": project_id, "worktree": str(root), "branch": _branch(root)}
     if not verify_tree:
-        try:
-            identity = graph_context._identity(root, project_id)
-            worktree_dir = graph_context.graph_state_root() / identity["project_key"] / identity["worktree_id"][:16]
-        except (OSError, subprocess.SubprocessError):
-            return {**capability, "status": "FAILED_SAFE", "reason": "selected checkout identity could not be inspected", "project_id": project_id, "worktree": str(root)}
-        saved = _read_status(worktree_dir)
+        saved, project_key, worktree_id = _cached_status_without_git(root, project_id)
         common = {
             **capability,
             "project_id": project_id,
-            "project_key": identity["project_key"],
+            "project_key": project_key,
             "worktree": str(root),
-            "worktree_id": identity["worktree_id"][:16],
-            "branch": _branch(root),
+            "worktree_id": worktree_id,
+            "current_tree_id": None,
+            "tree_verification": "UNVERIFIED",
+            "currency_verified": False,
         }
-        return {**common, **saved} if saved is not None else {
-            **common, "status": "STALE", "reason": "no cached Graphify lifecycle refresh exists for this worktree"
+        if saved is None:
+            if capability["status"] == "MISSING":
+                return common
+            return {**common, "status": "STALE", "reason": "no cached Graphify lifecycle refresh exists for this worktree"}
+        status = {
+            **common,
+            **saved,
+            "project_id": project_id,
+            "project_key": project_key,
+            "worktree": str(root),
+            "worktree_id": worktree_id,
+            "current_tree_id": None,
+            "tree_verification": "UNVERIFIED",
+            "currency_verified": False,
+            "indexed_status": saved.get("status"),
         }
+        if saved.get("status") == "READY":
+            status.update(
+                status="STALE",
+                reason="indexed tree is recorded, but its currency is unverified on this non-blocking read",
+            )
+        finished = saved.get("finished_epoch")
+        if finished:
+            status["graph_age_seconds"] = max(0.0, time.time() - float(finished))
+        return status
+    if capability["status"] == "MISSING":
+        return {**capability, "project_id": project_id, "worktree": str(root), "branch": _branch(root)}
     try:
         identity, files, excluded, tree_id, worktree_dir = _coordinates(root, project_id)
     except (OSError, subprocess.SubprocessError, OverflowError):
@@ -470,15 +522,6 @@ class RefreshCoordinator:
             queued = self._queued.get(lane)
             if queued is not None and not queued.future.done():
                 queued.future.set_result({"status": "STALE", "reason": "superseded by a newer refresh request for this worktree", "trigger": queued.trigger})
-            if (
-                self._active is not None
-                and self._active.lane == lane
-                and self._active.key is None
-                and not self._active.future.done()
-            ):
-                self._active.future.set_result(
-                    {"status": "STALE", "reason": "superseded by a newer refresh request for this worktree", "trigger": self._active.trigger}
-                )
             self._sequence += 1
             future = Future()
             self._queued[lane] = _Request(lane, root, project_id, trigger, event_recorder, future, self._sequence)

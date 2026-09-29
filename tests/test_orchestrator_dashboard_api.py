@@ -90,33 +90,43 @@ def test_overview_endpoint(client):
     assert body["octascene_app_status"] in {"RUNNING", "STOPPED", "UNKNOWN"}
 
 
-def test_graphify_dashboard_read_uses_cached_status_and_never_builds(client, monkeypatch):
+def test_graphify_dashboard_read_uses_real_cached_status_without_git_or_build(
+    client, ctx, monkeypatch, tmp_path
+):
+    from scripts.agents import graph_context, graph_lifecycle
     from scripts.agents.control_plane import dashboard_api
 
-    calls = []
-    monkeypatch.setattr(
-        dashboard_api,
-        "graphify_cached_status",
-        lambda root, *, project_id, verify_tree: calls.append((root, project_id, verify_tree)) or {
-            "status": "READY", "tree_id": "abc123", "reason": "cached",
-            "worktree": "/private/host/project", "path": "/private/bin/graphify",
-            "installed_path": "/private/bin/graphify",
-        },
-    )
+    monkeypatch.setenv("OCTAREL_STATE_DIR", str(tmp_path / "graph-state"))
+    worktree_id = graph_context._sha("worktree", os.path.realpath(ctx.project_root))[:16]
+    worktree_dir = graph_context.graph_state_root() / "recorded-project" / worktree_id
+    graph_lifecycle._write_status(worktree_dir, {
+        "status": "READY", "project_id": None, "project_key": "recorded-project",
+        "worktree_id": worktree_id, "tree_id": "abc123", "branch": "recorded-branch",
+        "reason": "cached", "worktree": "/private/host/project",
+        "path": "/private/bin/graphify", "installed_path": "/private/bin/graphify",
+    })
+
+    def fail_git(*args, **kwargs):
+        raise AssertionError("dashboard Graphify GET must not run git")
+
+    monkeypatch.setattr(graph_context, "_git", fail_git)
     monkeypatch.setattr(
         dashboard_api,
         "graphify_request_refresh",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("GET must never queue a refresh")),
     )
     body = client.get("/api/graphify").json()
-    assert body["status"] == "READY"
+    assert body["status"] == "STALE"
+    assert body["indexed_status"] == "READY"
     assert body["tree_id"] == "abc123"
+    assert body["current_tree_id"] is None
+    assert body["tree_verification"] == "UNVERIFIED"
+    assert body["currency_verified"] is False
+    assert body["branch"] == "recorded-branch"
     assert "worktree" not in body
     assert "path" not in body
     assert "installed_path" not in body
     assert "/private/host" not in json.dumps(body)
-    assert len(calls) == 1
-    assert calls[0][2] is False
 
 
 def test_graphify_manual_refresh_queues_and_records_lifecycle_event(client, ctx, monkeypatch):
