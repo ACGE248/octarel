@@ -2,6 +2,8 @@
 
 This file is the canonical product/engineering roadmap for **Octarel itself**. It does not copy or replace the roadmap, ledger, ADRs, or task truth of any managed project. Current repository code and `AGENTS.md` override historical planning notes.
 
+**Reconciled against `main` at `ed4ca59` (2026-09-29)**, after the Glass Orchestration Studio UI program (#27) and the telemetry follow-ups (#43, #47) landed. Where this file describes delivered behaviour it is a pointer to the code, not a second specification; where a delivered surface is named as the home for future work, extend that surface rather than rebuilding it.
+
 ## Current direction
 
 Octarel is a standalone, multi-repository development orchestration control plane. Its differentiators remain:
@@ -20,7 +22,11 @@ Octarel is a standalone, multi-repository development orchestration control plan
 
 Complete ENG-AO-10 before beginning the ENG-PC implementation waves below.
 
-Octarel already has safe tree-matched Graphify context from ENG-AO-01. ENG-AO-10 makes it operationally first-class: supported installation/health, warm canonical indexes, candidate refresh after safe implementation checkpoints, canonical refresh after merge/reconciliation, refresh coalescing, tree/worktree-aware evidence, and #26 Control Center visibility.
+Octarel already has safe tree-matched Graphify context from ENG-AO-01 (`scripts/agents/graph_context.py`), and #26 has since delivered its **per-run** Control Center evidence: `agent_activity._graph_context_row` exposes the recorded status, reason, injection flag and precedence for an attempt, reading only the run manifest and never invoking Graphify.
+
+ENG-AO-10 makes the capability operationally first-class on top of that: supported installation/health probing, warm canonical indexes, candidate refresh after safe implementation checkpoints, canonical refresh after merge/reconciliation, refresh coalescing, and tree/worktree-aware evidence.
+
+Its UI work is an **extension of the delivered #26 surface**, not a replacement for it. #26 answers "did this run get a graph?"; ENG-AO-10 adds the selected-project/global health that does not exist today — installed version, indexed tree identity, graph age, last refresh, and `READY`/`MISSING`/`OUTDATED`/`STALE`/`REFRESHING`/`FAILED_SAFE` — in System / Operational Overlays. Do not add a second Graphify page.
 
 This is an **implementation sequencing prerequisite**, not a runtime hard dependency. If Graphify is missing or fails safely, normal Octarel execution must continue without graph context and record the reason.
 
@@ -41,14 +47,25 @@ managed repository changes
 
 Octarel owns refresh lifecycle; do not depend on Graphify Git hooks inside managed repositories. Graphify remains local/code-only, secret-filtered, provider-neutral, advisory, and below repository truth.
 
-## Active UI program
+## UI program state
 
-- **#23 OCTAREL-UI-04** — Stitch Glass Orchestration Studio integration.
-- **#24 OCTAREL-UI-05** — real orchestration-backed Manager Chat.
-- **#25 OCTAREL-UI-06** — truthful model/session usage, context and cost telemetry.
-- **#26 OCTAREL-UI-07** — Graphify repository-intelligence status.
+The Glass Orchestration Studio program has landed. It is the live Control Center, not a planned one, and every ENG-PC surface below composes into it.
 
-The Paperclip-derived program below must compose with these tasks. In particular, ENG-PC-05 extends #25; it must not create a competing telemetry surface.
+| Task | Status | What exists in `main` |
+|---|---|---|
+| **#23 OCTAREL-UI-04** — Glass Orchestration Studio | Merged in #27 (`a12daf9`, tree `78918c02`); issue open for deferred scope | Design tokens and light/dark parity, app shell and navigation IA, Priority & Fallback Matrix over `/api/priority-matrix`, cross-entity ⌘K command palette |
+| **#24 OCTAREL-UI-05** — Manager Chat | Delivered in #27, issue closed | `control_plane/manager_chat.py`: orchestration-backed chat that navigates and proposes deterministic commands; not a model client |
+| **#25 OCTAREL-UI-06** — usage/context/cost telemetry | Delivered in #27, issue closed | `control_plane/usage_telemetry.py` behind `/api/usage-telemetry`: per-run rows with `MEASURED`/`DERIVED`/`UNKNOWN`/`NOT_EXPOSED` classes, plus windowed aggregates |
+| **#26 OCTAREL-UI-07** — Graphify status | Delivered in #27, issue closed | Per-run recorded Graphify status, reason, injection and precedence in agent activity; no page view can build a graph |
+| **#42** — subscription-aware value and actual cost | Merged in #43 (`3bafe97`) | `estimated_api_equivalent_usd` (always `DERIVED`) and `actual_cost_usd` as separate fields, billing class derived from `cost_class` via `telemetry.execution_route_for_cost_class`, prices from the OpenCode catalog through `control_plane/pricing.py` |
+| **#44** — worker-reported per-run cost | Merged in #47 (`ed4ca59`) | A CLI that reports its own run cost makes `actual_cost_usd` **`MEASURED`** rather than derived from tokens × a price snapshot |
+| **#45 OCTAREL-TEST-02** — deterministic fixture task recency | Merged in #46 (`7116c5d`) | The seven-viewport Control Center matrix seeds relative task recency explicitly |
+
+The `OCTAREL-UI-07` label is used by two different things and always has been: issue #26 (Graphify status) and the commit/engineering-doc name for issue #42 (subscription-aware cost). Cite the issue number, not the label.
+
+**#23 remains open only for scope deliberately deferred and documented in `docs/engineering/OCTAREL-UI-04.md`:** the Flow vertical-DAG canvas (minimap / zoom / fit-to-screen), the Runs → Run Detail split, and shared entity inspectors. Several ENG-PC tasks below name a Run Detail or entity inspector as their UI home; whichever task reaches that surface first builds it once, and the rest extend it.
+
+Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather than estimated, and no ENG-PC task may quietly fill them with an approximation: **cache categories** (nothing in the stack records fresh input, cache reads or cache writes, so no cache hit rate can be derived) and **effective context limit** (no runtime reports one, and a context window is never inferred from a model name).
 
 ---
 
@@ -121,7 +138,7 @@ ENG-PC-09 runtime services          (parallel; refactor existing operations life
 
 Recommended implementation waves:
 
-0. **Repository intelligence prerequisite:** ENG-AO-10 (#41), including #26-compatible Graphify UI/status integration.
+0. **Repository intelligence prerequisite:** ENG-AO-10 (#41), extending the delivered #26 Graphify status surface with selected-project health rather than adding a second one.
 1. **Foundation:** ENG-PC-11, ENG-PC-01.
 2. **Continuity:** ENG-PC-02, ENG-PC-03, ENG-PC-04.
 3. **Efficiency/governance:** ENG-PC-05, ENG-PC-06.
@@ -235,7 +252,9 @@ Large logs remain redacted evidence files. SQLite stores safe structured summari
 
 ### UI
 
-Stitch Run Detail and Execution Events become a chronological, filterable timeline. Visually distinguish lifecycle, model/tool, safety/approval and validation events. Evidence pointers can expand/open safely. Preserve `UNKNOWN`/`NOT_REPORTED`.
+Execution Events becomes a chronological, filterable timeline in the shipped Glass Orchestration Studio shell. Visually distinguish lifecycle, model/tool, safety/approval and validation events. Evidence pointers can expand/open safely. Preserve `UNKNOWN`/`NOT_REPORTED`.
+
+The Runs → Run Detail split is still deferred #23 scope. ENG-PC-04 is the first task whose evidence genuinely needs it, so if it is still unbuilt when this task starts, ENG-PC-04 builds it once as shared structure and later tasks extend it — it does not get rebuilt per task, and it does not become a reason to defer the timeline.
 
 ### Acceptance
 
@@ -246,30 +265,42 @@ Ordering, restart persistence, redaction, evidence pointer validation, migration
 ## ENG-PC-05 — Durable usage ledger and hierarchical budgets
 
 **Issue:** [#33](https://github.com/ACGE248/octarel/issues/33)  
-**Extends:** [#25 OCTAREL-UI-06](https://github.com/ACGE248/octarel/issues/25).  
+**Extends:** the delivered telemetry stack — #25 (`usage_telemetry.py`, `/api/usage-telemetry`), #42 (`pricing.py`, two money fields, billing class) and #44 (worker-reported cost).  
 **Recommended after:** ENG-PC-11 and ENG-PC-04.  
 **Paperclip idea:** durable cost events plus hierarchical budgets.
 
+### Already delivered — do not rebuild
+
+The cost/telemetry *read model* exists and is truthful. ENG-PC-05 must extend it in place; re-specifying any of the following is scope this task has already lost:
+
+- per-run rows carrying model, tokens, duration and provenance class, read from durable usage-governance records written by the supervisor;
+- the two-field money contract — `estimated_api_equivalent_usd` (always `DERIVED`, never spend) and `actual_cost_usd` (`MEASURED` from a worker CLI's own reported cost, else `DERIVED` from exact tokens × a catalog price, else `UNKNOWN`) — and the rule that an unclassified route reports `UNKNOWN` rather than `$0.00`;
+- billing class (`SUBSCRIPTION_INCLUDED` / `API_BILLED` / `FREE_TIER` / `UNKNOWN`) derived from the worker's `cost_class` through the single existing classifier, `telemetry.execution_route_for_cost_class`;
+- windowed aggregates that keep subscription-equivalent value, free-tier value and API spend in separate totals, counting a figure only when its own class established it;
+- `NOT_EXPOSED` cache categories and context limit, with their reasons.
+
+A subscription route **does** carry a visible API-equivalent estimate; that was settled by #42. The prohibition is narrower than the original wording here suggested: an estimate may never be presented as, or accumulated into, actual spend.
+
 ### Required implementation
 
-Persist usage events attributable to project, task, runbook, run, session, worker, provider, effective model and time. Store token categories, context limit/used, duration and metered cost only when a source is authoritative. Every field retains provenance/confidence compatible with `MEASURED`, `DERIVED`, `UNKNOWN`, and `NOT_EXPOSED`.
+The remaining gap is attribution depth, durability as a first-class ledger, and enforcement.
 
-Subscription/free execution must not be assigned an invented API-dollar equivalent. Cash cost is meaningful only for genuinely metered execution with a trustworthy price/accounting source.
+Promote usage from a read model over runbook-scoped governance records into a durable, append-only usage ledger attributable to project, task, runbook, run, session, worker, provider, effective model and time — reusing the existing state store and the ENG-PC-04 event envelope rather than adding a second telemetry store. Extend aggregation to filter by project, task, provider and model, not only by time window and billing class. Preserve every existing provenance class and formula string; a ledger row may not be more confident than the record it came from.
 
 Add budget/usage policy scopes: global -> provider -> program/task -> run/session. Supported constraints may include metered cash, tokens, wall-clock, attempts/fallbacks and provider quota reserve when a real source exists. Enforcement happens before launch/fallback and cannot authorize a paid route.
 
 ### UI
 
-Fulfill #25 with:
-- per-run/session model/context/token/cache/duration/cost card;
-- aggregate Usage & Costs view filtered by project/task/provider/model/time;
-- separate subscription/free usage from metered cash;
-- budget progress with source/confidence;
-- warnings/hard blocks in Attention and Run Events.
+Extend the shipped usage surface; do not add a parallel one.
+
+- the per-run card and the subscription/metered separation already exist — reuse them;
+- add project/task/provider/model filtering to the aggregate Usage & Costs view;
+- add budget progress with source/confidence;
+- surface warnings and hard blocks in Attention and Run Events.
 
 ### Acceptance
 
-Durable aggregation, no double counting, restart/migration, budget enforcement, truthful unknowns, authoritative cache-hit calculation only, subscription semantics tests.
+Durable aggregation, no double counting, restart/migration, budget enforcement, truthful unknowns, authoritative cache-hit calculation only, subscription semantics tests. Existing `test_usage_telemetry*`, `test_pricing` and `test_reported_cost` coverage stays green unchanged; a change to one of those expectations is a contract change and needs its own justification.
 
 ---
 
@@ -383,7 +414,9 @@ Expiry/staleness, changed-state revalidation, remote identity/audit, rejection, 
 
 ## Program-level UI contract
 
-All ENG-PC UI work must integrate into the current Stitch **Glass Orchestration Studio** program rather than create a parallel dashboard.
+The **Glass Orchestration Studio** shell is live in `main` (#27). All ENG-PC UI work integrates into it rather than creating a parallel dashboard, and reuses its design tokens, light/dark parity and inspector conventions.
+
+Two homes named in the table below — Run Detail and shared entity inspectors — are deferred #23 scope that no task has built yet. The first ENG-PC task to need one builds it as shared structure; the rest extend it.
 
 Preferred homes:
 

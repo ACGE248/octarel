@@ -1,6 +1,6 @@
 # ENG-PC — Paperclip research notes
 
-**Research date:** 2026-09-26  
+**Research date:** 2026-09-26 (reconciled against `main` at `ed4ca59`, 2026-09-29)  
 **Upstream:** https://github.com/paperclipai/paperclip  
 **Program:** [ROADMAP.md](../ROADMAP.md#eng-pc--paperclip-derived-orchestration-hardening) / GitHub issue #28
 
@@ -50,7 +50,9 @@ https://github.com/paperclipai/paperclip/blob/master/docs/guides/agent-developer
 
 ### Cost events and budgets
 
-Paperclip's cost/budget model demonstrates the value of durable attribution and enforceable limits. Octarel must translate this carefully because much of its execution is subscription-backed: tokens/context may be measurable while per-run cash cost is not meaningful.
+Paperclip's cost/budget model demonstrates the value of durable attribution and enforceable limits. Octarel must translate this carefully because much of its execution is subscription-backed: tokens/context may be measurable while per-run cash cost is not.
+
+Octarel has since settled its own answer to that (issues #42 and #44, merged): a subscription route carries a visible *API-equivalent estimate* that is always `DERIVED` and never accumulated into spend, alongside a separate actual-charge field that is `MEASURED` only when a worker CLI reports its own run cost. ENG-PC-05 inherits that contract; it does not get to redesign it.
 
 Starting reference:
 https://github.com/paperclipai/paperclip/blob/master/docs/guides/board-operator/costs-and-budgets.md
@@ -99,7 +101,7 @@ Octarel currently minimizes credential exposure through local subscription sessi
 - #30 ENG-PC-02 — resumable agent sessions.
 - #31 ENG-PC-03 — durable wake queue.
 - #32 ENG-PC-04 — structured run events.
-- #33 ENG-PC-05 — durable usage/budgets; extends #25.
+- #33 ENG-PC-05 — durable usage ledger and budgets; extends the delivered #25/#42/#44 telemetry stack rather than re-specifying it.
 - #34 ENG-PC-06 — incremental context/ancestry.
 - #35 ENG-PC-07 — restart/orphan recovery.
 - #36 ENG-PC-08 — configuration revisions.
