@@ -378,17 +378,34 @@ def structured_failure(output: str) -> str | None:
     return None
 
 
-def structured_actual_model(output: str, requested_model: str) -> str:
-    """Prefer a structured CLI's reported model identifier when available."""
+def structured_actual_model_report(output: str, requested_model: str) -> tuple[str, bool]:
+    """Prefer a structured CLI's reported model identifier when available.
+
+    Returns ``(model_id, measured)``. ``measured`` is ``True`` only when ``model_id`` was
+    genuinely read from the CLI's own ``modelUsage`` block -- never for one of the three
+    fallback paths (output not JSON, no ``modelUsage`` block, or an ambiguous set of reported
+    names) that fall back to ``requested_model`` instead. Callers that need to tell a real
+    provider report apart from a fallback (e.g. ``adapter_contract.run_result_from_record``'s
+    MEASURED/DERIVED distinction) must use this return value rather than re-deriving it from
+    ``model_id`` alone, since a fallback can coincidentally equal a genuinely reported id.
+    """
 
     payload = _first_json_object(output)
     if payload is None:
-        return requested_model
+        return requested_model, False
     usage = payload.get("modelUsage")
     if not isinstance(usage, dict) or not usage:
-        return requested_model
+        return requested_model, False
     reported = list(usage)
     matches = [name for name in reported if requested_model and requested_model in name]
     if len(matches) == 1:
-        return matches[0]
-    return reported[0] if len(reported) == 1 else requested_model
+        return matches[0], True
+    if len(reported) == 1:
+        return reported[0], True
+    return requested_model, False
+
+
+def structured_actual_model(output: str, requested_model: str) -> str:
+    """Prefer a structured CLI's reported model identifier when available."""
+
+    return structured_actual_model_report(output, requested_model)[0]

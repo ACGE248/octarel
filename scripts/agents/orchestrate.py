@@ -65,7 +65,7 @@ from .runner import (
     assert_write_safety,
     repo_root,
     run_worker_process,
-    structured_actual_model,
+    structured_actual_model_report,
     worktree_snapshot,
     write_lock,
 )
@@ -588,7 +588,9 @@ def run_delegation(
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
     record.actual_provider = worker.provider
-    record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
+    record.actual_model, record.actual_model_measured = structured_actual_model_report(
+        log_text, model or worker.effective_model
+    )
     record.actual_intensity = resolved_intensity
 
     after = worktree_snapshot(root)
@@ -845,7 +847,9 @@ def run_session(
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
     record.actual_provider = worker.provider
-    record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
+    record.actual_model, record.actual_model_measured = structured_actual_model_report(
+        log_text, model or worker.effective_model
+    )
     record.actual_intensity = resolved_intensity
 
     after = worktree_snapshot(root)

@@ -32,6 +32,7 @@ from scripts.agents.adapter_contract import (
     structural_usage_keys,
 )
 from scripts.agents.control_plane.usage_telemetry import (
+    CLASS_DERIVED,
     CLASS_MEASURED,
     CLASS_NOT_EXPOSED,
     CLASS_UNKNOWN,
@@ -102,12 +103,17 @@ def test_codex_build_reports_native_verified_model_discovery():
     assert "codex" in caps.effective_model_discovery_reason
 
 
-def test_grok_build_bots_reports_native_subagents_and_grok_build_does_not():
+def test_grok_build_bots_and_grok_build_both_report_native_subagents_unsupported():
+    """The ENG-AO-02 ``subagents`` block is an orchestrator-run bot fan-out, not a model-native
+    subagent channel, so it must not flip this capability -- even for the one worker that carries
+    the block and even though its own CLI template passes ``--no-subagents``."""
+
     bots = capabilities_for(REGISTRY.get("grok-build-bots"))
     solo = capabilities_for(REGISTRY.get("grok-build"))
-    assert bots.supports_native_subagents is True
+    assert bots.supports_native_subagents is False
+    assert bots.native_subagents_reason
     assert solo.supports_native_subagents is False
-    assert solo.native_subagents_reason and "grok-build" in solo.native_subagents_reason
+    assert solo.native_subagents_reason == bots.native_subagents_reason
 
 
 def test_opencode_free_review_reports_runtime_pool_model_discovery():
@@ -148,7 +154,7 @@ def test_compatibility_with_every_current_registry_worker():
         assert caps.capability == worker.capability
         assert caps.can_write == worker.is_write_capable
         assert caps.supports_auth_probe == bool(worker.auth_check_args)
-        assert caps.supports_native_subagents == bool(worker.subagents)
+        assert caps.supports_native_subagents is False
         assert PERMISSION_STANDARD in caps.permission_profiles
         for profile in worker.permission_profile_templates:
             assert profile in caps.permission_profiles
@@ -243,6 +249,12 @@ def test_run_result_from_record_rejects_mismatched_worker():
         (["worker tool action was denied by the configured read-only permission boundary"], 1, FAILURE_PERMISSION_DENIED),
         ([], 124, FAILURE_TIMEOUT),
         (["some other worker failure"], 1, FAILURE_WORKER_ERROR),
+        # A read-only violation or a permission denial must win over exit 124 (timeout's exit
+        # status): a read-only worker that modified the tree, or a run denied by the read-only
+        # permission boundary, is a contract violation and must never be reported as a timeout
+        # merely because the process also exited 124.
+        (["read-only worker modified the working tree: x. Treat as a contract violation."], 124, FAILURE_READ_ONLY_VIOLATION),
+        (["worker tool action was denied by the configured read-only permission boundary"], 124, FAILURE_PERMISSION_DENIED),
     ],
 )
 def test_failure_category_classification(notes, exit_status, expected):
@@ -277,6 +289,45 @@ def test_failure_category_none_on_pass_and_not_run_when_blocked():
 
     blocked = dataclasses.replace(passed, result=RESULT_BLOCKED, exit_status=None)
     assert run_result_from_record(blocked, capabilities=caps, evidence_paths={}).failure_category == FAILURE_NOT_RUN
+
+
+def test_run_result_actual_model_class_reflects_whether_the_cli_actually_reported_it():
+    """``actual_model_class`` must be MEASURED only when the CLI's own ``modelUsage`` block named
+    the model, never for one of ``structured_actual_model_report``'s fallbacks to the requested
+    model -- even though the fallback value can be identical to a genuinely-measured one."""
+
+    caps = capabilities_for(REGISTRY.get("claude-code"))
+    base = dict(
+        task="ENG-PC-11", role="focused-tests", worker="claude-code", planned_execution_system="Claude Code",
+        planned_provider="Anthropic", planned_model="claude-sonnet-5", planned_intensity="low",
+        requested_command=["claude"], result=RESULT_PASS, exit_status=0,
+    )
+
+    measured = RunRecord(actual_model="claude-sonnet-5-20260101", actual_model_measured=True, **base)
+    result = run_result_from_record(measured, capabilities=caps, evidence_paths={})
+    assert result.actual_model == "claude-sonnet-5-20260101"
+    assert result.actual_model_class == CLASS_MEASURED
+
+    # structured_actual_model_report fell back to the requested model (e.g. output was not JSON,
+    # had no modelUsage block, or reported an ambiguous set of names): the CLI never actually
+    # confirmed this identifier, so it must not be asserted as MEASURED even though the value
+    # is identical to what a genuine report could have said.
+    fallback = dataclasses.replace(measured, actual_model="claude-sonnet-5", actual_model_measured=False)
+    result = run_result_from_record(fallback, capabilities=caps, evidence_paths={})
+    assert result.actual_model == "claude-sonnet-5"
+    assert result.actual_model_class == CLASS_DERIVED
+
+    # Never ran at all: falls back to the planned model, still not MEASURED.
+    never_ran = dataclasses.replace(measured, actual_model="", actual_model_measured=False)
+    result = run_result_from_record(never_ran, capabilities=caps, evidence_paths={})
+    assert result.actual_model == "claude-sonnet-5"
+    assert result.actual_model_class == CLASS_DERIVED
+
+    # Nothing known at all: UNKNOWN.
+    unknown = dataclasses.replace(measured, actual_model="", actual_model_measured=False, planned_model="")
+    result = run_result_from_record(unknown, capabilities=caps, evidence_paths={})
+    assert result.actual_model == ""
+    assert result.actual_model_class == CLASS_UNKNOWN
 
 
 # --------------------------------------------------------------------------- integration with a real dry run

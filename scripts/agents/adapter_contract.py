@@ -83,6 +83,19 @@ CANCELLATION_NOT_IMPLEMENTED_REASON = (
     "(scripts.agents.runner.run_worker_process/run_worker_process_group), which is "
     "a timeout safety net, not a caller-invoked cancellation capability"
 )
+# No worker's model ever gets a native subagent/tool-fanout channel from this stack: even
+# grok-build-bots, the one worker with an ENG-AO-02 ``subagents`` block in workers.json, passes
+# --no-subagents in its own CLI template (scripts.agents.subagents.GrokCliTransport.validate
+# enforces this) because that block means the *orchestrator* runs bounded read-only bots beside
+# the primary (scripts.agents.subagents.run_fanout) -- not that the model has a native subagent
+# channel. Inferring this capability from the presence of that field would be exactly the kind of
+# guess-from-an-unrelated-fact this contract exists to prevent.
+NATIVE_SUBAGENTS_NOT_IMPLEMENTED_REASON = (
+    "no worker's model has a native subagent/tool-fanout channel in this stack; a workers.json "
+    "'subagents' block (ENG-AO-02) is an orchestrator-run bounded read-only bot fan-out beside the "
+    "primary (scripts.agents.subagents.run_fanout), not a model-side subagent capability, and every "
+    "worker carrying that block still runs with --no-subagents in its own CLI invocation"
+)
 
 
 @dataclass(frozen=True)
@@ -222,10 +235,8 @@ def capabilities_for(worker: Worker) -> AdapterCapabilities:
         permission_profiles=permission_profiles,
         supports_cancellation=False,
         cancellation_unavailable_reason=CANCELLATION_NOT_IMPLEMENTED_REASON,
-        supports_native_subagents=bool(worker.subagents),
-        native_subagents_reason=(
-            None if worker.subagents else f"{worker.name} declares no subagents fan-out block in workers.json"
-        ),
+        supports_native_subagents=False,
+        native_subagents_reason=NATIVE_SUBAGENTS_NOT_IMPLEMENTED_REASON,
     )
 
 
@@ -354,9 +365,12 @@ def run_result_from_record(
             f"capabilities for {capabilities.worker!r} do not match run record worker {record.worker!r}"
         )
     actual_model = record.actual_model or record.planned_model
-    actual_model_class = (
-        CLASS_MEASURED if record.actual_model else CLASS_DERIVED if record.planned_model else CLASS_UNKNOWN
-    )
+    if record.actual_model and record.actual_model_measured:
+        actual_model_class = CLASS_MEASURED
+    elif actual_model:
+        actual_model_class = CLASS_DERIVED
+    else:
+        actual_model_class = CLASS_UNKNOWN
     return RunResult(
         task=record.task,
         role=record.role,

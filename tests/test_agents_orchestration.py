@@ -28,6 +28,7 @@ from scripts.agents.registry import Registry, RegistryError, load_registry
 from scripts.agents.runner import (
     run_worker_process,
     structured_actual_model,
+    structured_actual_model_report,
     structured_failure,
 )
 from scripts.agents.validation import (
@@ -911,6 +912,25 @@ def test_structured_actual_model_prefers_reported_identifier():
     output = '{"modelUsage":{"grok-4.6-build":{"modelCalls":1}}}'
     assert structured_actual_model(output, "grok-4.6") == "grok-4.6-build"
     assert structured_actual_model("plain output", "requested-model") == "requested-model"
+
+
+def test_structured_actual_model_report_flags_only_a_genuine_cli_report_as_measured():
+    """The three fallback paths to ``requested_model`` must all report ``measured=False``;
+    only a uniquely-identified ``modelUsage`` entry is a genuine CLI report."""
+
+    # Output is not JSON at all.
+    assert structured_actual_model_report("plain output", "requested-model") == ("requested-model", False)
+    # JSON with no modelUsage block.
+    assert structured_actual_model_report('{"result":"ok"}', "requested-model") == ("requested-model", False)
+    # Exactly one reported name uniquely matching the requested model: measured.
+    output = '{"modelUsage":{"grok-4.6-build":{"modelCalls":1}}}'
+    assert structured_actual_model_report(output, "grok-4.6") == ("grok-4.6-build", True)
+    # Exactly one reported name total, even without a name match: still a genuine report.
+    output = '{"modelUsage":{"some-other-name":{"modelCalls":1}}}'
+    assert structured_actual_model_report(output, "requested-model") == ("some-other-name", True)
+    # Multiple reported names, none uniquely matching the requested model: ambiguous, falls back.
+    output = '{"modelUsage":{"model-a":{"modelCalls":1},"model-b":{"modelCalls":1}}}'
+    assert structured_actual_model_report(output, "requested-model") == ("requested-model", False)
 
 
 def test_read_only_worker_flagged_when_it_modifies_the_tree(git_repo):

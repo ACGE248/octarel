@@ -59,13 +59,13 @@ def classify_failure(record: "RunRecord") -> str:
     if record.result == RESULT_PASS:
         return FAILURE_NONE
     assert record.result == RESULT_FAIL
-    if record.exit_status == _TIMEOUT_EXIT_STATUS:
-        return FAILURE_TIMEOUT
     notes_text = " ".join(record.notes or []).lower()
     if "read-only worker modified the working tree" in notes_text:
         return FAILURE_READ_ONLY_VIOLATION
     if "denied by the configured read-only permission boundary" in notes_text:
         return FAILURE_PERMISSION_DENIED
+    if record.exit_status == _TIMEOUT_EXIT_STATUS:
+        return FAILURE_TIMEOUT
     return FAILURE_WORKER_ERROR
 
 
@@ -85,6 +85,11 @@ class RunRecord:
     actual_execution_system: str = ""
     actual_provider: str = ""
     actual_model: str = ""
+    # True only when actual_model was read from the worker CLI's own structured modelUsage
+    # report (scripts.agents.runner.structured_actual_model_report); False for every fallback
+    # to the requested/planned model, so adapter_contract.run_result_from_record can tell a
+    # genuine provider report apart from a fallback that happens to equal it.
+    actual_model_measured: bool = False
     actual_intensity: str = ""
     result: str = RESULT_BLOCKED
     exit_status: int | None = None
