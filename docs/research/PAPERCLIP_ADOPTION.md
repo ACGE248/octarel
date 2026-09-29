@@ -1,8 +1,8 @@
 # ENG-PC — Paperclip research notes
 
-**Research date:** 2026-09-26 (reconciled against `main` at `ed4ca59`, 2026-09-29)  
-**Upstream:** https://github.com/paperclipai/paperclip  
-**Program:** [ROADMAP.md](../ROADMAP.md#eng-pc--paperclip-derived-orchestration-hardening) / GitHub issue #28
+- **Research date:** 2026-09-26 (reconciled against `main` at `ed4ca59`, 2026-09-29)
+- **Upstream:** https://github.com/paperclipai/paperclip
+- **Program:** [ROADMAP.md](../ROADMAP.md#eng-pc--paperclip-derived-orchestration-hardening) / GitHub issue #28
 
 This is a research/reference document, not a second roadmap. Implementation status belongs in the roadmap/issues and current code. Paperclip is an external reference, never an Octarel runtime authority.
 

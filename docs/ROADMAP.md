@@ -18,7 +18,7 @@ Octarel is a standalone, multi-repository development orchestration control plan
 
 ### ENG-AO-10 — First-class Graphify lifecycle, warm index and post-change refresh
 
-**Issue:** [#41](https://github.com/ACGE248/octarel/issues/41)
+- **Issue:** [#41](https://github.com/ACGE248/octarel/issues/41)
 
 Complete ENG-AO-10 before beginning the ENG-PC implementation waves below.
 
@@ -73,9 +73,9 @@ Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather 
 
 # ENG-PC — Paperclip-derived orchestration hardening
 
-**Parent:** [#28 ENG-PC-00](https://github.com/ACGE248/octarel/issues/28)  
-**Research date:** 2026-09-26  
-**External reference:** [paperclipai/paperclip](https://github.com/paperclipai/paperclip)
+- **Parent:** [#28 ENG-PC-00](https://github.com/ACGE248/octarel/issues/28)
+- **Research date:** 2026-09-26
+- **External reference:** [paperclipai/paperclip](https://github.com/paperclipai/paperclip)
 
 ## Why this program exists
 
@@ -153,9 +153,9 @@ Do not start all tasks in parallel. Schema-owning tasks must establish contracts
 
 ## ENG-PC-01 — Atomic task leases and execution ownership
 
-**Issue:** [#29](https://github.com/ACGE248/octarel/issues/29)  
-**Depends on:** existing task claims, worktree locks, ENG-AO single-writer advancement lease.  
-**Paperclip idea:** atomic issue checkout/execution ownership with conflict refusal and safe reclaim.
+- **Issue:** [#29](https://github.com/ACGE248/octarel/issues/29)
+- **Depends on:** existing task claims, worktree locks, ENG-AO single-writer advancement lease.
+- **Paperclip idea:** atomic issue checkout/execution ownership with conflict refusal and safe reclaim.
 
 ### Required implementation
 
@@ -175,8 +175,8 @@ Concurrent acquisition, separate processes, crash/restart, stale PID reuse, leas
 
 ## ENG-PC-11 — Structured adapter capability and result contract
 
-**Issue:** [#39](https://github.com/ACGE248/octarel/issues/39)  
-**Paperclip idea:** adapters explicitly own runtime/session/result translation instead of callers guessing capabilities.
+- **Issue:** [#39](https://github.com/ACGE248/octarel/issues/39)
+- **Paperclip idea:** adapters explicitly own runtime/session/result translation instead of callers guessing capabilities.
 
 ### Required implementation
 
@@ -198,9 +198,9 @@ Representative adapter contract tests for Claude/Codex/Grok/OpenCode, compatibil
 
 ## ENG-PC-02 — Task-scoped resumable agent sessions
 
-**Issue:** [#30](https://github.com/ACGE248/octarel/issues/30)  
-**Depends on:** ENG-PC-01 and preferably ENG-PC-11.  
-**Paperclip idea:** persist adapter runtime/session state by task so subsequent heartbeats can continue safely.
+- **Issue:** [#30](https://github.com/ACGE248/octarel/issues/30)
+- **Depends on:** ENG-PC-01 and preferably ENG-PC-11.
+- **Paperclip idea:** persist adapter runtime/session state by task so subsequent heartbeats can continue safely.
 
 ### Required implementation
 
@@ -220,9 +220,9 @@ Restart persistence, supported/unsupported adapters, tree/policy invalidation, p
 
 ## ENG-PC-03 — Durable wake queue and trigger coalescing
 
-**Issue:** [#31](https://github.com/ACGE248/octarel/issues/31)  
-**Depends on:** ENG-PC-01.  
-**Paperclip idea:** persist wake requests and coalesce duplicate pending triggers instead of treating every signal as a new execution.
+- **Issue:** [#31](https://github.com/ACGE248/octarel/issues/31)
+- **Depends on:** ENG-PC-01.
+- **Paperclip idea:** persist wake requests and coalesce duplicate pending triggers instead of treating every signal as a new execution.
 
 ### Required implementation
 
@@ -242,9 +242,9 @@ Concurrent enqueue/coalescing, restart durability, no duplicate advancement, poi
 
 ## ENG-PC-04 — Structured run-event timeline and live execution evidence
 
-**Issue:** [#32](https://github.com/ACGE248/octarel/issues/32)  
-**Depends on:** ENG-PC-01.  
-**Paperclip idea:** first-class run events/log timeline.
+- **Issue:** [#32](https://github.com/ACGE248/octarel/issues/32)
+- **Depends on:** ENG-PC-01.
+- **Paperclip idea:** first-class run events/log timeline.
 
 ### Required implementation
 
@@ -266,10 +266,10 @@ Ordering, restart persistence, redaction, evidence pointer validation, migration
 
 ## ENG-PC-05 — Durable usage ledger and hierarchical budgets
 
-**Issue:** [#33](https://github.com/ACGE248/octarel/issues/33)  
-**Extends:** the delivered telemetry stack — #25 (`usage_telemetry.py`, `/api/usage-telemetry`), #42 (`pricing.py`, two money fields, billing class) and #44 (worker-reported cost).  
-**Recommended after:** ENG-PC-11 and ENG-PC-04.  
-**Paperclip idea:** durable cost events plus hierarchical budgets.
+- **Issue:** [#33](https://github.com/ACGE248/octarel/issues/33)
+- **Extends:** the delivered telemetry stack — #25 (`usage_telemetry.py`, `/api/usage-telemetry`), #42 (`pricing.py`, two money fields, billing class) and #44 (worker-reported cost).
+- **Recommended after:** ENG-PC-11 and ENG-PC-04.
+- **Paperclip idea:** durable cost events plus hierarchical budgets.
 
 ### Already delivered — do not rebuild
 
@@ -310,9 +310,9 @@ Durable aggregation, no double counting, restart/migration, budget enforcement, 
 
 ## ENG-PC-06 — Compact incremental task context and ancestry
 
-**Issue:** [#34](https://github.com/ACGE248/octarel/issues/34)  
-**Recommended after:** ENG-PC-04.  
-**Paperclip idea:** compact heartbeat context plus goal/task ancestry.
+- **Issue:** [#34](https://github.com/ACGE248/octarel/issues/34)
+- **Recommended after:** ENG-PC-04.
+- **Paperclip idea:** compact heartbeat context plus goal/task ancestry.
 
 ### Required implementation
 
@@ -332,9 +332,9 @@ Stale cursor invalidation, mandatory-policy preservation, deterministic bundle i
 
 ## ENG-PC-07 — Restart/orphan recovery state machine
 
-**Issue:** [#35](https://github.com/ACGE248/octarel/issues/35)  
-**Depends on:** ENG-PC-01, ENG-PC-03, ENG-PC-04.  
-**Paperclip idea:** explicit runtime/wait/recovery state rather than ambiguous failed/running records.
+- **Issue:** [#35](https://github.com/ACGE248/octarel/issues/35)
+- **Depends on:** ENG-PC-01, ENG-PC-03, ENG-PC-04.
+- **Paperclip idea:** explicit runtime/wait/recovery state rather than ambiguous failed/running records.
 
 ### Required implementation
 
@@ -354,8 +354,8 @@ Daemon/dashboard crash, worker orphan, reboot, provider outage, stale PID reuse 
 
 ## ENG-PC-08 — Revisioned orchestration configuration and rollback
 
-**Issue:** [#36](https://github.com/ACGE248/octarel/issues/36)  
-**Paperclip idea:** configuration revision history and rollback.
+- **Issue:** [#36](https://github.com/ACGE248/octarel/issues/36)
+- **Paperclip idea:** configuration revision history and rollback.
 
 ### Required implementation
 
@@ -375,8 +375,8 @@ Migration, redaction, invalid/stale rollback rejection, concurrent update and au
 
 ## ENG-PC-09 — Managed runtime service ownership and previews
 
-**Issue:** [#37](https://github.com/ACGE248/octarel/issues/37)  
-**Paperclip idea:** runtime/dev-server services attached to a workspace.
+- **Issue:** [#37](https://github.com/ACGE248/octarel/issues/37)
+- **Paperclip idea:** runtime/dev-server services attached to a workspace.
 
 ### Required implementation
 
@@ -396,9 +396,9 @@ PID reuse, port conflict, crash/restart, multi-project isolation and external-pr
 
 ## ENG-PC-10 — Typed approvals and decision handoffs
 
-**Issue:** [#38](https://github.com/ACGE248/octarel/issues/38)  
-**Recommended after:** ENG-PC-04.  
-**Paperclip idea:** typed approval objects and explicit resolution.
+- **Issue:** [#38](https://github.com/ACGE248/octarel/issues/38)
+- **Recommended after:** ENG-PC-04.
+- **Paperclip idea:** typed approval objects and explicit resolution.
 
 ### Required implementation
 
