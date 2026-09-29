@@ -574,8 +574,19 @@ class State:
     # ----------------------------------------------------------------- tasks
 
     @_serialized
-    def upsert_task(self, task: Task) -> None:
-        task.updated_at = utc_now_iso()
+    def upsert_task(self, task: Task, *, updated_at: str | None = None) -> None:
+        """Write ``task``, stamping ``updated_at`` with the current second.
+
+        ``updated_at`` overrides that stamp and exists for deterministic
+        seeding (OCTAREL-TEST-01).  An ordinary write means "this row was
+        touched now", but a fixture that seeds several task references in one
+        pass needs their *relative* recency to be intentional rather than a
+        function of how long the seed happened to take: ``utc_now_iso()`` has
+        one-second resolution, so a seed that crosses a wall-clock second
+        silently reorders which reference looks most recent.
+        """
+
+        task.updated_at = updated_at or utc_now_iso()
         row = task.to_row()
         columns = ", ".join(row)
         placeholders = ", ".join(f":{key}" for key in row)
