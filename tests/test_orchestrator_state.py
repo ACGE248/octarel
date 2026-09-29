@@ -148,3 +148,35 @@ def test_state_serializes_concurrent_thread_access():
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda index: state.record_event(category="thread", message=str(index)), range(100)))
     assert len(state.list_events(limit=200)) == 100
+
+
+def test_upsert_task_stamps_now_but_honours_an_explicit_updated_at():
+    """OCTAREL-TEST-02 (issue #45): deterministic seeding needs to set relative task recency.
+
+    An ordinary write means "this row was touched now". ``utc_now_iso()`` resolves
+    to whole seconds, so a caller seeding several task references in one pass
+    cannot express their intended order through wall-clock time alone.
+    """
+
+    state = State(":memory:")
+
+    state.upsert_task(Task(id="t-default", task_ref="REF-1", role="focused-tests", worker="grok-build"))
+    stamped_now = state.get_task("t-default").updated_at
+    assert stamped_now  # whatever "now" is, the default path still stamps it
+
+    explicit = "2026-09-18T10:00:07+00:00"
+    state.upsert_task(
+        Task(id="t-explicit", task_ref="REF-2", role="focused-tests", worker="grok-build"),
+        updated_at=explicit,
+    )
+    assert state.get_task("t-explicit").updated_at == explicit
+
+    # An explicit stamp survives a later re-write, and re-writing without one
+    # returns the row to "now".
+    state.upsert_task(
+        Task(id="t-explicit", task_ref="REF-2", role="focused-tests", worker="grok-build", state="BLOCKED"),
+        updated_at=explicit,
+    )
+    assert state.get_task("t-explicit").updated_at == explicit
+    state.upsert_task(Task(id="t-explicit", task_ref="REF-2", role="focused-tests", worker="grok-build"))
+    assert state.get_task("t-explicit").updated_at != explicit

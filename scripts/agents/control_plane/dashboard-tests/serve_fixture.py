@@ -23,6 +23,7 @@ since "dashboard-tests" is not a valid Python package identifier.)
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import signal
@@ -278,6 +279,20 @@ def _git_add_review_fixture_worktree(root: Path) -> tuple[Path, str]:
 
 
 def build_fixture_context(root: Path, *, state_path: Path | None = None) -> CommandContext:
+    # OCTAREL-TEST-02 (issue #45): stamp the whole seed from one instant so the
+    # fixture's *relative* task recency is intentional instead of a function of
+    # how long seeding took. ``dashboard_api.workflow()`` renders the single most
+    # recently updated active task reference, and ``utc_now_iso()`` resolves to
+    # whole seconds, so a seed that happened to cross a clock second between
+    # ENG-AGENT-02's fx-* tasks and ENG-AGENT-07's fallback session silently
+    # handed the Live Workflow card to ENG-AGENT-07 -- and every test locating
+    # ``.workflow-stage-card[data-stage-id="fx-*"]`` then found no such card.
+    # Under the concurrent viewport matrix that seed is slower, so the flip was
+    # load-dependent. ENG-AGENT-02 is the reference the browser suite inspects,
+    # so it keeps "now" and every other reference is stamped one second older.
+    seeded_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    current_ref_at = seeded_at.isoformat(timespec="seconds")
+    other_ref_at = (seeded_at - dt.timedelta(seconds=1)).isoformat(timespec="seconds")
     _git_init_fixture_root(root)
     second_worktree = _git_add_second_fixture_worktree(root)
     video_editor_worktree = _git_add_video_editor_fixture_worktree(root)
@@ -311,7 +326,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             # overcounted the managed-dispatch write cap (ENG-AGENT-10)
             # against fixture data seeded before that cap existed.
             kind=KIND_READ,
-        )
+        ),
+        updated_at=current_ref_at,
     )
     state.upsert_task(
         Task(
@@ -321,10 +337,12 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             worker="opencode2-gemini-flash-lite",
             state="RUNNING",
             kind=KIND_READ,
-        )
+        ),
+        updated_at=current_ref_at,
     )
     state.upsert_task(
-        Task(id="fx-queued-1", task_ref="ENG-CI-04", role="focused-tests", worker="grok-build", state="QUEUED")
+        Task(id="fx-queued-1", task_ref="ENG-CI-04", role="focused-tests", worker="grok-build", state="QUEUED"),
+        updated_at=other_ref_at,
     )
     state.upsert_task(
         Task(
@@ -334,7 +352,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             worker="grok-build-review",
             state="BLOCKED",
             dependencies=("fx-running-1",),
-        )
+        ),
+        updated_at=current_ref_at,
     )
     state.upsert_task(
         Task(
@@ -343,7 +362,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             role="focused-tests",
             worker="opencode2-gemini-flash-lite",
             state="SUCCEEDED",
-        )
+        ),
+        updated_at=current_ref_at,
     )
 
     grok = state.get_provider_state("grok-build-review")
@@ -383,7 +403,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             state="RUNNING",
             launch_mode="session",
             worktree=str(root),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     overnight_preset = PRESETS["overnight-development"]
     running_rb = Runbook(
@@ -427,7 +448,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             result="PASS",
             launch_mode="session",
             worktree=str(root),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     test_fix_preset = PRESETS["test-fix"]
     done_rb = Runbook(
@@ -466,7 +488,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             failure_reset_source="provider diagnostic",
             launch_mode="session",
             worktree=str(video_editor_worktree),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     failed_rb = Runbook(
         id="fx-rb-failed",
@@ -507,7 +530,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             launch_mode="session",
             runbook_id="fx-rb-fallback",
             worktree=str(root),
-        )
+        ),
+        updated_at=other_ref_at,
     )
     fallback_rb = Runbook(
         id="fx-rb-fallback",
