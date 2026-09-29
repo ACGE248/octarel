@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -113,6 +114,15 @@ def main(argv: list[str] | None = None) -> int:
     p_pub.add_argument("--tree-only", action="store_true")
     p_pub.add_argument("--publication-gate", action="store_true")
 
+    p_graph = sub.add_parser("graphify", help="local code-only Graphify status/bootstrap/refresh")
+    graph_sub = p_graph.add_subparsers(dest="graphify_cmd", required=True)
+    p_graph_status = graph_sub.add_parser("status", help="probe installation and show selected-project cached health")
+    p_graph_status.add_argument("--project", default=None, help="registered project id (default: selected project)")
+    graph_sub.add_parser("install", help="print the explicit install commands; never installs")
+    p_graph_refresh = graph_sub.add_parser("refresh", help="explicitly refresh one registered project's graph")
+    p_graph_refresh.add_argument("--project", default=None, help="registered project id (default: selected project)")
+    p_graph_refresh.add_argument("--worktree", default=None, help="worktree path in the selected project's repository")
+
     args = parser.parse_args(argv)
     if args.cmd == "version":
         from octarel import __version__
@@ -138,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.publication_gate:
             argv.append("--publication-gate")
         return public_safety_main(argv)
+    if args.cmd == "graphify":
+        return _cmd_graphify(args)
     if args.cmd == "cutover":
         return _cmd_cutover(args)
     if args.cmd == "migrate":
@@ -433,6 +445,74 @@ def _cmd_providers(*, probe: bool) -> int:
             f"availability={reason}"
         )
     return 0
+
+
+def _cmd_graphify(args: argparse.Namespace) -> int:
+    import json
+
+    from scripts.agents.graph_lifecycle import (
+        INSTALL_COMMANDS,
+        cached_status,
+        capability_status,
+        refresh_graph,
+        state_event_recorder,
+    )
+
+    if args.graphify_cmd == "install":
+        print("Octarel never installs Graphify automatically. Run one explicit operator command:")
+        for command in INSTALL_COMMANDS:
+            print(command)
+        return 0
+
+    from scripts.agents.control_plane.project_registry import (
+        ProjectRegistryError,
+        get_project,
+        selected_project,
+    )
+
+    state = _open_state()
+    try:
+        project = get_project(state, args.project) if args.project else selected_project(state)
+    except ProjectRegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if project is None:
+        print("error: no project is selected", file=sys.stderr)
+        return 2
+    root = Path(getattr(args, "worktree", None) or project.local_repo_root).resolve()
+    if getattr(args, "worktree", None):
+        try:
+            selected_common = subprocess.run(
+                ["git", "-C", str(project.local_repo_root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                capture_output=True, text=True, check=True, timeout=10,
+            ).stdout.strip()
+            requested_common = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                capture_output=True, text=True, check=True, timeout=10,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            print("error: --worktree must name a readable Git checkout", file=sys.stderr)
+            return 2
+        if Path(selected_common).resolve() != Path(requested_common).resolve():
+            print("error: --worktree does not belong to the selected project's repository", file=sys.stderr)
+            return 2
+    if args.graphify_cmd == "status":
+        body = {
+            "capability": capability_status(probe=True),
+            "project": cached_status(root, project_id=project.project_id),
+        }
+        print(json.dumps(body, indent=2, sort_keys=True))
+        return 0 if body["capability"]["status"] == "READY" else 1
+    if args.graphify_cmd == "refresh":
+        body = refresh_graph(
+            root,
+            project_id=project.project_id,
+            trigger="manual",
+            event_recorder=state_event_recorder(state, project.project_id),
+        )
+        print(json.dumps(body, indent=2, sort_keys=True))
+        return 0 if body["status"] == "READY" else 1
+    return 2
 
 
 if __name__ == "__main__":

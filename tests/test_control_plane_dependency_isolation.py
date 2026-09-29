@@ -42,11 +42,11 @@ AGENTS_ROOT = REPO_ROOT / "scripts" / "agents"
 # third-party dependency that must be declared in
 # scripts/agents/requirements.txt -- CP's own dependency manifest.
 _STDLIB_ALLOWLIST = {
-    "__future__", "abc", "argparse", "asyncio", "atexit", "collections", "contextlib",
+    "__future__", "abc", "argparse", "asyncio", "atexit", "collections", "concurrent", "contextlib",
     "dataclasses", "datetime", "enum", "fcntl", "functools", "hashlib",
     "ipaddress", "json", "os", "pathlib", "plistlib", "pty", "re", "shlex", "shutil",
     "signal", "socket", "sqlite3", "struct", "subprocess", "sys", "tempfile",
-    "termios", "threading", "time", "typing", "urllib", "uuid",
+    "termios", "threading", "time", "typing", "urllib", "uuid", "weakref",
 }
 # PyJWT's import name ("jwt") differs from its distribution name.
 _DECLARED_THIRD_PARTY = {"fastapi", "uvicorn", "jwt", "psutil", "httpx"}

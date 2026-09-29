@@ -523,10 +523,16 @@ def advance_after_success(
         if record["state"] != ADV_NEXT_SELECTED or record["started_runbook_id"]:
             _persist(state, record, previous)
             return state.get_advancement(runbook.id) or record
+        from .project_registry import UnknownProjectError, get_project
 
-        from .project_registry import get_project
-
-        project = get_project(state, runbook.project_id)
+        try:
+            project = get_project(state, runbook.project_id)
+        except UnknownProjectError as exc:
+            # The registry may change after _evaluate returns but before this
+            # second lookup. Preserve the same clean stale-state outcome.
+            _stop(record, ADV_BLOCKED, f"stale/inconsistent state: {exc}", STOP_STALE_REPOSITORY_STATE)
+            _persist(state, record, previous)
+            return state.get_advancement(runbook.id) or record
         if auto_start is None:
             auto_start = (project.capabilities.get(AUTO_ADVANCE_CAPABILITY) or "").strip().lower() in {"true", "1", "yes"}
         start = starter or (
@@ -537,6 +543,26 @@ def advance_after_success(
         if not auto_start or start is None:
             _persist(state, record, previous)  # selected and prepared; the operator starts it
             return state.get_advancement(runbook.id) or record
+
+        # Repository truth has been re-read by _evaluate and a successor is
+        # actually about to start. Queue the canonical warm-up, but never hold
+        # the advancement lock/lease for a graph build: the successor's normal
+        # context seam refreshes its exact tree on demand if this is unfinished.
+        try:
+            from ..graph_lifecycle import request_refresh, state_event_recorder
+
+            request_refresh(
+                project.local_repo_root,
+                project_id=project.project_id,
+                trigger="post-merge",
+                event_recorder=state_event_recorder(state, project.project_id),
+                wait=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - advisory refresh must not block advancement
+            state.record_event(
+                category="graphify", level="error", project_id=project.project_id,
+                message=f"Graphify post-merge refresh could not be queued; successor context will refresh on demand: {type(exc).__name__}",
+            )
 
         record["state"] = ADV_ADVANCING
         _persist(state, record, previous)

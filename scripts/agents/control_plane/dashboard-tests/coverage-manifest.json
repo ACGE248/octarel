@@ -213,7 +213,9 @@
     "push"
   ],
   "view-system": [
+    "Check installation",
     "Gate evidence and history",
+    "Refresh graph",
     "Restart",
     "Start",
     "Stop"

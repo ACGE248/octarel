@@ -34,6 +34,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import model_catalog, native_models
+from ..graph_lifecycle import cached_status as graphify_cached_status
+from ..graph_lifecycle import capability_status as graphify_capability_status
+from ..graph_lifecycle import request_refresh as graphify_request_refresh
+from ..graph_lifecycle import state_event_recorder as graphify_state_event_recorder
 from ..redaction import redact_text
 from . import manager_chat as _manager_chat
 from . import pricing as _pricing
@@ -704,6 +708,23 @@ def _make_lifespan(ctx: CommandContext):
 
 def _json_error(status_code: int, detail: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
+_GRAPHIFY_PRIVATE_PATH_KEYS = frozenset({"worktree", "path", "installed_path"})
+
+
+def _public_graphify_payload(value: Any) -> Any:
+    """Remove host-layout fields from Graphify evidence crossing the API boundary."""
+
+    if isinstance(value, dict):
+        return {
+            key: _public_graphify_payload(item)
+            for key, item in value.items()
+            if key not in _GRAPHIFY_PRIVATE_PATH_KEYS
+        }
+    if isinstance(value, list):
+        return [_public_graphify_payload(item) for item in value]
+    return value
 
 
 def _remote_identity_of(request: Request) -> Any | None:
@@ -1610,6 +1631,67 @@ def create_app(
     @app.get("/api/repository-health")
     def repository_health_endpoint() -> dict[str, Any]:
         return repository_health(ctx)
+
+    @app.get("/api/graphify")
+    def graphify_health_endpoint() -> dict[str, Any]:
+        """Cached selected-project health only; this read never runs Graphify."""
+
+        project = ctx.selected_project
+        project_id = project.project_id if project is not None else ctx.selected_project_id
+        body = graphify_cached_status(ctx.project_root, project_id=project_id, verify_tree=False)
+        body["selected_project"] = project_id
+        body["active_run_graph_context"] = None
+        # Reuse #26's manifest read shape when an active task has a recorded
+        # attempt; never generate graph data to fill this field.
+        for task in current_tasks():
+            if not task.worker:
+                continue
+            attempts = list_attempts(ctx.project_root, task.task_ref, task.worker)
+            if not attempts:
+                continue
+            attempt = read_attempt(ctx.project_root, task.task_ref, task.worker, attempts[0]["run_id"])
+            details = attempt.get("details") or {}
+            body["active_run_graph_context"] = details.get("graph_context")
+            break
+        # Graphify health is safe to expose remotely, but host filesystem
+        # layout is not. Sanitize cached and active-run evidence recursively.
+        return _public_graphify_payload(body)
+
+    @app.post("/api/graphify/check")
+    def graphify_check_endpoint(request: Request) -> dict[str, Any]:
+        """Explicit, read-only installation probe; never builds a graph."""
+
+        project_id = ctx.selected_project_id
+        try:
+            body = graphify_capability_status(probe=True)
+        except Exception as exc:
+            _record_remote_audit(
+                ctx, request, verb="graphify_check", target=project_id, result=f"FAIL: {type(exc).__name__}",
+            )
+            raise
+        _record_remote_audit(ctx, request, verb="graphify_check", target=project_id, result="OK")
+        return _public_graphify_payload(body)
+
+    @app.post("/api/graphify/refresh")
+    def graphify_refresh_endpoint(request: Request) -> dict[str, Any]:
+        """Queue one bounded manual refresh for the selected checkout."""
+
+        project = ctx.selected_project
+        project_id = project.project_id if project is not None else ctx.selected_project_id
+        try:
+            graphify_request_refresh(
+                ctx.project_root,
+                project_id=project_id,
+                trigger="manual",
+                event_recorder=graphify_state_event_recorder(ctx.state, project_id),
+            )
+        except Exception as exc:
+            _record_remote_audit(
+                ctx, request, verb="graphify_refresh", target=project_id, result=f"FAIL: {type(exc).__name__}",
+            )
+            raise
+        _record_remote_audit(ctx, request, verb="graphify_refresh", target=project_id, result="OK: queued")
+        return {"status": "REFRESHING", "reason": "bounded manual refresh queued", "selected_project": project_id}
 
     @app.get("/api/tests")
     def tests_summary() -> dict[str, Any]:

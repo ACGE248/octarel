@@ -65,10 +65,26 @@ cached under Octarel state keyed by project + worktree + content tree, never ins
 and never used by the exact-tree gate. Absent or stale Graphify degrades to normal repository inspection.
 See `scripts/agents/README.md` (Graphify repository intelligence) for the contract.
 
+ENG-AO-10 adds a lifecycle around that unchanged worker seam. Project selection queues a bounded canonical
+warm-up; the acceptance pipeline refreshes the candidate after `gate_candidate` has established the writer
+boundary and waits at most two seconds before review dispatch (then records possibly one-tree-behind context
+while the build continues); advancement queues a non-blocking canonical refresh only when it will actually
+auto-start the next task. `graph_lifecycle.RefreshCoordinator` runs at most one refresh at a time, coalesces an identical
+project/worktree/tree request, and replaces an older queued tree for the same worktree with the newest one.
+Refresh failure is an advisory `FAILED_SAFE` event, never a merge or acceptance failure.
+
+The initial snapshot uses `graphify extract <snapshot> --code-only`. A later tree retains only Graphify's local
+incremental files/output from the previous isolated snapshot, rematerializes the complete filtered source set,
+and uses `graphify update <snapshot>`. No Graphify hook or provider installer runs and no managed checkout is
+modified. The Control Center's System / Operational Overlay reads cached `status.json`; only the explicit
+Refresh action or an orchestration lifecycle event may generate a graph.
+
 The Control Center's Agent Activity viewer surfaces the status Graphify recorded for an attempt (used,
 refreshed, stale, skipped, unavailable, failed-safe, or not-recorded) with its reason, and labels it
 advisory. Only that status record is exposed -- never the derived context text, its node list, or any
-path -- and reading it never runs Graphify.
+path -- and reading it never runs Graphify. The System overlay separately shows selected-project capability and
+cache health (`READY`, `MISSING`, `OUTDATED`, `STALE`, `REFRESHING`, or `FAILED_SAFE`) and links that global view
+back to the active run's existing #26 evidence.
 
 ## Manager Chat
 

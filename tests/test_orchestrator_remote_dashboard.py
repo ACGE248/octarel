@@ -292,6 +292,34 @@ def test_successful_remote_state_change_is_audited_with_identity_verb_target_res
     assert "OK" in message
 
 
+def test_remote_graphify_check_and_refresh_are_identity_audited(ctx, keypair, monkeypatch):
+    from scripts.agents.control_plane import dashboard_api
+
+    monkeypatch.setattr(
+        dashboard_api,
+        "graphify_capability_status",
+        lambda *, probe: {"status": "READY", "path": "/private/bin/graphify", "reason": "ready"},
+    )
+    queued = []
+    monkeypatch.setattr(
+        dashboard_api,
+        "graphify_request_refresh",
+        lambda *args, **kwargs: queued.append((args, kwargs)),
+    )
+    private_key, public_key = keypair
+    client = TestClient(create_app(ctx, remote=_remote_state(public_key)))
+    headers = {ACCESS_JWT_HEADER: _token(private_key), "Origin": f"https://{HOSTNAME}"}
+
+    check = client.post("/api/graphify/check", headers=headers, json={})
+    refresh = client.post("/api/graphify/refresh", headers=headers, json={})
+
+    assert check.status_code == 200 and "path" not in check.json()
+    assert refresh.status_code == 200 and queued
+    messages = [e.message for e in ctx.state.list_events(limit=50) if e.category == "remote_audit"]
+    assert any(MAINTAINER_EMAIL in message and "graphify_check" in message and "OK" in message for message in messages)
+    assert any(MAINTAINER_EMAIL in message and "graphify_refresh" in message and "OK" in message for message in messages)
+
+
 def test_local_state_changes_are_not_marked_as_remote_audit_events(ctx, keypair):
     """A purely local POST (no Access token at all) must not be misrecorded as
 

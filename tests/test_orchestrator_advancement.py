@@ -171,6 +171,57 @@ def test_auto_advance_goes_through_advancing_then_starts_via_starter(state, alph
     assert starter.calls == [("alpha", "A-02")]
 
 
+def test_post_merge_graph_refresh_is_queued_before_next_task_starts(state, alpha, monkeypatch):
+    from scripts.agents import graph_lifecycle
+
+    register(state, "alpha", alpha, auto_advance="true")
+    order = []
+    starter = Starter(state)
+
+    def refresh(root, *, project_id, trigger, event_recorder, wait):
+        order.append(("refresh", root, project_id, trigger, wait))
+        return {"status": "READY"}
+
+    def start(key, project):
+        order.append(("start", project.project_id))
+        return starter(key, project)
+
+    monkeypatch.setattr(graph_lifecycle, "request_refresh", refresh)
+    result = advance(state, done_runbook(state, "alpha", "A-01"), starter=start)
+    assert result["started_runbook_id"]
+    assert order[0] == ("refresh", alpha.resolve(), "alpha", "post-merge", False)
+    assert order[1] == ("start", "alpha")
+
+
+def test_post_merge_graph_refresh_is_not_queued_when_successor_is_only_prepared(state, alpha, monkeypatch):
+    from scripts.agents import graph_lifecycle
+
+    register(state, "alpha", alpha)
+    calls = []
+    monkeypatch.setattr(graph_lifecycle, "request_refresh", lambda *a, **k: calls.append((a, k)))
+
+    result = advance(state, done_runbook(state, "alpha", "A-01"))
+
+    assert result["state"] == adv.ADV_NEXT_SELECTED
+    assert result["started_runbook_id"] is None
+    assert calls == []
+
+
+def test_failed_post_merge_graph_refresh_never_claims_current_or_blocks_next_task(state, alpha, monkeypatch):
+    from scripts.agents import graph_lifecycle
+
+    register(state, "alpha", alpha, auto_advance="true")
+    starter = Starter(state)
+    monkeypatch.setattr(
+        graph_lifecycle,
+        "request_refresh",
+        lambda *a, **k: {"status": "FAILED_SAFE", "reason": "stub failed", "tree_id": "not-current"},
+    )
+    result = advance(state, done_runbook(state, "alpha", "A-01"), starter=starter)
+    assert result["started_runbook_id"] == "rb-next-alpha-1"
+    assert starter.calls == [("alpha", "A-02")]
+
+
 # 2 ------------------------------------------------------- no replay of a task
 
 
@@ -206,6 +257,18 @@ def test_no_eligible_task(state, alpha):
     record = advance(state, done_runbook(state, "alpha", "A-02"))
     assert record["state"] == adv.ADV_NO_ELIGIBLE_TASK
     assert record["next_task"] is None and record["reason"]
+
+
+def test_unregistered_project_returns_blocked_outcome_instead_of_raising(state, alpha):
+    register(state, "alpha", alpha)
+    finished = done_runbook(state, "alpha", "A-01")
+    state.delete_project("alpha")
+
+    record = advance(state, finished)
+
+    assert record["state"] == adv.ADV_BLOCKED
+    assert record["stop_kind"] == adv.STOP_STALE_REPOSITORY_STATE
+    assert "no project registered" in record["reason"]
 
 
 # 4 -------------------------------------------------------- dependency blocked
