@@ -339,6 +339,19 @@ def _first_json_object(output: str) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def first_structured_result(output: str) -> dict[str, object] | None:
+    """Decode a worker's leading structured-CLI-result JSON object, if any.
+
+    Public wrapper around this module's own JSON extraction so a caller such
+    as ``scripts.agents.adapter_contract`` reads a worker's structured result
+    the exact same way ``structured_failure``/``structured_actual_model``
+    already do below, instead of re-implementing the same parsing a second
+    time.
+    """
+
+    return _first_json_object(output)
+
+
 def structured_failure(output: str) -> str | None:
     """Return a failure reason exposed by a structured CLI result, if any."""
 

@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import model_catalog, native_models
+from ..adapter_contract import capabilities_for
 from ..graph_lifecycle import cached_status as graphify_cached_status
 from ..graph_lifecycle import capability_status as graphify_capability_status
 from ..graph_lifecycle import request_refresh as graphify_request_refresh
@@ -1597,6 +1598,11 @@ def create_app(
                 "model_pool": w.model_pool or None,
                 "default_intensity": w.default_intensity,
                 "capability": w.capability,
+                # ENG-PC-11 (issue #39): explicit adapter capability facts, so this
+                # endpoint stops being a second place that guesses what a worker
+                # supports -- a capability this stack does not implement anywhere
+                # is reported unsupported with a reason, never omitted.
+                "adapter_capabilities": capabilities_for(w).as_dict(),
                 "cost_class": w.cost_class,
                 "allowed_policy_roles": list(w.allowed_policy_roles),
                 "provider_policy": w.provider_policy,

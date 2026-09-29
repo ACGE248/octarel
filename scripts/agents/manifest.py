@@ -21,7 +21,52 @@ RESULT_UNSUPPORTED = "UNSUPPORTED"
 RESULT_BLOCKED = "BLOCKED"
 RESULT_DRY_RUN = "DRY_RUN"
 
-MANIFEST_VERSION = 2
+# A typed, finer-grained failure taxonomy than RESULT_* alone gives you, read
+# only from fields a RunRecord already carries (its own recorded
+# result/exit_status/notes) -- never from a fresh parse of raw output, so it
+# can never disagree with what the manifest already asserts happened. Lives
+# next to RESULT_* (rather than in scripts.agents.adapter_contract, which
+# consumes it) because RunRecord.to_manifest is the single place that must
+# always populate it, and manifest.py cannot import the adapter layer without
+# creating an import cycle.
+FAILURE_NONE = "NONE"
+FAILURE_NOT_RUN = "NOT_RUN"
+FAILURE_TIMEOUT = "TIMEOUT"
+FAILURE_READ_ONLY_VIOLATION = "READ_ONLY_VIOLATION"
+FAILURE_PERMISSION_DENIED = "PERMISSION_DENIED"
+FAILURE_WORKER_ERROR = "WORKER_ERROR"
+
+_TIMEOUT_EXIT_STATUS = 124
+
+# Bumped for ENG-PC-11 (issue #39): every manifest now carries an explicit
+# top-level "failure_category" field. Older manifests on disk have no such
+# key; every consumer reads it with dict.get(...), so they keep parsing
+# unchanged -- this bump only documents the addition, it does not require
+# readers to migrate anything.
+MANIFEST_VERSION = 3
+
+
+def classify_failure(record: "RunRecord") -> str:
+    """The single authority for a finished ``RunRecord``'s typed failure category.
+
+    Purely a read over fields the record already carries; it never re-parses
+    raw output and never disagrees with the RESULT_* the record already
+    asserts.
+    """
+
+    if record.result in (RESULT_BLOCKED, RESULT_UNSUPPORTED, RESULT_DRY_RUN):
+        return FAILURE_NOT_RUN
+    if record.result == RESULT_PASS:
+        return FAILURE_NONE
+    assert record.result == RESULT_FAIL
+    if record.exit_status == _TIMEOUT_EXIT_STATUS:
+        return FAILURE_TIMEOUT
+    notes_text = " ".join(record.notes or []).lower()
+    if "read-only worker modified the working tree" in notes_text:
+        return FAILURE_READ_ONLY_VIOLATION
+    if "denied by the configured read-only permission boundary" in notes_text:
+        return FAILURE_PERMISSION_DENIED
+    return FAILURE_WORKER_ERROR
 
 
 @dataclass
@@ -52,6 +97,22 @@ class RunRecord:
     candidate_tree_sha: str | None = None
     policy_manifest: dict[str, Any] | None = None
 
+    def set_result(self, result: str, *, note: str | None = None) -> None:
+        """The one path every terminal RESULT_* transition in this stack goes through.
+
+        Centralizing the assignment -- instead of a caller poking
+        ``record.result`` directly at each of its many decision points --
+        means the taxonomy has a single home: one place to audit for "does
+        every exit path set a valid, typed result", not one ad-hoc assignment
+        per branch.
+        """
+
+        self.result = result
+        if note:
+            if self.notes is None:
+                self.notes = []
+            self.notes.append(note)
+
     def to_manifest(self, *, paths: dict[str, str]) -> dict[str, Any]:
         return {
             "manifest_version": MANIFEST_VERSION,
@@ -73,6 +134,7 @@ class RunRecord:
                 "intensity": self.actual_intensity,
             },
             "result": self.result,
+            "failure_category": classify_failure(self),
             "exit_status": self.exit_status,
             "duration_seconds": self.duration_seconds,
             "started_at": self.started_at,
@@ -115,6 +177,7 @@ def render_summary(manifest: dict[str, Any]) -> str:
         f"# Delegation summary — {manifest['task']} / {manifest['worker']}",
         "",
         f"- **Result:** {manifest['result']}",
+        f"- **Failure category:** {manifest['failure_category']}",
         f"- **Role:** {manifest['role']}",
         f"- **Exit status:** {manifest['exit_status']}",
         f"- **Duration (s):** {manifest['duration_seconds']}",
