@@ -52,7 +52,7 @@ https://github.com/paperclipai/paperclip/blob/master/docs/guides/agent-developer
 
 Paperclip's cost/budget model demonstrates the value of durable attribution and enforceable limits. Octarel must translate this carefully because much of its execution is subscription-backed: tokens/context may be measurable while per-run cash cost is not.
 
-Octarel has since settled its own answer to that (issues #42 and #44, merged): a subscription route carries a visible *API-equivalent estimate* that is always `DERIVED` and never accumulated into spend, alongside a separate actual-charge field that is `MEASURED` only when a worker CLI reports its own run cost. ENG-PC-05 inherits that contract; it does not get to redesign it.
+Octarel has since settled its own answer to that (issues #42 and #44, merged): a subscription route carries a visible *API-equivalent estimate*, `DERIVED` whenever it can be computed and never accumulated into spend, alongside a separate actual-charge field that classifies billing before it looks at any figure — so a subscription CLI printing its own cost does not become reported spend. ENG-PC-05 inherits that contract; it does not get to redesign it.
 
 Starting reference:
 https://github.com/paperclipai/paperclip/blob/master/docs/guides/board-operator/costs-and-budgets.md

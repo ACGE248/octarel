@@ -54,16 +54,18 @@ The Glass Orchestration Studio program has landed. It is the live Control Center
 | Task | Status | What exists in `main` |
 |---|---|---|
 | **#23 OCTAREL-UI-04** — Glass Orchestration Studio | Merged in #27 (`a12daf9`, tree `78918c02`); issue open for deferred scope | Design tokens and light/dark parity, app shell and navigation IA, Priority & Fallback Matrix over `/api/priority-matrix`, cross-entity ⌘K command palette |
-| **#24 OCTAREL-UI-05** — Manager Chat | Delivered in #27, issue closed | `control_plane/manager_chat.py`: orchestration-backed chat that navigates and proposes deterministic commands; not a model client |
+| **#24 OCTAREL-UI-05** — Manager Chat | Delivered in #27, issue closed | `control_plane/manager_chat.py`: orchestration-backed chat that proposes deterministic commands for review; not a model client. Cross-entity navigation is the ⌘K palette, not this module |
 | **#25 OCTAREL-UI-06** — usage/context/cost telemetry | Delivered in #27, issue closed | `control_plane/usage_telemetry.py` behind `/api/usage-telemetry`: per-run rows with `MEASURED`/`DERIVED`/`UNKNOWN`/`NOT_EXPOSED` classes, plus windowed aggregates |
 | **#26 OCTAREL-UI-07** — Graphify status | Delivered in #27, issue closed | Per-run recorded Graphify status, reason, injection and precedence in agent activity; no page view can build a graph |
-| **#42** — subscription-aware value and actual cost | Merged in #43 (`3bafe97`) | `estimated_api_equivalent_usd` (always `DERIVED`) and `actual_cost_usd` as separate fields, billing class derived from `cost_class` via `telemetry.execution_route_for_cost_class`, prices from the OpenCode catalog through `control_plane/pricing.py` |
-| **#44** — worker-reported per-run cost | Merged in #47 (`ed4ca59`) | A CLI that reports its own run cost makes `actual_cost_usd` **`MEASURED`** rather than derived from tokens × a price snapshot |
+| **#42** — subscription-aware value and actual cost | Merged in #43 (`3bafe97`) | `estimated_api_equivalent_usd` and `actual_cost_usd` as separate fields that are never added together; billing class derived from `cost_class` via `telemetry.execution_route_for_cost_class`; prices from the OpenCode catalog through `control_plane/pricing.py` |
+| **#44** — worker-reported per-run cost | Merged in #47 (`ed4ca59`) | On an **API-billed** route, a CLI that reports its own run cost makes `actual_cost_usd` `MEASURED` rather than derived from tokens × a price snapshot. Billing class is decided first and that ordering is load-bearing: a subscription CLI printing a `total_cost_usd` means "what this would have cost on the API", so reading it before classifying would turn a subscription session into reported spend |
 | **#45 OCTAREL-TEST-02** — deterministic fixture task recency | Merged in #46 (`7116c5d`) | The seven-viewport Control Center matrix seeds relative task recency explicitly |
 
 The `OCTAREL-UI-07` label is used by two different things and always has been: issue #26 (Graphify status) and the commit/engineering-doc name for issue #42 (subscription-aware cost). Cite the issue number, not the label.
 
-**#23 remains open only for scope deliberately deferred and documented in `docs/engineering/OCTAREL-UI-04.md`:** the Flow vertical-DAG canvas (minimap / zoom / fit-to-screen), the Runs → Run Detail split, and shared entity inspectors. Several ENG-PC tasks below name a Run Detail or entity inspector as their UI home; whichever task reaches that surface first builds it once, and the rest extend it.
+**#23 remains open for three unbuilt surfaces,** named in its merge comment on #27: the Flow canvas (minimap, fit-to-screen, zoom %, fullscreen), the Runs → Run Detail split, and shared entity inspectors. All three are genuinely absent from the dashboard today — `view-runs` is still one page and only one-off sheets exist, no shared inspector component.
+
+Their provenance differs, and the difference matters to whoever picks them up. Only the Flow canvas is recorded as **Deferred** in `docs/engineering/OCTAREL-UI-04.md`; the Run Detail split and shared entity inspectors are not in that file's decision table at all. Treat them as this roadmap's planning rather than as scope #23 formally logged. Several ENG-PC tasks below name a Run Detail or entity inspector as their UI home; whichever task reaches that surface first builds it once, and the rest extend it.
 
 Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather than estimated, and no ENG-PC task may quietly fill them with an approximation: **cache categories** (nothing in the stack records fresh input, cache reads or cache writes, so no cache hit rate can be derived) and **effective context limit** (no runtime reports one, and a context window is never inferred from a model name).
 
@@ -274,7 +276,9 @@ Ordering, restart persistence, redaction, evidence pointer validation, migration
 The cost/telemetry *read model* exists and is truthful. ENG-PC-05 must extend it in place; re-specifying any of the following is scope this task has already lost:
 
 - per-run rows carrying model, tokens, duration and provenance class, read from durable usage-governance records written by the supervisor;
-- the two-field money contract — `estimated_api_equivalent_usd` (always `DERIVED`, never spend) and `actual_cost_usd` (`MEASURED` from a worker CLI's own reported cost, else `DERIVED` from exact tokens × a catalog price, else `UNKNOWN`) — and the rule that an unclassified route reports `UNKNOWN` rather than `$0.00`;
+- the two-field money contract, which is more particular than a summary makes it look and must be read in `usage_telemetry.py` before being extended:
+  - `estimated_api_equivalent_usd` is route-blind and never spend. When it carries a figure that figure is always `DERIVED`; with no catalog price or no token counts it is `UNKNOWN`, never guessed.
+  - `actual_cost_usd` consults **billing class before any monetary evidence**. Subscription-included and free routes are `DERIVED` `$0.00` from the classification itself; an unclassified route is `UNKNOWN`, never `$0.00`. Only an API-billed route reaches the evidence ladder, and there it is `MEASURED` from a worker-reported cost, else `DERIVED` from exact provider tokens × a price, else `UNKNOWN` — an approximated token count never produces a charge.
 - billing class (`SUBSCRIPTION_INCLUDED` / `API_BILLED` / `FREE_TIER` / `UNKNOWN`) derived from the worker's `cost_class` through the single existing classifier, `telemetry.execution_route_for_cost_class`;
 - windowed aggregates that keep subscription-equivalent value, free-tier value and API spend in separate totals, counting a figure only when its own class established it;
 - `NOT_EXPOSED` cache categories and context limit, with their reasons.
