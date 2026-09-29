@@ -209,7 +209,12 @@ def _branch(root: Path) -> str | None:
 
 
 def cached_status(root: Path, *, project_id: str | None = None, verify_tree: bool = True) -> dict[str, Any]:
-    """Read cached health for one checkout. Never invokes Graphify."""
+    """Read cached health for one checkout. Never invokes Graphify.
+
+    ``verify_tree=True`` fingerprints the checkout synchronously and is intended
+    for deliberate operator/CLI reads. Request-thread dashboard callers must use
+    ``verify_tree=False`` so a cached-health read cannot hash the selected tree.
+    """
 
     root = Path(root).resolve()
     capability = capability_status(probe=False)
@@ -416,21 +421,38 @@ def refresh_graph(
 
 @dataclass
 class _Request:
-    key: tuple[str, str, str]
+    lane: str
     root: Path
     project_id: str | None
     trigger: str
     recorder: EventRecorder | None
     future: Future[dict[str, Any]]
+    sequence: int
+    key: tuple[str, str, str] | None = None
+
+
+@dataclass(frozen=True)
+class _CompletedRequest:
+    key: tuple[str, str, str]
+    result: dict[str, Any]
+    overlap_cutoff: int
 
 
 class RefreshCoordinator:
-    """One bounded refresh worker with duplicate coalescing and supersession."""
+    """One bounded refresh worker with duplicate coalescing and supersession.
+
+    Checkout identity and tracked-tree fingerprinting run only on this
+    coordinator's worker thread. ``request`` deliberately uses only the resolved
+    path as its synchronous lane key: callers must never run Git or hash the tree
+    before receiving the future that bounds their wait.
+    """
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
-        self._queued: dict[tuple[str, str], _Request] = {}
+        self._queued: dict[str, _Request] = {}
         self._active: _Request | None = None
+        self._completed: dict[str, _CompletedRequest] = {}
+        self._sequence = 0
         self._stopping = False
         self._thread = threading.Thread(target=self._run, name="octarel-graphify-refresh", daemon=True)
         self._thread.start()
@@ -439,34 +461,27 @@ class RefreshCoordinator:
         self, root: Path, *, project_id: str | None, trigger: str, event_recorder: EventRecorder | None = None
     ) -> Future[dict[str, Any]]:
         root = Path(root).resolve()
-        try:
-            identity, _files, _excluded, tree_id, worktree_dir = _coordinates(root, project_id)
-            key = (identity["project_key"], identity["worktree_id"][:16], tree_id[:24])
-        except Exception as exc:  # noqa: BLE001
-            future: Future[dict[str, Any]] = Future()
-            future.set_result({"status": "FAILED_SAFE", "reason": f"checkout inspection failed safely: {type(exc).__name__}", "trigger": trigger})
-            return future
-        if trigger != "manual":
-            cached = _read_status(worktree_dir)
-            if cached is not None and cached.get("status") == "READY" and cached.get("tree_id") == key[2]:
-                future = Future()
-                future.set_result(dict(cached))
-                return future
-        lane = key[:2]
+        lane = str(root)
         with self._condition:
             if self._stopping:
-                future = Future()
+                future: Future[dict[str, Any]] = Future()
                 future.set_result({"status": "FAILED_SAFE", "reason": "Graphify refresh coordinator is shutting down", "trigger": trigger})
                 return future
-            if self._active is not None and self._active.key == key:
-                return self._active.future
             queued = self._queued.get(lane)
-            if queued is not None and queued.key == key:
-                return queued.future
             if queued is not None and not queued.future.done():
-                queued.future.set_result({"status": "STALE", "reason": "superseded by a newer tree refresh", "trigger": queued.trigger, "tree_id": queued.key[2]})
+                queued.future.set_result({"status": "STALE", "reason": "superseded by a newer refresh request for this worktree", "trigger": queued.trigger})
+            if (
+                self._active is not None
+                and self._active.lane == lane
+                and self._active.key is None
+                and not self._active.future.done()
+            ):
+                self._active.future.set_result(
+                    {"status": "STALE", "reason": "superseded by a newer refresh request for this worktree", "trigger": self._active.trigger}
+                )
+            self._sequence += 1
             future = Future()
-            self._queued[lane] = _Request(key, root, project_id, trigger, event_recorder, future)
+            self._queued[lane] = _Request(lane, root, project_id, trigger, event_recorder, future, self._sequence)
             self._condition.notify()
             return future
 
@@ -480,19 +495,40 @@ class RefreshCoordinator:
                 lane = next(iter(self._queued))
                 request = self._queued.pop(lane)
                 self._active = request
+            superseded = False
             try:
-                result = refresh_graph(
-                    request.root, project_id=request.project_id, trigger=request.trigger, event_recorder=request.recorder
-                )
+                identity, _files, _excluded, tree_id, worktree_dir = _coordinates(request.root, request.project_id)
+                with self._condition:
+                    request.key = (identity["project_key"], identity["worktree_id"][:16], tree_id[:24])
+                    completed = self._completed.get(request.lane)
+                    superseded = request.future.done()
+                if superseded:
+                    result = request.future.result()
+                elif completed is not None and request.sequence <= completed.overlap_cutoff and completed.key == request.key:
+                    result = dict(completed.result)
+                elif request.trigger != "manual":
+                    cached = _read_status(worktree_dir)
+                    if cached is not None and cached.get("status") == "READY" and cached.get("tree_id") == request.key[2]:
+                        result = dict(cached)
+                    else:
+                        result = refresh_graph(
+                            request.root, project_id=request.project_id, trigger=request.trigger, event_recorder=request.recorder
+                        )
+                else:
+                    result = refresh_graph(
+                        request.root, project_id=request.project_id, trigger=request.trigger, event_recorder=request.recorder
+                    )
             except Exception as exc:  # noqa: BLE001 - defense in depth for injected/test implementations
                 result = {
                     "status": "FAILED_SAFE",
                     "reason": f"Graphify coordinator contained {type(exc).__name__}",
                     "trigger": request.trigger,
                 }
-            if not request.future.done():
-                request.future.set_result(result)
             with self._condition:
+                if not request.future.done():
+                    request.future.set_result(result)
+                if request.key is not None and not superseded:
+                    self._completed[request.lane] = _CompletedRequest(request.key, dict(result), self._sequence)
                 self._active = None
                 self._condition.notify_all()
 

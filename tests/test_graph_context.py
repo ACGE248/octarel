@@ -270,11 +270,44 @@ def test_refresh_coordinator_coalesces_duplicates(project, monkeypatch):
         first = queue.request(project, project_id="demo", trigger="manual")
         assert entered.wait(1)
         second = queue.request(project, project_id="demo", trigger="pre-review")
-        assert first is second
         release.set()
         assert first.result(2)["status"] == "READY"
+        assert second.result(2)["status"] == "READY"
         assert len(calls) == 1
     finally:
+        queue.shutdown()
+
+
+def test_refresh_request_fingerprints_only_on_coordinator_worker(project, monkeypatch):
+    caller_thread = threading.get_ident()
+    entered = threading.Event()
+    release = threading.Event()
+    coordinate_threads = []
+    original_coordinates = graph_lifecycle._coordinates
+
+    def blocked_coordinates(root, project_id):
+        coordinate_threads.append(threading.get_ident())
+        entered.set()
+        release.wait(2)
+        return original_coordinates(root, project_id)
+
+    monkeypatch.setattr(graph_lifecycle, "_coordinates", blocked_coordinates)
+    monkeypatch.setattr(
+        graph_lifecycle,
+        "refresh_graph",
+        lambda root, *, project_id, trigger, event_recorder=None: {"status": "READY", "trigger": trigger},
+    )
+    queue = graph_lifecycle.RefreshCoordinator()
+    try:
+        future = queue.request(project, project_id="demo", trigger="implementation-checkpoint")
+        assert not future.done()
+        assert entered.wait(1)
+        assert coordinate_threads == [queue._thread.ident]
+        assert coordinate_threads[0] != caller_thread
+        release.set()
+        assert future.result(2)["status"] == "READY"
+    finally:
+        release.set()
         queue.shutdown()
 
 
@@ -296,7 +329,7 @@ def test_refresh_coordinator_newer_tree_supersedes_queued_older(project, monkeyp
         older = queue.request(project, project_id="demo", trigger="pre-review")
         (project / "src/app.py").write_text("tree three\n")
         newer = queue.request(project, project_id="demo", trigger="implementation-checkpoint")
-        assert older.result(1)["reason"] == "superseded by a newer tree refresh"
+        assert older.result(1)["reason"] == "superseded by a newer refresh request for this worktree"
         release.set()
         assert active.result(2)["status"] == "READY"
         assert newer.result(2)["status"] == "READY"
