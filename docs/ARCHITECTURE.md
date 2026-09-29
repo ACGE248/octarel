@@ -67,8 +67,9 @@ See `scripts/agents/README.md` (Graphify repository intelligence) for the contra
 
 ENG-AO-10 adds a lifecycle around that unchanged worker seam. Project selection queues a bounded canonical
 warm-up; the acceptance pipeline refreshes the candidate after `gate_candidate` has established the writer
-boundary and before review dispatch; advancement refreshes canonical repository truth before starting the next
-task. `graph_lifecycle.RefreshCoordinator` runs at most one refresh at a time, coalesces an identical
+boundary and waits at most two seconds before review dispatch (then records possibly one-tree-behind context
+while the build continues); advancement queues a non-blocking canonical refresh only when it will actually
+auto-start the next task. `graph_lifecycle.RefreshCoordinator` runs at most one refresh at a time, coalesces an identical
 project/worktree/tree request, and replaces an older queued tree for the same worktree with the newest one.
 Refresh failure is an advisory `FAILED_SAFE` event, never a merge or acceptance failure.
 

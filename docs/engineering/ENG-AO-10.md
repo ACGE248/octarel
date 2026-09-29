@@ -18,6 +18,14 @@ Octarel never installs the package. `python -m octarel graphify install` is inst
 the exact pinned version and that top-level `graphify --help` advertises `extract` plus `--code-only`; an unverified or different
 version reports `OUTDATED` and is not invoked for generation.
 
+The exact default pin is deliberate: Graphify output and CLI compatibility are treated as untrusted until that
+specific release has been reviewed, so Octarel does not accept version ranges or automatically follow the newer
+`v1.0.0` tag. An operator who has separately reviewed another release may set
+`OCTAREL_GRAPHIFY_VERIFIED_VERSION=<exact-semver>` (for example `1.0.0`). That setting is an explicit local
+attestation, not auto-detection: changing it requires reviewing the release's `extract`/`update` and
+`--code-only` behavior, then running the Graphify focused tests and the risk-selected Octarel gate. Non-exact
+values such as ranges fail closed as `OUTDATED`.
+
 `GRAPHIFY_NO_LLM` is not an upstream variable and is intentionally not set. No comment or control relies on it.
 The real no-model controls are the documented `extract <snapshot> --code-only` command, deterministic `update`
 on later isolated snapshots, removal of every provider credential-shaped environment variable, and never
@@ -31,10 +39,12 @@ identity, cache validation/retention, graph normalization/redaction, and the onl
 
 1. Project selection durably changes selection, then queues a non-blocking canonical warm refresh.
 2. Acceptance waits until `_review_task_in_flight` is false, stages the candidate and calls `gate_candidate`.
-   Only after that existing writer boundary does it wait for an `implementation-checkpoint` refresh; review
-   planning/dispatch follows.
-3. Advancement re-reads canonical repository truth, waits for `post-merge` refresh, then may start the next
-   eligible task.
+   Only after that existing writer boundary does it wait up to the explicit two-second checkpoint budget for an
+   `implementation-checkpoint` refresh; on timeout the build continues in the background and acceptance records
+   that review context may be one tree behind before review planning/dispatch follows.
+3. Advancement re-reads canonical repository truth. Only when a successor will actually auto-start does it
+   queue a non-blocking `post-merge` refresh; it never holds the advancement lock/lease for a graph build, and
+   the successor's existing context seam refreshes its exact tree on demand if the warm-up is incomplete.
 4. A dashboard or CLI manual action queues the same coordinator. Dashboard GETs only read cached status.
 
 The coordinator has one local worker. An identical project/worktree/tree request shares one future; a newer
@@ -53,6 +63,8 @@ System / Operational Overlays shows selected-project Graphify health, version, b
 refresh/duration/age, counts, reason and the active run's existing #26 injection evidence. There is no second
 Graphify page. `GET /api/graphify` never probes or generates; Check installation and Refresh graph are explicit
 operator POST actions.
+The API omits Graphify executable/worktree absolute paths, including paths present in internal cached evidence.
+Remote Check installation and Refresh graph actions are recorded in the existing remote-identity audit ledger.
 
 ## Deliberate deferral
 

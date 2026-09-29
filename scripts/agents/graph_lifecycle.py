@@ -26,6 +26,7 @@ from typing import Any
 from . import graph_context
 
 SUPPORTED_VERSION = "0.9.71"
+VERIFIED_VERSION_ENV = "OCTAREL_GRAPHIFY_VERIFIED_VERSION"
 UPSTREAM_REPOSITORY = "https://github.com/Graphify-Labs/graphify"
 UPSTREAM_RELEASE_COMMIT = "d6eaa8aae8df155874ebb1044302c055c286342a"
 UPSTREAM_REVIEWED_HEAD = "9fd5aadfd8ff7c2de95c78ef90f9b9f2721cbd98"
@@ -97,11 +98,15 @@ def capability_status(*, probe: bool = True) -> dict[str, Any]:
 
     checked = _iso() if probe else None
     binary = _binary()
+    configured_version = os.environ.get(VERIFIED_VERSION_ENV, "").strip()
+    configured_version_valid = not configured_version or re.fullmatch(r"\d+\.\d+\.\d+", configured_version)
+    supported_version = configured_version or SUPPORTED_VERSION
     base: dict[str, Any] = {
         "installed": bool(binary),
         "path": binary,
         "version": None,
-        "supported_version": SUPPORTED_VERSION,
+        "supported_version": supported_version,
+        "supported_version_source": "operator-verified-environment" if configured_version else "repository-default",
         "supported_command": "graphify extract <filtered-snapshot> --code-only",
         "ast_only": True,
         "llm_enrichment": False,
@@ -109,9 +114,15 @@ def capability_status(*, probe: bool = True) -> dict[str, Any]:
         "last_health_probe": checked,
         "install_commands": list(INSTALL_COMMANDS),
         "upstream_repository": UPSTREAM_REPOSITORY,
-        "upstream_release_commit": UPSTREAM_RELEASE_COMMIT,
+        "upstream_release_commit": UPSTREAM_RELEASE_COMMIT if not configured_version else None,
         "upstream_reviewed_head": UPSTREAM_REVIEWED_HEAD,
     }
+    if not configured_version_valid:
+        return {
+            **base,
+            "status": "OUTDATED",
+            "reason": f"{VERIFIED_VERSION_ENV} must be an exact semantic version (for example 1.0.0); no refresh was attempted",
+        }
     if not binary:
         return {**base, "status": "MISSING", "reason": f"Graphify is not installed; run `{INSTALL_COMMANDS[0]}` (or `{INSTALL_COMMANDS[1]}`)"}
     if not probe:
@@ -128,8 +139,8 @@ def capability_status(*, probe: bool = True) -> dict[str, Any]:
     base["version"] = version
     if version_run.returncode != 0 or not version:
         return {**base, "status": "OUTDATED", "reason": "Graphify version could not be verified; no refresh was attempted"}
-    if version != SUPPORTED_VERSION:
-        return {**base, "status": "OUTDATED", "reason": f"Graphify {version} is incompatible with pinned {SUPPORTED_VERSION}; no refresh was attempted"}
+    if version != supported_version:
+        return {**base, "status": "OUTDATED", "reason": f"Graphify {version} is incompatible with pinned {supported_version}; no refresh was attempted"}
     if help_run.returncode != 0 or "--code-only" not in help_text:
         return {**base, "status": "OUTDATED", "reason": "installed Graphify does not advertise extract --code-only; no refresh was attempted"}
     return {**base, "status": "READY", "reason": "pinned local code-only Graphify capability is ready"}
@@ -516,9 +527,14 @@ def request_refresh(
     trigger: str,
     event_recorder: EventRecorder | None = None,
     wait: bool = False,
+    timeout_seconds: float | None = None,
 ) -> Future[dict[str, Any]] | dict[str, Any]:
     future = coordinator().request(root, project_id=project_id, trigger=trigger, event_recorder=event_recorder)
-    return future.result(timeout=graph_context.BUILD_TIMEOUT_SECONDS + 15) if wait else future
+    if not wait:
+        return future
+    if timeout_seconds is None or timeout_seconds <= 0:
+        raise ValueError("a positive explicit timeout_seconds is required when waiting for Graphify refresh")
+    return future.result(timeout=timeout_seconds)
 
 
 def _shutdown_global() -> None:

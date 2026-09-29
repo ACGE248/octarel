@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 import subprocess
 import uuid
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,10 @@ DEFAULT_BASE_REF = "origin/main"
 # Legacy unscoped default for callers/tests that have no selected ProjectContract.
 # Production merge/PR paths with a selected project must pass ``github_remote``.
 GITHUB_REPO = OCTASCENE_GITHUB_REMOTE
+
+# A reconcile tick must never inherit Graphify's full build timeout. The build
+# continues on the coordinator after this short checkpoint budget expires.
+GRAPH_REFRESH_CHECKPOINT_TIMEOUT_SECONDS = 2.0
 
 # ENG-AGENT-15 (issue #142): a real V1-05 overnight-development run finalized
 # SUCCEEDED immediately after implementation exit with zero Test/Review/
@@ -356,17 +361,35 @@ def _advance_test_and_review(
     try:
         from ..graph_lifecycle import request_refresh, state_event_recorder
 
-        request_refresh(
+        refresh = request_refresh(
             worktree,
             project_id=runbook.project_id,
             trigger="implementation-checkpoint",
             event_recorder=state_event_recorder(state, runbook.project_id),
             wait=True,
+            timeout_seconds=GRAPH_REFRESH_CHECKPOINT_TIMEOUT_SECONDS,
+        )
+        refresh_status = str(refresh.get("status") or "FAILED_SAFE")
+        evidence["graph_context"] = {
+            "status": refresh_status,
+            "reason": str(refresh.get("reason") or "Graphify checkpoint refresh completed"),
+            "tree_sha": tree,
+        }
+    except FutureTimeoutError:
+        reason = (
+            f"Graphify checkpoint refresh exceeded {GRAPH_REFRESH_CHECKPOINT_TIMEOUT_SECONDS:g}s; "
+            "the refresh continues in the background and review context may be one tree behind"
+        )
+        evidence["graph_context"] = {"status": "STALE", "reason": reason, "tree_sha": tree}
+        state.record_event(
+            category="graphify", level="warning", project_id=runbook.project_id, message=reason,
         )
     except Exception as exc:  # noqa: BLE001 - advisory refresh must not block acceptance
+        reason = f"Graphify checkpoint refresh failed safely before dispatch: {type(exc).__name__}"
+        evidence["graph_context"] = {"status": "FAILED_SAFE", "reason": reason, "tree_sha": tree}
         state.record_event(
             category="graphify", level="error", project_id=runbook.project_id,
-            message=f"Graphify checkpoint refresh failed safely before dispatch: {type(exc).__name__}",
+            message=reason,
         )
 
     risk = classify(paths)

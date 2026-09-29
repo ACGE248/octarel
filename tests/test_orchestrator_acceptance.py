@@ -628,11 +628,12 @@ def test_candidate_graph_refresh_runs_after_writer_boundary_before_review_dispat
         order.append("writer-boundary")
         return real_candidate(*args, **kwargs)
 
-    def refresh(root, *, project_id, trigger, event_recorder, wait):
+    def refresh(root, *, project_id, trigger, event_recorder, wait, timeout_seconds):
         order.append("graph-refresh")
         assert root == repo
         assert trigger == "implementation-checkpoint"
         assert wait is True
+        assert timeout_seconds == acceptance.GRAPH_REFRESH_CHECKPOINT_TIMEOUT_SECONDS
         return {"status": "READY"}
 
     monkeypatch.setattr(acceptance, "gate_candidate", candidate)
@@ -647,6 +648,37 @@ def test_candidate_graph_refresh_runs_after_writer_boundary_before_review_dispat
         runbook=rb, task=task, base_ref="HEAD",
     )
     assert order[:3] == ["writer-boundary", "graph-refresh", "review-planning"]
+
+
+def test_candidate_graph_refresh_timeout_is_bounded_and_truthfully_recorded(tmp_path, monkeypatch):
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    repo = _git_repo(tmp_path)
+    state = State(":memory:")
+    rb, task = _implementation_runbook(state, repo)
+    acceptance.start_acceptance(runbook=rb, task=task)
+
+    from scripts.agents import graph_lifecycle
+
+    observed = []
+
+    def refresh(root, *, project_id, trigger, event_recorder, wait, timeout_seconds):
+        observed.append(timeout_seconds)
+        raise FutureTimeoutError
+
+    monkeypatch.setattr(graph_lifecycle, "request_refresh", refresh)
+    monkeypatch.setattr(acceptance, "classify", lambda paths: type("R", (), {"review_level": "high"})())
+    acceptance.advance_acceptance_pipeline(
+        state=state, repo_root=repo, registry=load_registry(), scheduler=Scheduler(), supervisor=FakeSupervisor(),
+        runbook=rb, task=task, base_ref="HEAD",
+    )
+
+    assert observed == [acceptance.GRAPH_REFRESH_CHECKPOINT_TIMEOUT_SECONDS]
+    assert observed[0] <= 2.0
+    graph_evidence = rb.acceptance_evidence["graph_context"]
+    assert graph_evidence["status"] == "STALE"
+    assert "continues in the background" in graph_evidence["reason"]
+    assert "may be one tree behind" in graph_evidence["reason"]
 
 
 def test_resolved_review_status_never_triggers_the_in_flight_guard(tmp_path, monkeypatch):

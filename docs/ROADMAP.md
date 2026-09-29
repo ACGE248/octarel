@@ -26,6 +26,9 @@ it remains the sequencing prerequisite before beginning the ENG-PC implementatio
 Octarel already has safe tree-matched Graphify context from ENG-AO-01 (`scripts/agents/graph_context.py`), and #26 has since delivered its **per-run** Control Center evidence: `agent_activity._graph_context_row` exposes the recorded status, reason, injection flag and precedence for an attempt, reading only the run manifest and never invoking Graphify.
 
 ENG-AO-10 makes the capability operationally first-class on top of that: pinned installation/health probing, warm canonical indexes, candidate refresh after safe implementation checkpoints, canonical refresh after merge/reconciliation, refresh coalescing, and tree/worktree-aware evidence. The supported release is Graphify `v0.9.71` (`graphifyy`) at release commit `d6eaa8aae8df155874ebb1044302c055c286342a`; upstream `v8` was reviewed at `9fd5aadfd8ff7c2de95c78ef90f9b9f2721cbd98` on 2026-09-29.
+The repository default remains an exact compatibility pin; an operator may attest a separately reviewed exact
+version through `OCTAREL_GRAPHIFY_VERIFIED_VERSION`, with ranges rejected and the required review/test process
+documented in `docs/engineering/ENG-AO-10.md`.
 
 Its UI work is an **extension of the delivered #26 surface**, not a replacement for it. #26 answers "did this run get a graph?"; ENG-AO-10 adds the selected-project/global health that does not exist today — installed version, indexed tree identity, graph age, last refresh, and `READY`/`MISSING`/`OUTDATED`/`STALE`/`REFRESHING`/`FAILED_SAFE` — in System / Operational Overlays. Do not add a second Graphify page.
 

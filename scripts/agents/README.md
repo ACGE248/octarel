@@ -126,7 +126,10 @@ task status, policy, roadmap, ADRs, validation, or exact-tree acceptance. Truth 
   `9fd5aadfd8ff7c2de95c78ef90f9b9f2721cbd98` on 2026-09-29. Detected locally (`graphify` on `PATH`, or
   `OCTAREL_GRAPHIFY_BIN`); never auto-installed. `python -m octarel graphify status` reports `MISSING` with the
   exact explicit operator commands `uv tool install graphifyy` and `pipx install graphifyy`; `graphify install`
-  only prints those commands and never executes them.
+  only prints those commands and never executes them. A separately reviewed release may be selected only by
+  the explicit exact-semver attestation `OCTAREL_GRAPHIFY_VERIFIED_VERSION`; ranges fail closed, and changing
+  the attested version requires review of its code-only CLI behavior plus the focused Graphify tests and the
+  risk-selected Octarel gate.
 - **Optional at runtime.**
   `OCTAREL_GRAPHIFY=off` disables it. Absent, stale, or failing Graphify only records a reason
   (`unavailable`, `stale`, `skipped`, `failed-safe`) and AO proceeds with ordinary repository inspection.

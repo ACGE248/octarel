@@ -98,7 +98,9 @@ def test_graphify_dashboard_read_uses_cached_status_and_never_builds(client, mon
         dashboard_api,
         "graphify_cached_status",
         lambda root, *, project_id, verify_tree: calls.append((root, project_id, verify_tree)) or {
-            "status": "READY", "tree_id": "abc123", "reason": "cached"
+            "status": "READY", "tree_id": "abc123", "reason": "cached",
+            "worktree": "/private/host/project", "path": "/private/bin/graphify",
+            "installed_path": "/private/bin/graphify",
         },
     )
     monkeypatch.setattr(
@@ -109,11 +111,15 @@ def test_graphify_dashboard_read_uses_cached_status_and_never_builds(client, mon
     body = client.get("/api/graphify").json()
     assert body["status"] == "READY"
     assert body["tree_id"] == "abc123"
+    assert "worktree" not in body
+    assert "path" not in body
+    assert "installed_path" not in body
+    assert "/private/host" not in json.dumps(body)
     assert len(calls) == 1
     assert calls[0][2] is False
 
 
-def test_graphify_manual_refresh_is_bounded_and_audited(client, ctx, monkeypatch):
+def test_graphify_manual_refresh_queues_and_records_lifecycle_event(client, ctx, monkeypatch):
     from scripts.agents.control_plane import dashboard_api
 
     captured = []

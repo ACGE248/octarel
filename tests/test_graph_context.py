@@ -198,6 +198,26 @@ def test_incompatible_graphify_is_not_used_for_refresh(project, graphify, monkey
     assert all(call["argv"][:1] != ["extract"] for call in _calls(graphify))
 
 
+def test_operator_can_pin_a_separately_verified_exact_version(graphify, monkeypatch):
+    monkeypatch.setenv("FAKE_GRAPHIFY_VERSION", "1.0.0")
+    monkeypatch.setenv(graph_lifecycle.VERIFIED_VERSION_ENV, "1.0.0")
+
+    result = graph_lifecycle.capability_status()
+
+    assert result["status"] == "READY"
+    assert result["supported_version"] == "1.0.0"
+    assert result["supported_version_source"] == "operator-verified-environment"
+
+
+def test_operator_verified_version_must_be_an_exact_semantic_version(graphify, monkeypatch):
+    monkeypatch.setenv(graph_lifecycle.VERIFIED_VERSION_ENV, ">=1")
+
+    result = graph_lifecycle.capability_status()
+
+    assert result["status"] == "OUTDATED"
+    assert "exact semantic version" in result["reason"]
+
+
 def test_incompatible_graphify_is_not_used_by_worker_context(project, graphify, monkeypatch):
     monkeypatch.setenv("FAKE_GRAPHIFY_VERSION", "1.0.0")
     context = build_graph_context(project, ["src"], project_id="demo")
