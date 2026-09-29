@@ -75,7 +75,7 @@ def test_reset_fixture_context_restores_draft_runbook(tmp_path: Path) -> None:
 def test_fixture_seed_keeps_one_current_task_ref_across_a_clock_second(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """OCTAREL-TEST-01: which task reference is "current" must not depend on seed duration.
+    """OCTAREL-TEST-02 (issue #45): which task reference is "current" must not depend on seed duration.
 
     ``dashboard_api.workflow()`` renders the single most recently updated active
     task reference, and ``utc_now_iso()`` resolves to whole seconds. The fixture

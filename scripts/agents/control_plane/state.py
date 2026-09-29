@@ -578,7 +578,8 @@ class State:
         """Write ``task``, stamping ``updated_at`` with the current second.
 
         ``updated_at`` overrides that stamp and exists for deterministic
-        seeding (OCTAREL-TEST-01).  An ordinary write means "this row was
+        seeding (OCTAREL-TEST-02, issue #45, upholding OCTAREL-TEST-01's shared-
+        fixture contract).  An ordinary write means "this row was
         touched now", but a fixture that seeds several task references in one
         pass needs their *relative* recency to be intentional rather than a
         function of how long the seed happened to take: ``utc_now_iso()`` has

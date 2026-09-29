@@ -279,9 +279,9 @@ def _git_add_review_fixture_worktree(root: Path) -> tuple[Path, str]:
 
 
 def build_fixture_context(root: Path, *, state_path: Path | None = None) -> CommandContext:
-    # OCTAREL-TEST-01: stamp the whole seed from one instant so the fixture's
-    # *relative* task recency is intentional instead of a function of how long
-    # seeding took. ``dashboard_api.workflow()`` renders the single most
+    # OCTAREL-TEST-02 (issue #45): stamp the whole seed from one instant so the
+    # fixture's *relative* task recency is intentional instead of a function of
+    # how long seeding took. ``dashboard_api.workflow()`` renders the single most
     # recently updated active task reference, and ``utc_now_iso()`` resolves to
     # whole seconds, so a seed that happened to cross a clock second between
     # ENG-AGENT-02's fx-* tasks and ENG-AGENT-07's fallback session silently

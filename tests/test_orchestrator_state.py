@@ -151,7 +151,7 @@ def test_state_serializes_concurrent_thread_access():
 
 
 def test_upsert_task_stamps_now_but_honours_an_explicit_updated_at():
-    """OCTAREL-TEST-01: deterministic seeding needs to set relative task recency.
+    """OCTAREL-TEST-02 (issue #45): deterministic seeding needs to set relative task recency.
 
     An ordinary write means "this row was touched now". ``utc_now_iso()`` resolves
     to whole seconds, so a caller seeding several task references in one pass
