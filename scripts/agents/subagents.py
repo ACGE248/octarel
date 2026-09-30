@@ -458,9 +458,11 @@ def run_fanout(
         record["duration_seconds"] = round(_time.monotonic() - began, 3)
         record["exit_status"] = exit_status
         failure = structured_failure(output)
-        if exit_status == 124:
+        if failure:
+            record.update(result=RESULT_FAIL, failure_reason=redact_text(failure)[:400])
+        elif exit_status == 124:
             record.update(result=RESULT_TIMEOUT, failure_reason=f"timed out after {bot_timeout:g}s")
-        elif failure or exit_status != 0:
+        elif exit_status != 0:
             record.update(result=RESULT_FAIL, failure_reason=redact_text(failure or f"exit status {exit_status}")[:400])
         else:
             record.update(result=RESULT_PASS, failure_reason=None)

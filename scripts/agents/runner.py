@@ -339,12 +339,47 @@ def _first_json_object(output: str) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _structured_denial(payload: dict[str, object] | None) -> bool:
+    """Return whether a CLI result contains a non-empty typed denial field.
+
+    Claude Code reports ``permission_denials`` at the result root. Antigravity
+    reports ``denied_actions`` inside ``usage`` (and older/newer adapters may
+    expose either field at the result root), so only those known structured
+    locations are inspected. Model-authored prose is deliberately not treated
+    as evidence that a tool action occurred.
+    """
+
+    if payload is None:
+        return False
+    containers = [payload]
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        containers.append(usage)
+    return any(
+        bool(container.get(field))
+        for container in containers
+        for field in ("permission_denials", "denied_actions")
+    )
+
+
+def _unstructured_output(output: str) -> str:
+    """Return raw CLI text outside a leading structured JSON result."""
+
+    stripped = output.lstrip()
+    try:
+        payload, end = json.JSONDecoder().raw_decode(stripped)
+    except (json.JSONDecodeError, TypeError):
+        return output
+    return stripped[end:] if isinstance(payload, dict) else output
+
+
 def structured_failure(output: str) -> str | None:
     """Return a failure reason exposed by a structured CLI result, if any."""
 
     payload = _first_json_object(output)
-    lowered = output.lower()
-    if "tool permission requests are auto-denied" in lowered or "was denied" in lowered:
+    if _structured_denial(payload):
+        return "worker tool action was denied by the configured read-only permission boundary"
+    if "tool permission requests are auto-denied" in _unstructured_output(output).lower():
         return "worker tool action was denied by the configured read-only permission boundary"
     if payload is None:
         return None

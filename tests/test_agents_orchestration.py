@@ -891,11 +891,57 @@ def test_structured_cancelled_result_is_failure():
     assert structured_failure("plain output") is None
 
 
-def test_structured_denied_tool_after_json_result_is_failure():
+@pytest.mark.parametrize(
+    "output",
+    [
+        "The requested command was denied in an earlier example; I did not invoke a tool.",
+        'The bare "was denied" pattern is overly broad and must not classify this review as a denial.',
+        json.dumps({"result": 'Issue #50 explains why "was denied" in model prose is not tool evidence.'}),
+        json.dumps({"result": "The marker 'tool permission requests are auto-denied' is quoted as prose."}),
+    ],
+)
+def test_model_prose_that_mentions_or_quotes_a_denial_is_not_failure(output):
+    assert structured_failure(output) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"permission_denials": [{"tool_name": "Bash"}]},
+        {"denied_actions": [{"action": "command", "display_name": "RunCommand"}]},
+        {"usage": {"denied_actions": [{"action": "command", "display_name": "RunCommand"}]}},
+    ],
+)
+def test_non_empty_structured_denial_is_failure(payload):
+    assert structured_failure(json.dumps(payload)) == (
+        "worker tool action was denied by the configured read-only permission boundary"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"permission_denials": []},
+        {"denied_actions": []},
+        {"usage": {"denied_actions": []}},
+    ],
+)
+def test_empty_structured_denial_is_not_failure(payload):
+    assert structured_failure(json.dumps(payload)) is None
+
+
+def test_unstructured_auto_denied_tool_marker_is_failure():
     output = (
         '{"status":"SUCCESS","response":""}\n'
         "Headless mode: tool permission requests are auto-denied. RunCommand was denied."
     )
+    assert structured_failure(output) == (
+        "worker tool action was denied by the configured read-only permission boundary"
+    )
+
+
+def test_structured_denial_takes_precedence_over_timeout():
+    output = json.dumps({"stopReason": "timeout", "permission_denials": [{"tool_name": "Bash"}]})
     assert structured_failure(output) == (
         "worker tool action was denied by the configured read-only permission boundary"
     )
