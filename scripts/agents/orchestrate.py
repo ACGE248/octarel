@@ -66,6 +66,7 @@ from .runner import (
     run_worker_process,
     structured_actual_model,
     structured_failure,
+    worker_boundary_evidence,
     worktree_snapshot,
     write_lock,
 )
@@ -589,6 +590,8 @@ def run_delegation(
     record.actual_provider = worker.provider
     record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
     record.actual_intensity = resolved_intensity
+    if worker.is_read_only:
+        record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     changed_during_run = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
@@ -607,8 +610,10 @@ def run_delegation(
     if failure_reason:
         record.result = RESULT_FAIL
         record.notes.append(failure_reason)
+    elif exit_status != 0:
+        record.result = RESULT_FAIL
     else:
-        record.result = RESULT_PASS if exit_status == 0 else RESULT_FAIL
+        record.result = RESULT_PASS
     if pool_selection is not None and record.result == RESULT_FAIL:
         _cool_down_failed_pool_model(record, model, failure_reason or log_text[-2000:])
     return finish(log_text)
@@ -846,6 +851,8 @@ def run_session(
     record.actual_provider = worker.provider
     record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
     record.actual_intensity = resolved_intensity
+    if worker.is_read_only:
+        record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     record.files_changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
@@ -854,8 +861,10 @@ def run_session(
     if failure_reason:
         record.result = RESULT_FAIL
         record.notes.append(failure_reason)
+    elif exit_status != 0:
+        record.result = RESULT_FAIL
     else:
-        record.result = RESULT_PASS if exit_status == 0 else RESULT_FAIL
+        record.result = RESULT_PASS
     return finish(log_text)
 
 

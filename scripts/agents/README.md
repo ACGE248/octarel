@@ -111,6 +111,13 @@ See [`docs/engineering/ENG-AGENT-10.md`](../../docs/engineering/ENG-AGENT-10.md)
 - **Read-only Antigravity workers** run with `--mode plan --sandbox`; if the
   working tree changes during the run it is recorded as a `FAIL` contract
   violation.
+- **Structured boundary evidence.** A read-only worker's manifest records the
+  boundary state as `MEASURED` only when the transport emits a recognized typed
+  denial field; prose, quoted source, and diffs never prove a denial. A
+  transport without that field records `UNKNOWN`. `UNKNOWN` is visible but
+  does not by itself block an independent `diff-review`: absence of a field
+  proves neither a violation nor cleanliness. A `MEASURED` denial blocks, and
+  independent worktree/file-change checks continue to fail closed on writes.
 - **Never in CI.** No GitHub workflow invokes this tooling or any worker CLI.
 
 ## Graphify repository intelligence (ENG-AO-01 + ENG-AO-10 lifecycle)
@@ -461,7 +468,9 @@ GitHub Actions is not used for validation. Stage the complete candidate and run
 `--independent-review-provider <provider> --independent-review-evidence <.agent-output/.../manifest.json>`.
 Evidence under `.local-gate/` is
 bound to the Git tree. Selection records T0/T1/T2/T3, review level, and product versus Control Center
-audit scope. `prepare_merge` and the Control Center Local Gate card
+audit scope. A review manifest is ineligible when its structured boundary
+evidence records a `MEASURED` denied action; `UNKNOWN` is retained on the
+manifest but is not disqualifying by itself. `prepare_merge` and the Control Center Local Gate card
 reject absent, failed, or stale evidence. Full operating detail is in
 `docs/engineering/GITHUB_DEVELOPMENT_WORKFLOW.md`.
 

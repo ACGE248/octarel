@@ -47,6 +47,7 @@ from .runner import (
     run_worker_process_group,
     structured_failure,
     worker_action_denied,
+    worker_boundary_evidence,
     worktree_snapshot,
 )
 
@@ -458,6 +459,7 @@ def run_fanout(
         record["finished_at"] = _now()
         record["duration_seconds"] = round(_time.monotonic() - began, 3)
         record["exit_status"] = exit_status
+        record["boundary_evidence"] = worker_boundary_evidence(output)
         if worker_action_denied(output):
             failure = structured_failure(output)
             assert failure is not None
