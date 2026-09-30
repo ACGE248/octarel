@@ -424,6 +424,13 @@ class ExecutionLease:
     owner_host: str | None = None
     owner_pid: int | None = None
     owner_pid_create_time: float | None = None
+    # True from the moment ``acquire`` wins the CAS until ``attach_pid`` durably
+    # records the real worker subprocess's pid. While true, ``owner_pid`` is the
+    # *launching supervisor's* own pid, not yet the worker's -- so a dead
+    # ``owner_pid`` proves only that the supervisor died, never that no worker
+    # process exists (the worker is spawned with ``start_new_session=True`` and
+    # can outlive a dead parent). See ``execution_lease._classify_owner``.
+    spawn_pending: bool = False
     acquired_at: str | None = None
     heartbeat_at: str | None = None
     released_at: str | None = None
@@ -447,6 +454,7 @@ class ExecutionLease:
             owner_host=row.get("owner_host"),
             owner_pid=row.get("owner_pid"),
             owner_pid_create_time=row.get("owner_pid_create_time"),
+            spawn_pending=bool(row.get("spawn_pending") or 0),
             acquired_at=row.get("acquired_at"),
             heartbeat_at=row.get("heartbeat_at"),
             released_at=row.get("released_at"),

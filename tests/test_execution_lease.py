@@ -10,7 +10,9 @@ lock proves nothing about a race -- the same standard
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -110,13 +112,43 @@ def test_attach_pid_is_guarded_by_generation(disk_state, tmp_path):
 
 
 def test_dead_owner_pid_is_reclaimable_without_a_timeout(disk_state, tmp_path, monkeypatch):
-    lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    # Mirrors ``Supervisor.launch_task``'s real sequence: ``attach_pid`` must
+    # succeed (clearing ``spawn_pending``) before a dead recorded pid can ever be
+    # taken as proof of no live worker -- see the spawn-pending-ambiguity tests
+    # below for the case where it never does.
+    lease.attach_pid(disk_state, worktree=str(tmp_path), generation=grant.generation, pid=os.getpid())
     monkeypatch.setattr(lease, "pid_is_alive", lambda pid: False)
     # No sleeping/timeout anywhere in this test: staleness is proven, not waited out.
-    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t2", worker="w")
-    assert grant.task_id == "t2"
+    grant2 = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t2", worker="w")
+    assert grant2.task_id == "t2"
     row = disk_state.get_execution_lease(str(tmp_path))
     assert row.recovery_reason and "no longer alive" in row.recovery_reason
+
+
+def test_spawn_pending_is_set_on_acquire_and_cleared_by_attach_pid(disk_state, tmp_path):
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    assert disk_state.get_execution_lease(str(tmp_path)).spawn_pending is True
+    lease.attach_pid(disk_state, worktree=str(tmp_path), generation=grant.generation, pid=4242)
+    assert disk_state.get_execution_lease(str(tmp_path)).spawn_pending is False
+
+
+def test_a_dead_owner_pid_with_spawn_still_pending_is_never_auto_reclaimed(disk_state, tmp_path, monkeypatch):
+    """The narrow defect-2 shape, reproduced without a real process: ``attach_pid``
+    never ran, so the recorded (dead) pid is the launching supervisor's, not the
+    worker's -- staleness is unprovable and must never be inferred anyway.
+    """
+
+    lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    monkeypatch.setattr(lease, "pid_is_alive", lambda pid: False)
+
+    with pytest.raises(lease.ExecutionLeaseConflict) as excinfo:
+        lease.acquire(disk_state, worktree=str(tmp_path), task_id="t2", worker="w")
+    assert "spawn in flight" in excinfo.value.reason
+
+    summary = lease.reconcile_stale_leases(disk_state)
+    assert summary == {"reclaimed": 0, "left_held": 1}
+    assert disk_state.get_execution_lease(str(tmp_path)).status == "ACQUIRED"
 
 
 def test_reconcile_stale_leases_frees_only_provably_dead_owners(disk_state, tmp_path, monkeypatch):
@@ -238,6 +270,77 @@ def test_lease_is_reclaimable_once_the_owning_process_is_killed(disk_state, tmp_
 
     grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="recovering-task", worker="w")
     assert grant.task_id == "recovering-task"
+
+
+# Grok Build review (issue #29 follow-up), defect 2: a real session-leader child
+# (``start_new_session=True``, exactly mirroring ``Supervisor._spawn``) that
+# outlives the "supervisor" process which spawned it -- because that process exits
+# (simulating a crash) *before* ever calling ``attach_pid``. Real subprocesses and a
+# real signal throughout: the old, narrower coverage
+# (``test_lease_is_reclaimable_once_the_owning_process_is_killed`` above) only ever
+# killed a holder that had already called ``attach_pid``, which is exactly why it
+# could not have caught this.
+_ACQUIRE_SPAWN_AND_DIE_BEFORE_ATTACH = """
+    import subprocess, sys
+    from scripts.agents.control_plane import execution_lease as lease
+    from scripts.agents.control_plane.state import State
+    state = State(sys.argv[1])
+    lease.acquire(state, worktree=sys.argv[2], task_id="doomed-supervisor-task", worker="w")
+    # Mirrors Supervisor._spawn exactly: start_new_session=True so this child
+    # outlives its parent -- the property that makes a supervisor death here
+    # ambiguous rather than provable. stdio is detached (not inherited from this
+    # 'supervisor') so the test's subprocess.run() sees real EOF/exit the instant
+    # this process exits, instead of hanging on the still-open pipe the long-lived
+    # grandchild would otherwise keep alive.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    print(f"READY {child.pid}", flush=True)
+    # Deliberately exits without ever calling attach_pid -- simulates the
+    # supervisor dying in the window between Popen() returning and the real
+    # worker pid being durably recorded.
+"""
+
+
+def _spawn_then_die_before_attach(db_path: Path, worktree: Path) -> int:
+    proc = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_ACQUIRE_SPAWN_AND_DIE_BEFORE_ATTACH), str(db_path), str(worktree)],
+        cwd=str(REPO_ROOT), stdout=subprocess.PIPE, text=True, check=True, timeout=30,
+    )
+    line = proc.stdout.strip().splitlines()[-1]
+    assert line.startswith("READY "), proc.stdout
+    return int(line.split()[1])
+
+
+def test_supervisor_death_before_attach_pid_never_frees_the_worktree_while_the_child_runs(disk_state, tmp_path):
+    child_pid = None
+    try:
+        child_pid = _spawn_then_die_before_attach(disk_state.db_path, tmp_path)
+        assert lease.pid_is_alive(child_pid), "the spawned child must actually be running"
+
+        row = disk_state.get_execution_lease(str(tmp_path))
+        assert row.status == "ACQUIRED"
+        assert row.spawn_pending is True
+        assert not lease.pid_is_alive(row.owner_pid), "the recorded 'supervisor' pid has genuinely exited"
+
+        # The periodic sweep must refuse to free this lease: the dead recorded pid
+        # is the supervisor's, not the still-running child's.
+        summary = lease.reconcile_stale_leases(disk_state)
+        assert summary == {"reclaimed": 0, "left_held": 1}
+        assert disk_state.get_execution_lease(str(tmp_path)).status == "ACQUIRED"
+
+        # A fresh acquirer racing in must also be refused, not just the sweep.
+        with pytest.raises(lease.ExecutionLeaseConflict):
+            lease.acquire(disk_state, worktree=str(tmp_path), task_id="second-writer", worker="w")
+
+        # The child is still the only process that was ever running in this
+        # worktree at any point in the test -- no second writer was ever admitted.
+        assert lease.pid_is_alive(child_pid)
+    finally:
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, signal.SIGKILL)
 
 
 # --------------------------------------------------------------------------- misc

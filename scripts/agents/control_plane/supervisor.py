@@ -356,14 +356,55 @@ class Supervisor:
         # Execute the wrapper from the Octarel/Control Center code checkout so
         # ``scripts.agents`` exists even when the selected project worktree is
         # a different repository. ``--repo-root`` still targets the task worktree.
-        process = self._spawn(argv, cwd=cp_code_root(), env=self._child_environment(task))
+        try:
+            process = self._spawn(argv, cwd=cp_code_root(), env=self._child_environment(task))
+        except Exception as exc:  # noqa: BLE001 - bad argv/OSError/permissions/missing interpreter, all fatal here
+            # Grok Build review (issue #29 follow-up), defect 1: without releasing
+            # here, the lease row stays ACQUIRED forever with this (live) supervisor
+            # recorded as owner. The supervisor never dies, so every future
+            # ``acquire`` correctly refuses to steal a live owner's lease, and this
+            # worktree becomes permanently unlaunchable for the rest of the daemon's
+            # life. Release using the generation the grant returned so this can never
+            # clobber a lease a legitimate new acquirer already won in the meantime.
+            task.state = TASK_BLOCKED
+            task.last_error = f"failed to spawn worker subprocess: {exc}"
+            if lease_grant is not None:
+                execution_lease.release_before_spawn(
+                    self.state, worktree=lease_grant.worktree, generation=lease_grant.generation,
+                    reason=f"spawn failed: {exc}",
+                )
+            self.state.upsert_task(task)
+            self.state.record_event(category="supervisor", task_id=task.id, level="error", message=task.last_error)
+            return task
         try:
             if os.getpgid(process.pid) == process.pid:
                 self._owned_process_groups.add(process.pid)
         except (AttributeError, ProcessLookupError, PermissionError, OSError):
             pass
         if lease_grant is not None:
-            execution_lease.attach_pid(self.state, worktree=lease_grant.worktree, generation=lease_grant.generation, pid=process.pid)
+            attached = execution_lease.attach_pid(
+                self.state, worktree=lease_grant.worktree, generation=lease_grant.generation, pid=process.pid
+            )
+            if not attached:
+                # Grok Build review, defect 2: the lease was reclaimed out from under
+                # us between winning the CAS and the subprocess actually starting --
+                # some other acquirer now legitimately owns this worktree. Proceeding
+                # to track this child as our own running task would make it a second,
+                # unrecognized writer inside a worktree we no longer own. We spawned
+                # it moments ago in this same call, so terminating it is safe and
+                # required; it can never legitimately continue.
+                self._terminate_owned_process(process)
+                task.state = TASK_BLOCKED
+                task.last_error = (
+                    f"execution lease for {worktree} was reclaimed before this worker's pid "
+                    "could be attached; terminated the just-spawned subprocess rather than run "
+                    "as an unrecognized owner"
+                )
+                self.state.upsert_task(task)
+                self.state.record_event(
+                    category="supervisor", task_id=task.id, level="error", message=task.last_error
+                )
+                return task
         self._processes[task.id] = process
         task.pid = process.pid
         task.worktree = str(worktree)

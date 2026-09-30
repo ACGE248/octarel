@@ -331,6 +331,16 @@ _WORKTREES_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("review_pr", "INTEGER"),
     ("review_head_sha", "TEXT"),
 )
+# ENG-PC-01 follow-up (Grok Build review): the spawn-in-flight flag that closes
+# the window between winning the execution lease and durably recording the real
+# worker subprocess's pid. See ``models.ExecutionLease.spawn_pending`` and
+# ``execution_lease._classify_owner``. Same forward-compatible-migration pattern
+# as the tuples above: an on-disk database from before this follow-up (the
+# ``execution_leases`` table itself shipped only one commit earlier) keeps
+# opening with no manual step.
+_EXECUTION_LEASES_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("spawn_pending", "INTEGER NOT NULL DEFAULT 0"),
+)
 _RUNBOOKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("codex_policy", "TEXT NOT NULL DEFAULT 'conserve'"),
     ("codex_auto_eligible", "INTEGER NOT NULL DEFAULT 0"),
@@ -462,6 +472,7 @@ class State:
             self._migrate_provider_states_columns()
             self._migrate_worktrees_columns()
             self._migrate_runbooks_columns()
+            self._migrate_execution_leases_columns()
             self._migrate_project_id_columns()
         except Exception:
             self._conn.rollback()
@@ -496,6 +507,13 @@ class State:
         for column, ddl in _RUNBOOKS_MIGRATED_COLUMNS:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE runbooks ADD COLUMN {column} {ddl}")
+
+    @_serialized
+    def _migrate_execution_leases_columns(self) -> None:
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(execution_leases)").fetchall()}
+        for column, ddl in _EXECUTION_LEASES_MIGRATED_COLUMNS:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE execution_leases ADD COLUMN {column} {ddl}")
 
     @_serialized
     def _migrate_project_id_columns(self) -> None:
@@ -1188,7 +1206,7 @@ class State:
             "UPDATE execution_leases SET "
             "generation = generation + 1, status = 'ACQUIRED', "
             "project_id = ?, task_id = ?, stable_task_id = ?, runbook_id = ?, worker = ?, "
-            "owner_host = ?, owner_pid = ?, owner_pid_create_time = ?, "
+            "owner_host = ?, owner_pid = ?, owner_pid_create_time = ?, spawn_pending = 1, "
             "acquired_at = ?, heartbeat_at = ?, released_at = NULL, release_reason = NULL, "
             "recovery_reason = ?, conflict_reason = NULL, updated_at = ? "
             "WHERE worktree = ? AND generation = ?",
@@ -1214,11 +1232,19 @@ class State:
         Guarded by the same ``generation`` the acquisition returned, so a lease
         reclaimed from under an acquirer in the narrow window between winning the
         CAS and the subprocess actually spawning is never silently overwritten.
+
+        Also clears ``spawn_pending``: this is the one durable write that proves a
+        real worker subprocess pid now exists, so it is the only place that flag
+        may be turned off (see ``execution_lease._classify_owner``). A ``False``
+        return means the generation no longer matched -- the lease was reclaimed
+        out from under the caller between acquisition and this call -- and the
+        caller must treat the just-spawned child as unowned rather than proceed.
         """
 
         now = utc_now_iso()
         cursor = self._conn.execute(
-            "UPDATE execution_leases SET owner_pid = ?, owner_pid_create_time = ?, heartbeat_at = ?, updated_at = ? "
+            "UPDATE execution_leases SET owner_pid = ?, owner_pid_create_time = ?, spawn_pending = 0, "
+            "heartbeat_at = ?, updated_at = ? "
             "WHERE worktree = ? AND generation = ? AND status = 'ACQUIRED'",
             (pid, pid_create_time, now, now, worktree, expected_generation),
         )
@@ -1270,9 +1296,35 @@ class State:
         now = utc_now_iso()
         cursor = self._conn.execute(
             "UPDATE execution_leases SET status = 'RELEASED', released_at = ?, release_reason = ?, "
-            "recovery_reason = ?, updated_at = ? "
+            "recovery_reason = ?, spawn_pending = 0, updated_at = ? "
             "WHERE worktree = ? AND generation = ? AND status = 'ACQUIRED'",
             (now, reason, reason, now, worktree, expected_generation),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_serialized
+    def release_execution_lease_before_spawn(self, *, worktree: str, expected_generation: int, reason: str) -> bool:
+        """Undo a just-won acquisition whose spawn attempt never produced a live worker.
+
+        Distinct from ``release_execution_lease`` (a graceful self-release by the pid
+        currently recorded as owner) and ``force_release_execution_lease`` (a reclaim
+        that required independent proof the recorded owner is dead): this is neither.
+        It is the acquiring process's own synchronous knowledge, in the same call stack
+        that won the CAS, that ``Supervisor._spawn`` raised before any subprocess pid
+        could ever be attached -- there is no owner-death proof to check because the
+        acquirer is not dead, it is the one calling this. CAS'd on ``generation`` (the
+        same guard every other mutation here uses) rather than ``owner_pid``, so a
+        lease already reclaimed out from under this caller for an unrelated reason is
+        never clobbered by a late cleanup call.
+        """
+
+        now = utc_now_iso()
+        cursor = self._conn.execute(
+            "UPDATE execution_leases SET status = 'RELEASED', released_at = ?, release_reason = ?, "
+            "spawn_pending = 0, updated_at = ? "
+            "WHERE worktree = ? AND generation = ? AND status = 'ACQUIRED'",
+            (now, reason, now, worktree, expected_generation),
         )
         self._conn.commit()
         return cursor.rowcount == 1

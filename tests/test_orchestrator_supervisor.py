@@ -471,6 +471,80 @@ def test_terminate_task_frees_the_execution_lease_for_a_new_launch(tmp_path, mon
     assert result.state == TASK_RUNNING
 
 
+def test_launch_task_spawn_failure_releases_the_lease_and_leaves_worktree_launchable(tmp_path, monkeypatch):
+    """Grok Build review (issue #29 follow-up), defect 1: a synchronous ``_spawn``
+    failure (bad argv, ``OSError``, permissions, missing interpreter) must not
+    strand the lease ``ACQUIRED`` under this (live) supervisor's own pid forever --
+    that would make the worktree permanently unlaunchable for the daemon's life.
+    """
+
+    registry = load_registry()
+    state = State(":memory:")
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+
+    def _boom(argv, cwd, env=None):
+        raise OSError("no such file or directory: fake-interpreter")
+
+    monkeypatch.setattr(supervisor, "_spawn", _boom)
+    task = _write_task(tmp_path)
+    result = supervisor.launch_task(task)
+
+    assert result.state == TASK_BLOCKED
+    assert "failed to spawn" in (result.last_error or "").lower()
+    lease_row = state.get_execution_lease(str(tmp_path))
+    assert lease_row.status == "RELEASED"
+    assert task.id not in supervisor.live_task_ids()
+
+    # The worktree must still be launchable immediately afterwards, not stuck.
+    class FakeProcess:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
+    second = _write_task(tmp_path)
+    second.id = "second"
+    result2 = supervisor.launch_task(second)
+    assert result2.state == TASK_RUNNING
+
+
+def test_launch_task_terminates_the_child_when_attach_pid_loses_the_race(tmp_path, monkeypatch):
+    """Grok Build review (issue #29 follow-up), defect 2 (the ``attach_pid`` return
+    value): if the lease was reclaimed out from under this acquirer between winning
+    the CAS and the subprocess starting, proceeding to track the just-spawned child
+    as this task's own running process would admit a second, unrecognized writer
+    into a worktree this process no longer owns. A real subprocess and a real
+    SIGTERM/SIGKILL, so the assertion is that the child is actually dead -- not
+    merely that bookkeeping forgot about it.
+    """
+
+    registry = load_registry()
+    state = State(":memory:")
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: process)
+    monkeypatch.setattr(
+        "scripts.agents.control_plane.supervisor.execution_lease.attach_pid", lambda *a, **k: False
+    )
+
+    task = _write_task(tmp_path)
+    try:
+        result = supervisor.launch_task(task)
+
+        assert result.state == TASK_BLOCKED
+        assert "reclaimed" in (result.last_error or "").lower()
+        assert task.id not in supervisor.live_task_ids()
+        assert process.wait(timeout=5) is not None  # actually terminated, not merely disowned
+    finally:
+        if process.poll() is None:  # pragma: no cover - safety net if the assertion above failed
+            process.kill()
+            process.wait()
+
+
 def test_poll_once_frees_the_execution_lease_on_completion(tmp_path, monkeypatch):
     registry = load_registry()
     state = State(":memory:")
