@@ -17,12 +17,6 @@ import pytest
 
 from scripts.agents import orchestrate
 from scripts.agents.adapter_contract import (
-    FAILURE_NONE,
-    FAILURE_NOT_RUN,
-    FAILURE_PERMISSION_DENIED,
-    FAILURE_READ_ONLY_VIOLATION,
-    FAILURE_TIMEOUT,
-    FAILURE_WORKER_ERROR,
     MODEL_DISCOVERY_NATIVE_VERIFIED,
     MODEL_DISCOVERY_RUNTIME_POOL,
     MODEL_DISCOVERY_STATIC,
@@ -37,7 +31,17 @@ from scripts.agents.control_plane.usage_telemetry import (
     CLASS_NOT_EXPOSED,
     CLASS_UNKNOWN,
 )
-from scripts.agents.manifest import RESULT_FAIL, RESULT_PASS, RunRecord
+from scripts.agents.manifest import (
+    FAILURE_NONE,
+    FAILURE_NOT_RUN,
+    FAILURE_PERMISSION_DENIED,
+    FAILURE_READ_ONLY_VIOLATION,
+    FAILURE_TIMEOUT,
+    FAILURE_WORKER_ERROR,
+    RESULT_FAIL,
+    RESULT_PASS,
+    RunRecord,
+)
 from scripts.agents.registry import PERMISSION_STANDARD, load_registry
 
 REGISTRY = load_registry()

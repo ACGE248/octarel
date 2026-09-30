@@ -37,12 +37,6 @@ from .control_plane.usage_telemetry import (
     metric,
 )
 from .manifest import (
-    FAILURE_NONE,
-    FAILURE_NOT_RUN,
-    FAILURE_PERMISSION_DENIED,
-    FAILURE_READ_ONLY_VIOLATION,
-    FAILURE_TIMEOUT,
-    FAILURE_WORKER_ERROR,
     RESULT_FAIL,
     RESULT_PASS,
     RunRecord,
