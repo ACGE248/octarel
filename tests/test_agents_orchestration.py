@@ -28,6 +28,7 @@ from scripts.agents.registry import Registry, RegistryError, load_registry
 from scripts.agents.runner import (
     run_worker_process,
     structured_actual_model,
+    structured_actual_model_report,
     structured_failure,
     worker_action_denied,
     worker_boundary_evidence,
@@ -1085,6 +1086,25 @@ def test_structured_actual_model_prefers_reported_identifier():
     assert structured_actual_model("plain output", "requested-model") == "requested-model"
 
 
+def test_structured_actual_model_report_flags_only_a_genuine_cli_report_as_measured():
+    """The three fallback paths to ``requested_model`` must all report ``measured=False``;
+    only a uniquely-identified ``modelUsage`` entry is a genuine CLI report."""
+
+    # Output is not JSON at all.
+    assert structured_actual_model_report("plain output", "requested-model") == ("requested-model", False)
+    # JSON with no modelUsage block.
+    assert structured_actual_model_report('{"result":"ok"}', "requested-model") == ("requested-model", False)
+    # Exactly one reported name uniquely matching the requested model: measured.
+    output = '{"modelUsage":{"grok-4.6-build":{"modelCalls":1}}}'
+    assert structured_actual_model_report(output, "grok-4.6") == ("grok-4.6-build", True)
+    # Exactly one reported name total, even without a name match: still a genuine report.
+    output = '{"modelUsage":{"some-other-name":{"modelCalls":1}}}'
+    assert structured_actual_model_report(output, "requested-model") == ("some-other-name", True)
+    # Multiple reported names, none uniquely matching the requested model: ambiguous, falls back.
+    output = '{"modelUsage":{"model-a":{"modelCalls":1},"model-b":{"modelCalls":1}}}'
+    assert structured_actual_model_report(output, "requested-model") == ("requested-model", False)
+
+
 def test_read_only_worker_flagged_when_it_modifies_the_tree(git_repo):
     registry = _registry_with(
         name="antigravity-focused-tests",
@@ -1093,8 +1113,46 @@ def test_read_only_worker_flagged_when_it_modifies_the_tree(git_repo):
     )
     result = _run(registry, git_repo, "antigravity-focused-tests")
     assert result.record.result == "FAIL"
+    assert result.record.read_only_violation is True
+    assert result.manifest["failure_category"] == "READ_ONLY_VIOLATION"
     assert "sneaky_edit.txt" in result.record.files_changed
     assert "modified the working tree" in " ".join(result.record.notes)
+
+
+@pytest.mark.parametrize("exit_status", [1, 124])
+def test_write_worker_measured_denial_sets_permission_denied_category(git_repo, exit_status):
+    denial = json.dumps({"permission_denials": [{"tool_name": "Bash"}]})
+    registry = _registry_with(
+        name="claude-code",
+        cli_bin="sh",
+        cli_template=("-c", f"printf '%s' '{denial}'; exit {exit_status}", "--"),
+    )
+
+    result = _run(
+        registry, git_repo, "claude-code", role="primary-implementation", allow_write=True,
+    )
+
+    assert result.record.result == "FAIL"
+    assert result.record.boundary_evidence["class"] == "MEASURED"
+    assert result.record.boundary_evidence["worker_action_denied"] is True
+    assert result.manifest["failure_category"] == "PERMISSION_DENIED"
+
+
+def test_write_worker_absent_denial_field_is_unknown_and_not_failure(git_repo):
+    registry = _registry_with(
+        name="claude-code",
+        cli_bin="sh",
+        cli_template=("-c", "printf '%s' '{\"result\":\"completed\"}'", "--"),
+    )
+
+    result = _run(
+        registry, git_repo, "claude-code", role="primary-implementation", allow_write=True,
+    )
+
+    assert result.record.result == "PASS"
+    assert result.record.boundary_evidence["class"] == "UNKNOWN"
+    assert result.record.boundary_evidence["worker_action_denied"] is None
+    assert result.manifest["failure_category"] == "NONE"
 
 
 def test_read_only_worker_detects_edit_to_already_dirty_file(git_repo):

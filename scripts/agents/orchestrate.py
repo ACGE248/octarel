@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import model_catalog, native_models, subagents
+from .adapter_contract import capabilities_for, classify_finished_run
 from .graph_context import build_graph_context
 from .manifest import (
     RESULT_BLOCKED,
@@ -64,8 +65,7 @@ from .runner import (
     assert_write_safety,
     repo_root,
     run_worker_process,
-    structured_actual_model,
-    structured_failure,
+    structured_actual_model_report,
     worker_boundary_evidence,
     worktree_snapshot,
     write_lock,
@@ -264,8 +264,7 @@ def _run_primary(
                 f"{outcome.evidence['bot_count']} read-only bots produced findings (advisory, not independent review)"
             )
             if outcome.blocked_reason:
-                record.result = RESULT_BLOCKED
-                record.notes.append(outcome.blocked_reason)
+                record.set_result(RESULT_BLOCKED, note=outcome.blocked_reason)
                 return None
             if outcome.prompt_section:
                 command = rebuild(outcome.prompt_section)
@@ -505,10 +504,12 @@ def run_delegation(
 
     if unresolved_pool_model:
         # Never widen to a stronger, subscription, or paid model: the stage blocks with every rejection recorded.
-        record.result = RESULT_DRY_RUN if dry_run else RESULT_BLOCKED
-        record.notes.append(
-            f"no eligible free OpenCode model for {role}: {pool_selection.reason}. "
-            "No other model or worker was invoked and no paid/API fallback was attempted."
+        record.set_result(
+            RESULT_DRY_RUN if dry_run else RESULT_BLOCKED,
+            note=(
+                f"no eligible free OpenCode model for {role}: {pool_selection.reason}. "
+                "No other model or worker was invoked and no paid/API fallback was attempted."
+            ),
         )
         return finish("[dry run: worker not executed]\n" if dry_run else "")
     if pool_selection is not None:
@@ -520,18 +521,19 @@ def run_delegation(
 
     # Overflow / disabled workers are never used implicitly.
     if not worker.enabled and not allow_overflow:
-        record.result = RESULT_BLOCKED
-        record.notes.append(
-            f"{worker_name} is disabled in the registry (cost_class={worker.cost_class}); "
-            "pass --allow-overflow and confirm authorization. No automatic paid fallback is performed."
+        record.set_result(
+            RESULT_BLOCKED,
+            note=(
+                f"{worker_name} is disabled in the registry (cost_class={worker.cost_class}); "
+                "pass --allow-overflow and confirm authorization. No automatic paid fallback is performed."
+            ),
         )
         return finish("")
 
     # A dry run previews the (redacted) command without executing it, even when
     # the worker CLI is not installed locally yet.
     if dry_run:
-        record.result = RESULT_DRY_RUN
-        record.notes.append("dry run: command was built and validated but not executed")
+        record.set_result(RESULT_DRY_RUN, note="dry run: command was built and validated but not executed")
         if bot_plan is not None:
             record.notes.append(f"dry run: bot fan-out {'planned' if bot_plan.enabled else 'declined'}: {bot_plan.reason}")
         if not worker.cli_available():
@@ -540,10 +542,12 @@ def run_delegation(
 
     # Unsupported worker: CLI is not installed. Record and stop; do not fall back.
     if not worker.cli_available():
-        record.result = RESULT_UNSUPPORTED
-        record.notes.append(
-            f"CLI {worker.cli_bin!r} for {worker_name} is not installed or not on PATH. "
-            "Implement/verify the local CLI, then re-run. No other worker was invoked."
+        record.set_result(
+            RESULT_UNSUPPORTED,
+            note=(
+                f"CLI {worker.cli_bin!r} for {worker_name} is not installed or not on PATH. "
+                "Implement/verify the local CLI, then re-run. No other worker was invoked."
+            ),
         )
         return finish("")
 
@@ -552,14 +556,12 @@ def run_delegation(
     try:
         assert_write_safety(worker, root, allow_write=allow_write, lock_dir=checkout_lock_dir)
     except WriteSafetyError as exc:
-        record.result = RESULT_BLOCKED
-        record.notes.append(f"write-safety block: {exc}")
+        record.set_result(RESULT_BLOCKED, note=f"write-safety block: {exc}")
         return finish("")
 
     preset_block_reason = _agent_preset_block_reason(root, command)
     if preset_block_reason is not None:
-        record.result = RESULT_BLOCKED
-        record.notes.append(preset_block_reason)
+        record.set_result(RESULT_BLOCKED, note=preset_block_reason)
         return finish("")
 
     before = worktree_snapshot(root)
@@ -575,8 +577,7 @@ def run_delegation(
             objective=user_prompt, scope_paths=resolved_scopes, project_id=project_id, worker_dir=worker_dir,
         )
     except WriteSafetyError as exc:
-        record.result = RESULT_BLOCKED
-        record.notes.append(f"write-safety block: {exc}")
+        record.set_result(RESULT_BLOCKED, note=f"write-safety block: {exc}")
         return finish("")
     if ran is None:
         record.duration_seconds = round(_time.monotonic() - started, 3)
@@ -588,32 +589,30 @@ def run_delegation(
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
     record.actual_provider = worker.provider
-    record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
+    record.actual_model, record.actual_model_measured = structured_actual_model_report(
+        log_text, model or worker.effective_model
+    )
     record.actual_intensity = resolved_intensity
-    if worker.is_read_only:
-        record.boundary_evidence = worker_boundary_evidence(log_text)
+    record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     changed_during_run = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
     record.files_changed = changed_during_run
 
     if worker.is_read_only and changed_during_run:
-        record.result = RESULT_FAIL
-        record.notes.append(
-            "read-only worker modified the working tree: "
-            + ", ".join(changed_during_run)
-            + ". Treat as a contract violation."
+        record.read_only_violation = True
+        record.set_result(
+            RESULT_FAIL,
+            note=(
+                "read-only worker modified the working tree: "
+                + ", ".join(changed_during_run)
+                + ". Treat as a contract violation."
+            ),
         )
         return finish(log_text)
 
-    failure_reason = structured_failure(log_text)
-    if failure_reason:
-        record.result = RESULT_FAIL
-        record.notes.append(failure_reason)
-    elif exit_status != 0:
-        record.result = RESULT_FAIL
-    else:
-        record.result = RESULT_PASS
+    result, failure_reason = classify_finished_run(exit_status=exit_status, log_text=log_text)
+    record.set_result(result, note=failure_reason)
     if pool_selection is not None and record.result == RESULT_FAIL:
         _cool_down_failed_pool_model(record, model, failure_reason or log_text[-2000:])
     return finish(log_text)
@@ -719,7 +718,11 @@ def run_session(
             raise ValidationError(
                 f"permission_profile {permission_profile!r} cannot be used with read-only worker {worker_name!r}"
             )
-        if not worker.supports_permission_profile(permission_profile):
+        # Route the actual decision through the typed adapter capability contract
+        # (scripts.agents.adapter_contract) instead of a second, parallel copy of
+        # Worker.supports_permission_profile's rule, so there is one authority for
+        # which profiles a worker supports.
+        if permission_profile not in capabilities_for(worker).permission_profiles:
             raise ValidationError(f"worker {worker_name!r} does not support permission_profile {permission_profile!r}")
 
     bundle = compose_policy_bundle(
@@ -793,8 +796,7 @@ def run_session(
         return DelegationResult(record=record, manifest=manifest, exit_code=exit_code)
 
     if dry_run:
-        record.result = RESULT_DRY_RUN
-        record.notes.append("dry run: command was built and validated but not executed")
+        record.set_result(RESULT_DRY_RUN, note="dry run: command was built and validated but not executed")
         if bot_plan is not None:
             record.notes.append(f"dry run: bot fan-out {'planned' if bot_plan.enabled else 'declined'}: {bot_plan.reason}")
         if not worker.cli_available():
@@ -802,10 +804,12 @@ def run_session(
         return finish("[dry run: worker not executed]\n")
 
     if not worker.cli_available():
-        record.result = RESULT_UNSUPPORTED
-        record.notes.append(
-            f"CLI {worker.cli_bin!r} for {worker_name} is not installed or not on PATH. "
-            "Implement/verify the local CLI, then re-run. No other worker was invoked."
+        record.set_result(
+            RESULT_UNSUPPORTED,
+            note=(
+                f"CLI {worker.cli_bin!r} for {worker_name} is not installed or not on PATH. "
+                "Implement/verify the local CLI, then re-run. No other worker was invoked."
+            ),
         )
         return finish("")
 
@@ -813,14 +817,12 @@ def run_session(
     try:
         assert_write_safety(worker, root, allow_write=True, lock_dir=checkout_lock_dir)
     except WriteSafetyError as exc:
-        record.result = RESULT_BLOCKED
-        record.notes.append(f"write-safety block: {exc}")
+        record.set_result(RESULT_BLOCKED, note=f"write-safety block: {exc}")
         return finish("")
 
     preset_block_reason = _agent_preset_block_reason(root, command)
     if preset_block_reason is not None:
-        record.result = RESULT_BLOCKED
-        record.notes.append(preset_block_reason)
+        record.set_result(RESULT_BLOCKED, note=preset_block_reason)
         return finish("")
 
     before = worktree_snapshot(root)
@@ -836,8 +838,7 @@ def run_session(
             objective=prompt, scope_paths=session_scopes, project_id=project_id, worker_dir=worker_dir,
         )
     except WriteSafetyError as exc:
-        record.result = RESULT_BLOCKED
-        record.notes.append(f"write-safety block: {exc}")
+        record.set_result(RESULT_BLOCKED, note=f"write-safety block: {exc}")
         return finish("")
     if ran is None:
         record.duration_seconds = round(_time.monotonic() - started, 3)
@@ -849,22 +850,17 @@ def run_session(
     record.exit_status = exit_status
     record.actual_execution_system = worker.execution_system
     record.actual_provider = worker.provider
-    record.actual_model = structured_actual_model(log_text, model or worker.effective_model)
+    record.actual_model, record.actual_model_measured = structured_actual_model_report(
+        log_text, model or worker.effective_model
+    )
     record.actual_intensity = resolved_intensity
-    if worker.is_read_only:
-        record.boundary_evidence = worker_boundary_evidence(log_text)
+    record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     record.files_changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
 
-    failure_reason = structured_failure(log_text)
-    if failure_reason:
-        record.result = RESULT_FAIL
-        record.notes.append(failure_reason)
-    elif exit_status != 0:
-        record.result = RESULT_FAIL
-    else:
-        record.result = RESULT_PASS
+    result, failure_reason = classify_finished_run(exit_status=exit_status, log_text=log_text)
+    record.set_result(result, note=failure_reason)
     return finish(log_text)
 
 
