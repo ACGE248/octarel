@@ -514,6 +514,29 @@ def test_structured_denial_is_not_reclassified_as_timeout(project, fakes, monkey
     assert all("tool action was denied" in bot["failure_reason"] for bot in _fanout(result)["bots"])
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"stopReason": "timeout"},
+        {"stopReason": "cancelled"},
+        {"response": ""},
+        {"is_error": True},
+        {"subtype": "failed"},
+    ],
+)
+def test_exit_124_without_denial_stays_timeout(project, fakes, monkeypatch, payload):
+    monkeypatch.setattr(
+        subagents,
+        "run_worker_process_group",
+        lambda command, root, *, timeout, on_group=None: (124, json.dumps(payload)),
+    )
+
+    result = _run(_registry(fakes), project)
+
+    assert {bot["result"] for bot in _fanout(result)["bots"]} == {"TIMEOUT"}
+    assert all("timed out after" in bot["failure_reason"] for bot in _fanout(result)["bots"])
+
+
 def test_bots_may_use_at_most_a_third_of_the_run_budget(project, fakes, monkeypatch):
     seen = []
     real = subagents.run_worker_process_group

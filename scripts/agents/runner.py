@@ -362,24 +362,59 @@ def _structured_denial(payload: dict[str, object] | None) -> bool:
     )
 
 
-def _unstructured_output(output: str) -> str:
-    """Return raw CLI text outside a leading structured JSON result."""
+def _structured_values_and_unstructured_output(output: str) -> tuple[list[object], str]:
+    """Split line-oriented CLI JSON values from genuinely unstructured text.
 
-    stripped = output.lstrip()
-    try:
-        payload, end = json.JSONDecoder().raw_decode(stripped)
-    except (json.JSONDecodeError, TypeError):
-        return output
-    return stripped[end:] if isinstance(payload, dict) else output
+    Headless CLIs may emit more than one JSON value, with diagnostic prose
+    before, between, or after them.  Only values beginning a logical output
+    line (or immediately following another decoded value) are treated as CLI
+    records, so a JSON example embedded in model-authored prose is not
+    mistaken for transport metadata.
+    """
+
+    decoder = json.JSONDecoder()
+    values: list[object] = []
+    spans: list[tuple[int, int]] = []
+    position = 0
+    while position < len(output):
+        line_end = output.find("\n", position)
+        if line_end == -1:
+            line_end = len(output)
+        candidate = position
+        while candidate < line_end and output[candidate] in " \t\r":
+            candidate += 1
+        try:
+            value, end = decoder.raw_decode(output, candidate)
+        except (json.JSONDecodeError, TypeError):
+            position = line_end + 1
+            continue
+        values.append(value)
+        spans.append((candidate, end))
+        position = end
+
+    unstructured: list[str] = []
+    previous_end = 0
+    for start, end in spans:
+        unstructured.append(output[previous_end:start])
+        previous_end = end
+    unstructured.append(output[previous_end:])
+    return values, "".join(unstructured)
+
+
+def worker_action_denied(output: str) -> bool:
+    """Return whether CLI evidence proves that a worker tool action was denied."""
+
+    values, unstructured = _structured_values_and_unstructured_output(output)
+    return any(_structured_denial(value) for value in values if isinstance(value, dict)) or (
+        "tool permission requests are auto-denied" in unstructured.lower()
+    )
 
 
 def structured_failure(output: str) -> str | None:
     """Return a failure reason exposed by a structured CLI result, if any."""
 
     payload = _first_json_object(output)
-    if _structured_denial(payload):
-        return "worker tool action was denied by the configured read-only permission boundary"
-    if "tool permission requests are auto-denied" in _unstructured_output(output).lower():
+    if worker_action_denied(output):
         return "worker tool action was denied by the configured read-only permission boundary"
     if payload is None:
         return None
