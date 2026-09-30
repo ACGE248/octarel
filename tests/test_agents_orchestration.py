@@ -1113,8 +1113,46 @@ def test_read_only_worker_flagged_when_it_modifies_the_tree(git_repo):
     )
     result = _run(registry, git_repo, "antigravity-focused-tests")
     assert result.record.result == "FAIL"
+    assert result.record.read_only_violation is True
+    assert result.manifest["failure_category"] == "READ_ONLY_VIOLATION"
     assert "sneaky_edit.txt" in result.record.files_changed
     assert "modified the working tree" in " ".join(result.record.notes)
+
+
+@pytest.mark.parametrize("exit_status", [1, 124])
+def test_write_worker_measured_denial_sets_permission_denied_category(git_repo, exit_status):
+    denial = json.dumps({"permission_denials": [{"tool_name": "Bash"}]})
+    registry = _registry_with(
+        name="claude-code",
+        cli_bin="sh",
+        cli_template=("-c", f"printf '%s' '{denial}'; exit {exit_status}", "--"),
+    )
+
+    result = _run(
+        registry, git_repo, "claude-code", role="primary-implementation", allow_write=True,
+    )
+
+    assert result.record.result == "FAIL"
+    assert result.record.boundary_evidence["class"] == "MEASURED"
+    assert result.record.boundary_evidence["worker_action_denied"] is True
+    assert result.manifest["failure_category"] == "PERMISSION_DENIED"
+
+
+def test_write_worker_absent_denial_field_is_unknown_and_not_failure(git_repo):
+    registry = _registry_with(
+        name="claude-code",
+        cli_bin="sh",
+        cli_template=("-c", "printf '%s' '{\"result\":\"completed\"}'", "--"),
+    )
+
+    result = _run(
+        registry, git_repo, "claude-code", role="primary-implementation", allow_write=True,
+    )
+
+    assert result.record.result == "PASS"
+    assert result.record.boundary_evidence["class"] == "UNKNOWN"
+    assert result.record.boundary_evidence["worker_action_denied"] is None
+    assert result.manifest["failure_category"] == "NONE"
 
 
 def test_read_only_worker_detects_edit_to_already_dirty_file(git_repo):

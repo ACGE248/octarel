@@ -593,8 +593,7 @@ def run_delegation(
         log_text, model or worker.effective_model
     )
     record.actual_intensity = resolved_intensity
-    if worker.is_read_only:
-        record.boundary_evidence = worker_boundary_evidence(log_text)
+    record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     changed_during_run = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
@@ -855,8 +854,7 @@ def run_session(
         log_text, model or worker.effective_model
     )
     record.actual_intensity = resolved_intensity
-    if worker.is_read_only:
-        record.boundary_evidence = worker_boundary_evidence(log_text)
+    record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     record.files_changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
