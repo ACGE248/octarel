@@ -248,10 +248,16 @@ def run_recovery(state: State, repo_root: Path, *, project_id: str | None = None
         # scoping was meant to close.
         annotated = state.list_worktrees(project_id=project_id)
     task_summary = reconcile_tasks(state, project_id=project_id)
+    # ENG-PC-01 (issue #29): free only execution leases whose owner this same
+    # ``pid_is_alive`` evidence already proves dead -- the same startup moment
+    # ``reconcile_tasks`` above uses it for, never a separate/weaker check.
+    from .execution_lease import reconcile_stale_leases
+
+    lease_summary = reconcile_stale_leases(state, project_id=project_id)
     state.record_event(
         category="recovery",
         level="info",
-        message=f"startup recovery: {len(annotated)} worktrees observed, {task_summary}",
+        message=f"startup recovery: {len(annotated)} worktrees observed, {task_summary}, leases {lease_summary}",
         project_id=project_id,
     )
-    return {"worktrees": annotated, "tasks": task_summary}
+    return {"worktrees": annotated, "tasks": task_summary, "execution_leases": lease_summary}

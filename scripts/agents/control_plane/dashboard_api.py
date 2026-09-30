@@ -409,10 +409,23 @@ def _resources_snapshot(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def _task_to_dict(task: Any, *, superseded: bool = False) -> dict[str, Any]:
+def _task_to_dict(task: Any, *, superseded: bool = False, state: Any = None) -> dict[str, Any]:
     from .models import task_projection
 
+    execution_lease_facts = None
+    if state is not None and task.worktree:
+        from .execution_lease import lease_facts
+
+        facts = lease_facts(state, task.worktree)
+        # ENG-PC-01 (issue #29): only ever attach the lease currently bound to
+        # *this* task -- a worktree can be reused across tasks over time (its
+        # dedicated worktree is reassigned once free), so a stale lease row a
+        # prior task left behind must never render as if it described this one.
+        if facts is not None and facts.get("task_id") == task.id:
+            execution_lease_facts = facts
+
     return {
+        "execution_lease": execution_lease_facts,
         "superseded": superseded,
         "id": task.id,
         "task_ref": task.task_ref,
@@ -1185,7 +1198,7 @@ def create_app(
     @app.get("/api/tasks")
     def tasks() -> list[dict[str, Any]]:
         _runs, old_tasks = superseded()
-        return [_task_to_dict(t, superseded=t.id in old_tasks) for t in scoped_tasks()]
+        return [_task_to_dict(t, superseded=t.id in old_tasks, state=ctx.state) for t in scoped_tasks()]
 
     @app.get("/api/processes")
     def processes() -> list[dict[str, Any]]:
@@ -1837,7 +1850,11 @@ def create_app(
     @app.get("/api/attention")
     def attention() -> dict[str, Any]:
         old_runs, old_tasks = superseded()
-        failed_or_blocked = [_task_to_dict(t) for t in scoped_tasks() if t.state in ("FAILED", "BLOCKED") and t.id not in old_tasks]
+        failed_or_blocked = [
+            _task_to_dict(t, state=ctx.state)
+            for t in scoped_tasks()
+            if t.state in ("FAILED", "BLOCKED") and t.id not in old_tasks
+        ]
         troubled_providers = [
             _provider_to_dict(p, registry=ctx.registry, tasks=scoped_tasks())
             for p in ctx.state.list_provider_states()
@@ -1848,7 +1865,20 @@ def create_app(
             for r in scoped_runbooks()
             if r.status in ("FAILED", "DEADLINE_REACHED", "OWNER_ACTION_REQUIRED", "BLOCKED") and r.id not in old_runs
         ]
-        return {"tasks": failed_or_blocked, "providers": troubled_providers, "runbooks": troubled_runbooks}
+        from .execution_lease import stale_leases
+
+        # ENG-PC-01 (issue #29): a stale execution lease (owner proven dead) is
+        # a distinct attention condition from a BLOCKED task -- the task that
+        # held it may already be terminal, or another task's launch may be the
+        # one currently blocked on it; either way this is real evidence, never
+        # inferred from a message string.
+        troubled_leases = stale_leases(ctx.state, project_id=ctx.selected_project_id)
+        return {
+            "tasks": failed_or_blocked,
+            "providers": troubled_providers,
+            "runbooks": troubled_runbooks,
+            "execution_leases": troubled_leases,
+        }
 
     @app.get("/api/roadmap")
     def roadmap() -> list[dict[str, Any]]:
@@ -2156,7 +2186,7 @@ def create_app(
         body = _runbook_to_dict(runbook, state=ctx.state, registry=ctx.registry)
         if runbook.task_id:
             task = ctx.state.get_task(runbook.task_id)
-            body["task"] = _task_to_dict(task) if task else None
+            body["task"] = _task_to_dict(task, state=ctx.state) if task else None
         body["usage_governance"] = ctx.state.get_usage_governance(runbook.id)
         body["events"] = [
             {

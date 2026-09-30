@@ -31,6 +31,7 @@ from ..runner import (
     current_branch,
     sanitized_subprocess_env,
 )
+from . import execution_lease
 from .models import (
     KIND_WRITE,
     LAUNCH_SESSION,
@@ -187,6 +188,9 @@ class Supervisor:
                     expected_pid=owned_pid,
                     project_id=task.project_id,
                 )
+                execution_lease.release(
+                    self.state, worktree=task.worktree, expected_pid=owned_pid, reason="task cancelled"
+                )
         self._processes.pop(task_id, None)
         return True
 
@@ -322,6 +326,32 @@ class Supervisor:
                 self.state.upsert_task(task)
                 return task
 
+            # ENG-PC-01 (issue #29): the durable, CAS'd execution-ownership gate.
+            # ``assert_write_safety`` above is a best-effort text-file pre-check
+            # that two racing daemon processes could both pass before either
+            # writes ``.write-lock``; this is the actual atomic refusal point,
+            # enforced by the database rather than by reading a file.
+            try:
+                lease_grant = execution_lease.acquire(
+                    self.state,
+                    worktree=str(worktree),
+                    task_id=task.id,
+                    project_id=task.project_id,
+                    stable_task_id=self._stable_task_id(task),
+                    runbook_id=task.runbook_id,
+                    worker=task.worker,
+                )
+            except execution_lease.ExecutionLeaseConflict as exc:
+                task.state = TASK_BLOCKED
+                task.last_error = f"execution lease conflict: {exc.reason}"
+                self.state.upsert_task(task)
+                self.state.record_event(
+                    category="supervisor", task_id=task.id, level="warning", message=task.last_error
+                )
+                return task
+        else:
+            lease_grant = None
+
         argv = self._build_argv(task, dry_run=dry_run)
         # Execute the wrapper from the Octarel/Control Center code checkout so
         # ``scripts.agents`` exists even when the selected project worktree is
@@ -332,6 +362,8 @@ class Supervisor:
                 self._owned_process_groups.add(process.pid)
         except (AttributeError, ProcessLookupError, PermissionError, OSError):
             pass
+        if lease_grant is not None:
+            execution_lease.attach_pid(self.state, worktree=lease_grant.worktree, generation=lease_grant.generation, pid=process.pid)
         self._processes[task.id] = process
         task.pid = process.pid
         task.worktree = str(worktree)
@@ -346,6 +378,18 @@ class Supervisor:
             message=f"launched pid={process.pid} worker={task.worker} dry_run={dry_run}",
         )
         return task
+
+    @staticmethod
+    def _stable_task_id(task: Task) -> str | None:
+        """Best-effort, informational only: never blocks or is trusted for CAS."""
+
+        from ..validation import ValidationError
+        from .intake import stable_task_id
+
+        try:
+            return stable_task_id(task.task_ref)
+        except ValidationError:
+            return None
 
     def poll_once(self) -> list[Task]:
         """Check every process this instance launched; update+persist any that finished.
@@ -395,6 +439,11 @@ class Supervisor:
                     level="info" if return_code == 0 else "error",
                     message=f"pid={task.pid} exited {return_code}",
                 )
+                if task.worktree:
+                    execution_lease.release(
+                        self.state, worktree=task.worktree, expected_pid=process.pid,
+                        reason=f"task exited {return_code}",
+                    )
                 finished.append(task)
                 # The wrapper is done, but a misbehaving descendant (browser,
                 # test server, provider helper) may still hold the owned
@@ -573,6 +622,10 @@ class Supervisor:
                 message=task.last_error,
             )
             finished.append(task)
+        # ENG-PC-01: a recovered task's dead pid is exactly the proof
+        # ``reconcile_stale_leases`` requires to free its execution lease --
+        # never a timeout, never an executable-name match.
+        execution_lease.reconcile_stale_leases(self.state)
         return finished
 
     def live_task_ids(self) -> frozenset[str]:

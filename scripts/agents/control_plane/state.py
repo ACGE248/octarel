@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable, TypeVar
 from .models import (
     PERMISSION_STANDARD,
     Event,
+    ExecutionLease,
     ProviderState,
     Runbook,
     Task,
@@ -226,6 +227,35 @@ CREATE TABLE IF NOT EXISTS advancements (
     updated_at TEXT NOT NULL
 );
 
+-- ENG-PC-01 (issue #29): durable execution-ownership record, keyed by worktree
+-- (the actually-contended resource) rather than by task, so two different tasks
+-- racing for the same worktree are refused exactly like the same task racing
+-- itself. ``generation`` is the compare-and-swap guard every acquisition/release
+-- writes through; see ``execution_lease.py`` for the mechanism and
+-- ``models.ExecutionLease`` for the invariant this composes with (not duplicates)
+-- alongside the advancement lease, the ``.write-lock`` file and task intake claims.
+CREATE TABLE IF NOT EXISTS execution_leases (
+    worktree TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'RELEASED',
+    project_id TEXT,
+    task_id TEXT,
+    stable_task_id TEXT,
+    runbook_id TEXT,
+    worker TEXT,
+    owner_host TEXT,
+    owner_pid INTEGER,
+    owner_pid_create_time REAL,
+    acquired_at TEXT,
+    heartbeat_at TEXT,
+    released_at TEXT,
+    release_reason TEXT,
+    recovery_reason TEXT,
+    conflict_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS overnight_sessions (
     session_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -242,6 +272,7 @@ CREATE INDEX IF NOT EXISTS idx_runbooks_status ON runbooks (status);
 CREATE INDEX IF NOT EXISTS idx_operations_updated ON operations (updated_at);
 CREATE INDEX IF NOT EXISTS idx_terminal_commands_ts ON terminal_commands (ts);
 CREATE INDEX IF NOT EXISTS idx_dispatch_task ON dispatch_decisions (task_id, id);
+CREATE INDEX IF NOT EXISTS idx_execution_leases_task ON execution_leases (task_id);
 """
 
 # Columns added after the original ``tasks`` schema shipped. Applied with
@@ -348,6 +379,7 @@ _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
     "terminal_commands",
     "dispatch_decisions",
     "task_intake_claims",
+    "execution_leases",
 )
 
 # ``control_settings`` keys that are derived, project-dependent caches rather
@@ -1095,6 +1127,155 @@ class State:
             item["scores"] = json.loads(item["scores"] or "{}")
             result.append(item)
         return result
+
+    # ------------------------------------------------------- execution leases
+    # ENG-PC-01 (issue #29): every mutation below is a single guarded SQL
+    # statement so the database's own atomicity -- not a Python read-then-write
+    # -- is what decides a race between two processes. See ``execution_lease.py``
+    # for the policy (staleness proof, retry-never semantics) built on top.
+
+    @_serialized
+    def get_execution_lease(self, worktree: str) -> ExecutionLease | None:
+        row = self._conn.execute(
+            "SELECT * FROM execution_leases WHERE worktree = ?", (worktree,)
+        ).fetchone()
+        return ExecutionLease.from_row(dict(row)) if row else None
+
+    @_serialized
+    def list_execution_leases(self, *, project_id: str | None = None) -> list[ExecutionLease]:
+        if project_id is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM execution_leases WHERE project_id = ? ORDER BY worktree", (project_id,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM execution_leases ORDER BY worktree").fetchall()
+        return [ExecutionLease.from_row(dict(row)) for row in rows]
+
+    @_serialized
+    def try_acquire_execution_lease(
+        self,
+        *,
+        worktree: str,
+        expected_generation: int,
+        task_id: str | None,
+        project_id: str | None,
+        stable_task_id: str | None,
+        runbook_id: str | None,
+        worker: str | None,
+        owner_host: str | None,
+        owner_pid: int | None,
+        owner_pid_create_time: float | None,
+        reason: str | None,
+    ) -> ExecutionLease | None:
+        """Compare-and-swap acquisition. ``None`` means the caller lost the race.
+
+        The bootstrap ``INSERT OR IGNORE`` only ever creates the initial
+        ``generation = 0`` / ``RELEASED`` row for a worktree never seen before; it
+        never touches an existing row, so it cannot itself race the CAS ``UPDATE``
+        below in a way that changes who wins. The ``UPDATE ... WHERE worktree = ?
+        AND generation = ?`` is the actual guard: it succeeds only when the caller's
+        ``expected_generation`` still matches the durable row, exactly the same
+        compare-and-swap shape as ``claim_pending_fallback``.
+        """
+
+        now = utc_now_iso()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO execution_leases (worktree, generation, status, created_at, updated_at) "
+            "VALUES (?, 0, 'RELEASED', ?, ?)",
+            (worktree, now, now),
+        )
+        cursor = self._conn.execute(
+            "UPDATE execution_leases SET "
+            "generation = generation + 1, status = 'ACQUIRED', "
+            "project_id = ?, task_id = ?, stable_task_id = ?, runbook_id = ?, worker = ?, "
+            "owner_host = ?, owner_pid = ?, owner_pid_create_time = ?, "
+            "acquired_at = ?, heartbeat_at = ?, released_at = NULL, release_reason = NULL, "
+            "recovery_reason = ?, conflict_reason = NULL, updated_at = ? "
+            "WHERE worktree = ? AND generation = ?",
+            (
+                project_id, task_id, stable_task_id, runbook_id, worker,
+                owner_host, owner_pid, owner_pid_create_time,
+                now, now, reason, now,
+                worktree, expected_generation,
+            ),
+        )
+        if cursor.rowcount != 1:
+            self._conn.commit()
+            return None
+        self._conn.commit()
+        return self.get_execution_lease(worktree)
+
+    @_serialized
+    def update_execution_lease_pid(
+        self, *, worktree: str, expected_generation: int, pid: int, pid_create_time: float | None
+    ) -> bool:
+        """Attach the real launched-subprocess pid once known (after ``Popen`` returns).
+
+        Guarded by the same ``generation`` the acquisition returned, so a lease
+        reclaimed from under an acquirer in the narrow window between winning the
+        CAS and the subprocess actually spawning is never silently overwritten.
+        """
+
+        now = utc_now_iso()
+        cursor = self._conn.execute(
+            "UPDATE execution_leases SET owner_pid = ?, owner_pid_create_time = ?, heartbeat_at = ?, updated_at = ? "
+            "WHERE worktree = ? AND generation = ? AND status = 'ACQUIRED'",
+            (pid, pid_create_time, now, now, worktree, expected_generation),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_serialized
+    def release_execution_lease(self, *, worktree: str, expected_pid: int, reason: str) -> bool:
+        """Graceful self-release: only the process whose pid is currently recorded may free it."""
+
+        now = utc_now_iso()
+        cursor = self._conn.execute(
+            "UPDATE execution_leases SET status = 'RELEASED', released_at = ?, release_reason = ?, updated_at = ? "
+            "WHERE worktree = ? AND owner_pid = ? AND status = 'ACQUIRED'",
+            (now, reason, now, worktree, expected_pid),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_serialized
+    def record_execution_lease_conflict(self, *, worktree: str, reason: str) -> None:
+        """Informational only: the last refusal reason observers see for this worktree.
+
+        Never part of any CAS decision -- a conflicting acquirer never mutated the
+        row's ownership, so this only annotates it for the Runs/Tasks inspector.
+        """
+
+        now = utc_now_iso()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO execution_leases (worktree, generation, status, created_at, updated_at) "
+            "VALUES (?, 0, 'RELEASED', ?, ?)",
+            (worktree, now, now),
+        )
+        self._conn.execute(
+            "UPDATE execution_leases SET conflict_reason = ?, updated_at = ? WHERE worktree = ?",
+            (reason, now, worktree),
+        )
+        self._conn.commit()
+
+    @_serialized
+    def force_release_execution_lease(self, *, worktree: str, expected_generation: int, reason: str) -> bool:
+        """Reclaim a lease whose owner an independent liveness check already proved dead.
+
+        Never called on a timeout or executable-name match alone -- the caller
+        (``execution_lease.reconcile_stale_leases``) must already have proven the
+        recorded pid dead via ``recovery.pid_is_alive`` or a create-time mismatch.
+        """
+
+        now = utc_now_iso()
+        cursor = self._conn.execute(
+            "UPDATE execution_leases SET status = 'RELEASED', released_at = ?, release_reason = ?, "
+            "recovery_reason = ?, updated_at = ? "
+            "WHERE worktree = ? AND generation = ? AND status = 'ACQUIRED'",
+            (now, reason, reason, now, worktree, expected_generation),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     # ---------------------------------------------------------- advancement
 

@@ -22,14 +22,14 @@ from scripts.agents.control_plane.supervisor import Supervisor
 from scripts.agents.registry import load_registry
 
 
-def _write_task(tmp_path: Path, *, worker="claude-code", command=()) -> Task:
+def _write_task(tmp_path: Path, *, worker="claude-code", command=(), worktree: Path | None = None) -> Task:
     return Task(
         id="t1",
         task_ref="ENG-AGENT-02",
         role="secondary-implementation" if worker != "claude-code" else "primary-implementation",
         worker=worker,
         kind=KIND_WRITE,
-        worktree=str(tmp_path),
+        worktree=str(worktree if worktree is not None else tmp_path),
         command=tuple(command),
     )
 
@@ -174,9 +174,12 @@ def test_poll_once_marks_success_and_failure_from_exit_code(tmp_path, monkeypatc
         def poll(self):
             return self._code
 
-    ok_task = _write_task(tmp_path, command=[])
+    # ENG-PC-01: distinct worktrees, matching production (every write task owns
+    # its own dedicated checkout) and the durable execution lease's real
+    # invariant -- two unrelated tasks sharing one worktree is refused.
+    ok_task = _write_task(tmp_path, command=[], worktree=tmp_path / "ok")
     ok_task.id = "ok"
-    fail_task = _write_task(tmp_path, command=[])
+    fail_task = _write_task(tmp_path, command=[], worktree=tmp_path / "fail")
     fail_task.id = "fail"
 
     processes = iter([FakeProcess(0), FakeProcess(1)])
@@ -404,3 +407,99 @@ def test_real_dry_run_end_to_end_through_orchestrate_spawns_no_worker_cli():
         assert payload["actual"]["execution_system"] == ""
     finally:
         shutil.rmtree(evidence_dir, ignore_errors=True)
+
+
+# ------------------------------------------------- ENG-PC-01 execution lease wiring
+
+
+def test_launch_task_refuses_a_second_task_into_a_worktree_a_live_lease_already_owns(tmp_path, monkeypatch):
+    """The durable CAS gate refuses a racing second writer even with no real .write-lock file yet."""
+
+    registry = load_registry()
+    state = State(":memory:")
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+
+    class FakeProcess:
+        pid = os.getpid()  # a real, verifiably alive pid
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
+    first = _write_task(tmp_path)
+    first.id = "first"
+    result = supervisor.launch_task(first)
+    assert result.state == TASK_RUNNING
+
+    spawned = []
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: spawned.append(argv) or FakeProcess())
+    second = _write_task(tmp_path)
+    second.id = "second"
+    result = supervisor.launch_task(second)
+
+    assert result.state == TASK_BLOCKED
+    assert "execution lease conflict" in (result.last_error or "").lower()
+    assert spawned == [], "a lease conflict must never reach subprocess spawn"
+
+
+def test_terminate_task_frees_the_execution_lease_for_a_new_launch(tmp_path, monkeypatch):
+    registry = load_registry()
+    state = State(":memory:")
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: process)
+    first = _write_task(tmp_path)
+    first.id = "first"
+    supervisor.launch_task(first)
+    supervisor._owned_process_groups.add(process.pid)
+
+    assert supervisor.terminate_task("first") is True
+
+    class FakeProcess:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
+    second = _write_task(tmp_path)
+    second.id = "second"
+    result = supervisor.launch_task(second)
+    assert result.state == TASK_RUNNING
+
+
+def test_poll_once_frees_the_execution_lease_on_completion(tmp_path, monkeypatch):
+    registry = load_registry()
+    state = State(":memory:")
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+
+    class FinishingProcess:
+        pid = os.getpid()
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FinishingProcess())
+    first = _write_task(tmp_path)
+    first.id = "first"
+    supervisor.launch_task(first)
+    supervisor.poll_once()
+
+    class FakeProcess:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
+    second = _write_task(tmp_path)
+    second.id = "second"
+    result = supervisor.launch_task(second)
+    assert result.state == TASK_RUNNING
