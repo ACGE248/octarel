@@ -31,6 +31,7 @@ from scripts.agents.runner import (
     structured_actual_model_report,
     structured_failure,
     worker_action_denied,
+    worker_boundary_evidence,
 )
 from scripts.agents.validation import (
     ValidationError,
@@ -948,14 +949,31 @@ def test_empty_structured_denial_is_not_failure(payload):
     assert structured_failure(json.dumps(payload)) is None
 
 
-def test_unstructured_auto_denied_tool_marker_is_failure():
-    output = (
-        '{"status":"SUCCESS","response":""}\n'
-        "Headless mode: tool permission requests are auto-denied. RunCommand was denied."
-    )
-    assert structured_failure(output) == (
-        "worker tool action was denied by the configured read-only permission boundary"
-    )
+def test_unstructured_diff_echoing_auto_denied_marker_is_unknown_not_failure():
+    output = """Reviewer transcript (transport emitted no JSON records):
+diff --git a/scripts/agents/runner.py b/scripts/agents/runner.py
+--- a/scripts/agents/runner.py
++++ b/scripts/agents/runner.py
+@@ -1,2 +1,2 @@
+-    \"tool permission requests are auto-denied\" in unstructured.lower()
++    # tool permission requests are auto-denied
+The quoted diff is the reviewed source; no tool action occurred.
+"""
+    assert worker_action_denied(output) is False
+    assert structured_failure(output) is None
+    assert worker_boundary_evidence(output) == {
+        "class": "UNKNOWN",
+        "worker_action_denied": None,
+        "reason": "transport emitted no decoded JSON records and cannot prove the boundary state",
+    }
+
+
+def test_structured_empty_denial_field_proves_clean_boundary():
+    assert worker_boundary_evidence(json.dumps({"permission_denials": []})) == {
+        "class": "MEASURED",
+        "worker_action_denied": False,
+        "reason": "transport emitted an empty typed denial field",
+    }
 
 
 def test_typed_denial_in_second_json_object_is_failure():
@@ -999,6 +1017,61 @@ def test_structured_denial_takes_precedence_over_timeout():
     assert structured_failure(output) == (
         "worker tool action was denied by the configured read-only permission boundary"
     )
+
+
+def test_diff_review_with_unknown_boundary_evidence_can_pass(git_repo):
+    (git_repo / "seed.txt").write_text("changed\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "seed.txt"], check=True)
+    registry = _registry_with(
+        name="opencode2-gemini-flash-lite-review",
+        cli_bin="sh",
+        cli_template=("-c", "printf 'review complete; no structured transport records'", "--"),
+    )
+
+    result = _run(
+        registry, git_repo, "opencode2-gemini-flash-lite-review", role="diff-review", include_diff=True,
+    )
+
+    assert result.record.result == "PASS"
+    assert result.record.boundary_evidence["class"] == "UNKNOWN"
+    assert result.record.boundary_evidence["worker_action_denied"] is None
+
+
+def test_diff_review_with_typed_clean_boundary_can_pass(git_repo):
+    (git_repo / "seed.txt").write_text("changed\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "seed.txt"], check=True)
+    registry = _registry_with(
+        name="opencode2-gemini-flash-lite-review",
+        cli_bin="sh",
+        cli_template=("-c", "printf '{\"denied_actions\":[]}'", "--"),
+    )
+
+    result = _run(
+        registry, git_repo, "opencode2-gemini-flash-lite-review", role="diff-review", include_diff=True,
+    )
+
+    assert result.record.result == "PASS"
+    assert result.record.boundary_evidence["class"] == "MEASURED"
+    assert result.record.boundary_evidence["worker_action_denied"] is False
+
+
+def test_diff_review_with_typed_denial_fails(git_repo):
+    (git_repo / "seed.txt").write_text("changed\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "seed.txt"], check=True)
+    registry = _registry_with(
+        name="opencode2-gemini-flash-lite-review",
+        cli_bin="sh",
+        cli_template=("-c", "printf '{\"denied_actions\":[{\"action\":\"command\"}]}'", "--"),
+    )
+
+    result = _run(
+        registry, git_repo, "opencode2-gemini-flash-lite-review", role="diff-review", include_diff=True,
+    )
+
+    assert result.record.result == "FAIL"
+    assert result.record.boundary_evidence["class"] == "MEASURED"
+    assert result.record.boundary_evidence["worker_action_denied"] is True
+    assert "tool action was denied" in " ".join(result.record.notes)
 
 
 def test_structured_empty_response_is_failure():

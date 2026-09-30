@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 REQUIRED_FIELDS: tuple[str, ...] = ("Blockers", "Important findings", "Minor findings", "Test gaps")
 _VERDICT_TOKENS = {"READY", "BLOCKED", "NOT READY", "NOT_READY"}
@@ -51,6 +52,24 @@ _HEADING_HASH_RE = re.compile(r"^#{1,6}\s*")
 _BLOCKQUOTE_RE = re.compile(r"^>+\s*")
 _ORDERED_MARKER_RE = re.compile(r"^\d{1,2}[.)]\s*")
 _BULLET_MARKER_RE = re.compile(r"^[-*]\s+")
+
+
+def boundary_evidence_has_no_measured_denial(manifest: dict[str, Any]) -> bool:
+    """Return whether a review manifest contains no measured tool denial.
+
+    ``UNKNOWN`` remains usable because absence of a transport field proves
+    neither a violation nor a clean boundary. Actual writes are guarded by
+    the independent ``files_changed`` and worktree-snapshot checks.
+    """
+
+    evidence = manifest.get("boundary_evidence")
+    return not (
+        isinstance(evidence, dict)
+        and evidence.get("class") == "MEASURED"
+        and evidence.get("worker_action_denied") is True
+    )
+
+
 # Bold/italic emphasis markers are stripped wherever they occur on the line,
 # not only at its very start/end: "- **Blockers:** None" wraps only the
 # label in "**", so an edges-only strip would leave a stray "**" glued to

@@ -66,6 +66,7 @@ from .runner import (
     repo_root,
     run_worker_process,
     structured_actual_model_report,
+    worker_boundary_evidence,
     worktree_snapshot,
     write_lock,
 )
@@ -592,12 +593,15 @@ def run_delegation(
         log_text, model or worker.effective_model
     )
     record.actual_intensity = resolved_intensity
+    if worker.is_read_only:
+        record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     changed_during_run = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
     record.files_changed = changed_during_run
 
     if worker.is_read_only and changed_during_run:
+        record.read_only_violation = True
         record.set_result(
             RESULT_FAIL,
             note=(
@@ -851,6 +855,8 @@ def run_session(
         log_text, model or worker.effective_model
     )
     record.actual_intensity = resolved_intensity
+    if worker.is_read_only:
+        record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
     record.files_changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))

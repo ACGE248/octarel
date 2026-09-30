@@ -352,31 +352,41 @@ def first_structured_result(output: str) -> dict[str, object] | None:
     return _first_json_object(output)
 
 
-def _structured_denial(payload: dict[str, object] | None) -> bool:
-    """Return whether a CLI result contains a non-empty typed denial field.
+BOUNDARY_EVIDENCE_MEASURED = "MEASURED"
+BOUNDARY_EVIDENCE_UNKNOWN = "UNKNOWN"
+
+
+def _structured_denial(payload: dict[str, object] | None) -> bool | None:
+    """Return a typed denial value, or ``None`` when none is exposed.
 
     Claude Code reports ``permission_denials`` at the result root. Antigravity
     reports ``denied_actions`` inside ``usage`` (and older/newer adapters may
     expose either field at the result root), so only those known structured
     locations are inspected. Model-authored prose is deliberately not treated
-    as evidence that a tool action occurred.
+    as evidence that a tool action occurred. Only list-valued fields match the
+    known transport schemas; a missing or malformed field cannot prove either
+    a clean boundary or a violation.
     """
 
     if payload is None:
-        return False
+        return None
     containers = [payload]
     usage = payload.get("usage")
     if isinstance(usage, dict):
         containers.append(usage)
-    return any(
-        bool(container.get(field))
+    values = [
+        container[field]
         for container in containers
         for field in ("permission_denials", "denied_actions")
-    )
+        if field in container and isinstance(container[field], list)
+    ]
+    if not values:
+        return None
+    return any(bool(value) for value in values)
 
 
-def _structured_values_and_unstructured_output(output: str) -> tuple[list[object], str]:
-    """Split line-oriented CLI JSON values from genuinely unstructured text.
+def _structured_values(output: str) -> list[object]:
+    """Decode line-oriented CLI JSON values.
 
     Headless CLIs may emit more than one JSON value, with diagnostic prose
     before, between, or after them.  Only values beginning a logical output
@@ -387,7 +397,6 @@ def _structured_values_and_unstructured_output(output: str) -> tuple[list[object
 
     decoder = json.JSONDecoder()
     values: list[object] = []
-    spans: list[tuple[int, int]] = []
     position = 0
     while position < len(output):
         line_end = output.find("\n", position)
@@ -402,25 +411,49 @@ def _structured_values_and_unstructured_output(output: str) -> tuple[list[object
             position = line_end + 1
             continue
         values.append(value)
-        spans.append((candidate, end))
         position = end
+    return values
 
-    unstructured: list[str] = []
-    previous_end = 0
-    for start, end in spans:
-        unstructured.append(output[previous_end:start])
-        previous_end = end
-    unstructured.append(output[previous_end:])
-    return values, "".join(unstructured)
+
+def worker_boundary_evidence(output: str) -> dict[str, object]:
+    """Classify read-only boundary evidence without inferring from prose.
+
+    A transport proves the boundary only by emitting a recognized, well-typed
+    field.  Text is untrusted reviewer content: it may quote source, a diff, or
+    a diagnostic banner, so prose-only output is explicitly ``UNKNOWN``.
+    """
+
+    values = _structured_values(output)
+    typed = [_structured_denial(value) for value in values if isinstance(value, dict)]
+    measured = [value for value in typed if value is not None]
+    if any(measured):
+        return {
+            "class": BOUNDARY_EVIDENCE_MEASURED,
+            "worker_action_denied": True,
+            "reason": "transport emitted a non-empty typed denial field",
+        }
+    if measured:
+        return {
+            "class": BOUNDARY_EVIDENCE_MEASURED,
+            "worker_action_denied": False,
+            "reason": "transport emitted an empty typed denial field",
+        }
+    reason = (
+        "transport emitted no decoded JSON object with a recognized typed denial field"
+        if values
+        else "transport emitted no decoded JSON records and cannot prove the boundary state"
+    )
+    return {
+        "class": BOUNDARY_EVIDENCE_UNKNOWN,
+        "worker_action_denied": None,
+        "reason": reason,
+    }
 
 
 def worker_action_denied(output: str) -> bool:
     """Return whether CLI evidence proves that a worker tool action was denied."""
 
-    values, unstructured = _structured_values_and_unstructured_output(output)
-    return any(_structured_denial(value) for value in values if isinstance(value, dict)) or (
-        "tool permission requests are auto-denied" in unstructured.lower()
-    )
+    return worker_boundary_evidence(output)["worker_action_denied"] is True
 
 
 def structured_failure(output: str) -> str | None:

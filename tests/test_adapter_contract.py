@@ -243,21 +243,45 @@ def test_run_result_from_record_rejects_mismatched_worker():
 
 
 @pytest.mark.parametrize(
-    "notes, exit_status, expected",
+    "notes, exit_status, read_only_violation, boundary_evidence, expected",
     [
-        (["read-only worker modified the working tree: x. Treat as a contract violation."], 1, FAILURE_READ_ONLY_VIOLATION),
-        (["worker tool action was denied by the configured read-only permission boundary"], 1, FAILURE_PERMISSION_DENIED),
-        ([], 124, FAILURE_TIMEOUT),
-        (["some other worker failure"], 1, FAILURE_WORKER_ERROR),
+        ([], 1, True, None, FAILURE_READ_ONLY_VIOLATION),
+        ([], 1, False, {"class": "MEASURED", "worker_action_denied": True}, FAILURE_PERMISSION_DENIED),
+        ([], 124, False, None, FAILURE_TIMEOUT),
+        (["some other worker failure"], 1, False, None, FAILURE_WORKER_ERROR),
         # A read-only violation or a permission denial must win over exit 124 (timeout's exit
         # status): a read-only worker that modified the tree, or a run denied by the read-only
         # permission boundary, is a contract violation and must never be reported as a timeout
         # merely because the process also exited 124.
-        (["read-only worker modified the working tree: x. Treat as a contract violation."], 124, FAILURE_READ_ONLY_VIOLATION),
-        (["worker tool action was denied by the configured read-only permission boundary"], 124, FAILURE_PERMISSION_DENIED),
+        ([], 124, True, None, FAILURE_READ_ONLY_VIOLATION),
+        ([], 124, False, {"class": "MEASURED", "worker_action_denied": True}, FAILURE_PERMISSION_DENIED),
+        # Notes are diagnostic prose, not typed classification evidence.
+        (
+            ["read-only worker modified the working tree: x. Treat as a contract violation."],
+            1,
+            False,
+            None,
+            FAILURE_WORKER_ERROR,
+        ),
+        (
+            ["worker tool action was denied by the configured read-only permission boundary"],
+            1,
+            False,
+            None,
+            FAILURE_WORKER_ERROR,
+        ),
+        (
+            ["worker tool action was denied by the configured read-only permission boundary"],
+            1,
+            False,
+            {"class": "UNKNOWN", "worker_action_denied": True},
+            FAILURE_WORKER_ERROR,
+        ),
     ],
 )
-def test_failure_category_classification(notes, exit_status, expected):
+def test_failure_category_classification(
+    notes, exit_status, read_only_violation, boundary_evidence, expected
+):
     caps = capabilities_for(REGISTRY.get("claude-code"))
     record = RunRecord(
         task="ENG-PC-11",
@@ -271,6 +295,8 @@ def test_failure_category_classification(notes, exit_status, expected):
         result=RESULT_FAIL,
         exit_status=exit_status,
         notes=notes,
+        read_only_violation=read_only_violation,
+        boundary_evidence=boundary_evidence,
     )
     result = run_result_from_record(record, capabilities=caps, evidence_paths={}, log_text="")
     assert result.failure_category == expected

@@ -34,6 +34,7 @@ try:
     from scripts.ci.ports import PortLeases
     from scripts.ci.review_contract import (
         ReviewVerdict,
+        boundary_evidence_has_no_measured_denial,
         indicates_agent_fallback,
         parse_review_response,
     )
@@ -50,6 +51,7 @@ except ModuleNotFoundError:  # direct ``python scripts/ci/local_gate.py`` entry 
     from ports import PortLeases
     from review_contract import (
         ReviewVerdict,
+        boundary_evidence_has_no_measured_denial,
         indicates_agent_fallback,
         parse_review_response,
     )
@@ -671,6 +673,7 @@ def run_gate(*, root: Path, base: str, docs_reviewed: bool, review_provider: str
             if (
                 review_manifest.get("role") != "diff-review"
                 or review_manifest.get("result") != "PASS"
+                or not boundary_evidence_has_no_measured_denial(review_manifest)
                 or actual_provider.casefold() != str(review_provider or "").casefold()
                 or review_manifest.get("files_changed")
                 or review_manifest.get("candidate_tree_sha") != tree

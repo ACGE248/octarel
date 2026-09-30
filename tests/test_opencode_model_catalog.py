@@ -611,6 +611,8 @@ def test_end_to_end_free_fallback_review_records_full_evidence(project, fake_cli
     result = run_review(project)
     assert result.record.result == "PASS" and result.exit_code == 0
     record = result.record
+    assert record.boundary_evidence["class"] == "UNKNOWN"
+    assert record.boundary_evidence["worker_action_denied"] is None
     assert record.actual_provider == "OpenCode Zen" and record.actual_model == "opencode/muse-spark-1.3-contributor-free"
     assert record.planned_model == record.actual_model and record.files_changed == []
     selection = record.policy_manifest["model_selection"]
@@ -655,6 +657,8 @@ def test_end_to_end_quota_failure_cools_down_and_next_run_uses_another_free_mode
     assert any("cooled down after a quota failure" in note and "No stronger" in note for note in failed.record.notes)
     nxt = run_review(project)
     assert nxt.record.result == "PASS"
+    assert nxt.record.boundary_evidence["class"] == "UNKNOWN"
+    assert nxt.record.boundary_evidence["worker_action_denied"] is None
     assert nxt.record.actual_model != first_model
     cls = mc.load_catalog().get(nxt.record.actual_model).cost_class
     assert cls == mc.COST_FREE_OPENCODE  # rerouted to an equivalent free model, never a premium one

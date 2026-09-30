@@ -23,7 +23,7 @@ RESULT_DRY_RUN = "DRY_RUN"
 
 # A typed, finer-grained failure taxonomy than RESULT_* alone gives you, read
 # only from fields a RunRecord already carries (its own recorded
-# result/exit_status/notes) -- never from a fresh parse of raw output, so it
+# result/exit_status/evidence) -- never from a fresh parse of raw output, so it
 # can never disagree with what the manifest already asserts happened. Lives
 # next to RESULT_* (rather than in scripts.agents.adapter_contract, which
 # consumes it) because RunRecord.to_manifest is the single place that must
@@ -38,11 +38,11 @@ FAILURE_WORKER_ERROR = "WORKER_ERROR"
 
 _TIMEOUT_EXIT_STATUS = 124
 
-# Bumped for ENG-PC-11 (issue #39): every manifest now carries an explicit
-# top-level "failure_category" field. Older manifests on disk have no such
-# key; every consumer reads it with dict.get(...), so they keep parsing
-# unchanged -- this bump only documents the addition, it does not require
-# readers to migrate anything.
+# Both parents independently selected version 3. The merged v3 schema carries
+# ENG-PC-11's top-level ``failure_category`` and ENG-AO-14's typed
+# ``boundary_evidence`` (plus typed read-only-write evidence used by the
+# failure classifier). Older manifests carry none of these keys; consumers
+# use ``dict.get(...)`` and therefore require no migration.
 MANIFEST_VERSION = 3
 
 
@@ -59,10 +59,14 @@ def classify_failure(record: "RunRecord") -> str:
     if record.result == RESULT_PASS:
         return FAILURE_NONE
     assert record.result == RESULT_FAIL
-    notes_text = " ".join(record.notes or []).lower()
-    if "read-only worker modified the working tree" in notes_text:
+    if record.read_only_violation:
         return FAILURE_READ_ONLY_VIOLATION
-    if "denied by the configured read-only permission boundary" in notes_text:
+    boundary_evidence = record.boundary_evidence
+    if (
+        isinstance(boundary_evidence, dict)
+        and boundary_evidence.get("class") == "MEASURED"
+        and boundary_evidence.get("worker_action_denied") is True
+    ):
         return FAILURE_PERMISSION_DENIED
     if record.exit_status == _TIMEOUT_EXIT_STATUS:
         return FAILURE_TIMEOUT
@@ -100,6 +104,11 @@ class RunRecord:
     tests_or_checks: list[str] | None = None
     notes: list[str] | None = None
     candidate_tree_sha: str | None = None
+    boundary_evidence: dict[str, Any] | None = None
+    # Set only by the worktree snapshot comparison after a read-only worker
+    # actually changed a path. This keeps failure classification tied to the
+    # typed check outcome rather than to the human-readable note it emits.
+    read_only_violation: bool = False
     policy_manifest: dict[str, Any] | None = None
 
     def set_result(self, result: str, *, note: str | None = None) -> None:
@@ -148,6 +157,8 @@ class RunRecord:
             "tests_or_checks": [redact_text(check) for check in (self.tests_or_checks or [])],
             "notes": [redact_text(note) for note in (self.notes or [])],
             "candidate_tree_sha": self.candidate_tree_sha,
+            "boundary_evidence": self.boundary_evidence,
+            "read_only_violation": self.read_only_violation,
             "policy_manifest": self.policy_manifest or {},
             "paths": paths,
             "redaction_applied": True,
@@ -188,6 +199,7 @@ def render_summary(manifest: dict[str, Any]) -> str:
         f"- **Duration (s):** {manifest['duration_seconds']}",
         f"- **Started:** {manifest['started_at']}",
         f"- **Finished:** {manifest['finished_at']}",
+        f"- **Boundary evidence:** {(manifest.get('boundary_evidence') or {}).get('class', '(not recorded)')}",
         "",
         "## Planned",
         f"- System / provider / model: {planned['execution_system']} / {planned['provider']} / "
