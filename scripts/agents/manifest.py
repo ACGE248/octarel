@@ -21,7 +21,7 @@ RESULT_UNSUPPORTED = "UNSUPPORTED"
 RESULT_BLOCKED = "BLOCKED"
 RESULT_DRY_RUN = "DRY_RUN"
 
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 
 
 @dataclass
@@ -50,6 +50,7 @@ class RunRecord:
     tests_or_checks: list[str] | None = None
     notes: list[str] | None = None
     candidate_tree_sha: str | None = None
+    boundary_evidence: dict[str, Any] | None = None
     policy_manifest: dict[str, Any] | None = None
 
     def to_manifest(self, *, paths: dict[str, str]) -> dict[str, Any]:
@@ -81,6 +82,7 @@ class RunRecord:
             "tests_or_checks": [redact_text(check) for check in (self.tests_or_checks or [])],
             "notes": [redact_text(note) for note in (self.notes or [])],
             "candidate_tree_sha": self.candidate_tree_sha,
+            "boundary_evidence": self.boundary_evidence,
             "policy_manifest": self.policy_manifest or {},
             "paths": paths,
             "redaction_applied": True,
@@ -120,6 +122,7 @@ def render_summary(manifest: dict[str, Any]) -> str:
         f"- **Duration (s):** {manifest['duration_seconds']}",
         f"- **Started:** {manifest['started_at']}",
         f"- **Finished:** {manifest['finished_at']}",
+        f"- **Boundary evidence:** {(manifest.get('boundary_evidence') or {}).get('class', '(not recorded)')}",
         "",
         "## Planned",
         f"- System / provider / model: {planned['execution_system']} / {planned['provider']} / "

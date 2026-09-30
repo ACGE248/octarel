@@ -36,6 +36,12 @@ from scripts.agents.registry import (
 )
 from scripts.ci.runtime_paths import CP_RUNTIME_DIRNAMES
 
+CLEAN_BOUNDARY_EVIDENCE = {
+    "class": "MEASURED",
+    "worker_action_denied": False,
+    "reason": "transport emitted an empty typed denial field",
+}
+
 
 def _git_repo(tmp_path: Path, *, branch: str = "eng/acceptance-test") -> Path:
     subprocess.run(["git", "init", "-q", "-b", branch, str(tmp_path)], check=True)
@@ -511,6 +517,7 @@ def test_successful_review_is_consumed_on_a_later_reconcile_and_test_advances(tm
     (run_dir / "manifest.json").write_text(
         __import__("json").dumps({
             "role": "diff-review", "result": "PASS", "files_changed": [],
+            "boundary_evidence": CLEAN_BOUNDARY_EVIDENCE,
             "candidate_tree_sha": tree, "actual": {"provider": "xAI"},
             "paths": {"log": ".agent-output/review-inflight/grok-build-review/run-1/logs/run.log"},
         }),
@@ -813,6 +820,7 @@ def test_markdown_formatted_ready_review_is_accepted_end_to_end(tmp_path, monkey
     (run_dir / "manifest.json").write_text(
         json.dumps({
             "role": "diff-review", "result": "PASS", "files_changed": [],
+            "boundary_evidence": CLEAN_BOUNDARY_EVIDENCE,
             "candidate_tree_sha": tree, "actual": {"provider": "Google"},
             "paths": {"log": ".agent-output/review-md/antigravity-diff-review/run-1/logs/run.log"},
         }),
@@ -869,6 +877,7 @@ def test_review_task_exit_zero_without_a_ready_conclusion_is_not_accepted_as_pas
         __import__("json").dumps(
             {
                 "role": "diff-review", "result": "PASS", "files_changed": [],
+                "boundary_evidence": CLEAN_BOUNDARY_EVIDENCE,
                 "candidate_tree_sha": tree, "actual": {"provider": "xAI"},
             }
         ),
@@ -917,6 +926,7 @@ def test_find_review_manifest_prefers_the_most_specific_reason_not_the_newest_ma
     (older / "manifest.json").write_text(
         json.dumps({
             "role": "diff-review", "result": "PASS", "files_changed": [],
+            "boundary_evidence": CLEAN_BOUNDARY_EVIDENCE,
             "candidate_tree_sha": tree, "actual": {"provider": "xAI"},
             "paths": {"log": ".agent-output/review-x/grok-build-review/run-1/logs/run.log"},
         }),
@@ -944,6 +954,57 @@ def test_find_review_manifest_prefers_the_most_specific_reason_not_the_newest_ma
     # wins over the stray newer manifest's generic structural mismatch.
     assert "not READY" in reason
     assert "role" not in reason
+
+
+def test_unknown_review_boundary_evidence_is_accepted_as_pass(tmp_path) -> None:
+    import json
+
+    from scripts.ci.local_gate import candidate as gate_candidate_real
+    from scripts.ci.review_contract import boundary_evidence_has_no_measured_denial
+
+    repo = _git_repo(tmp_path)
+    tree, _head, _paths = gate_candidate_real(repo, "HEAD")
+    run_dir = repo / ".agent-output" / "review-unknown" / "grok-build-review" / "run-1"
+    run_dir.mkdir(parents=True)
+    manifest = {
+        "role": "diff-review",
+        "result": "PASS",
+        "files_changed": [],
+        "boundary_evidence": {
+            "class": "UNKNOWN",
+            "worker_action_denied": None,
+            "reason": "transport emitted no decoded JSON records",
+        },
+        "candidate_tree_sha": tree,
+        "actual": {"provider": "xAI"},
+        "paths": {"log": ".agent-output/review-unknown/grok-build-review/run-1/logs/run.log"},
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (run_dir / "logs").mkdir()
+    (run_dir / "logs" / "run.log").write_text("READY\n", encoding="utf-8")
+
+    manifest_path, accepted, reason = acceptance._find_review_manifest(
+        repo_root=repo, task_ref="review-unknown", tree=tree,
+    )
+
+    assert manifest_path == ".agent-output/review-unknown/grok-build-review/run-1/manifest.json"
+    assert accepted == manifest
+    assert reason is None
+    assert boundary_evidence_has_no_measured_denial(manifest) is True
+
+
+def test_review_gate_boundary_eligibility_matches_transport_shape() -> None:
+    from scripts.ci.review_contract import boundary_evidence_has_no_measured_denial
+
+    transport_shapes = {
+        "typed-clean": ({"class": "MEASURED", "worker_action_denied": False}, True),
+        "typed-denied": ({"class": "MEASURED", "worker_action_denied": True}, False),
+        "no-typed-field": ({"class": "UNKNOWN", "worker_action_denied": None}, True),
+    }
+
+    for shape, (boundary_evidence, eligible) in transport_shapes.items():
+        manifest = {"boundary_evidence": boundary_evidence}
+        assert boundary_evidence_has_no_measured_denial(manifest) is eligible, shape
 
 
 def test_review_task_never_inherits_the_runbooks_write_permission_profile(tmp_path, monkeypatch):

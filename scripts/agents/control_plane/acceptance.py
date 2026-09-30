@@ -37,6 +37,7 @@ from typing import Any
 from scripts.ci.change_risk import classify
 from scripts.ci.local_gate import candidate as gate_candidate
 from scripts.ci.local_gate import review_response_verdict, run_gate
+from scripts.ci.review_contract import boundary_evidence_has_no_measured_denial
 from scripts.ci.runtime_paths import has_non_runtime_changes, pathspec_excludes
 
 from ..registry import PERMISSION_STANDARD, Registry
@@ -723,6 +724,9 @@ def _find_review_manifest(
             continue
         if data.get("result") != "PASS":
             _note(1, f"review worker result was {data.get('result')!r}, not PASS")
+            continue
+        if not boundary_evidence_has_no_measured_denial(data):
+            _note(1, "review boundary evidence records a measured denied tool action")
             continue
         if data.get("files_changed"):
             _note(1, "review worker reported files_changed; a read-only reviewer must never edit")
