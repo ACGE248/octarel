@@ -339,12 +339,82 @@ def _first_json_object(output: str) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _structured_denial(payload: dict[str, object] | None) -> bool:
+    """Return whether a CLI result contains a non-empty typed denial field.
+
+    Claude Code reports ``permission_denials`` at the result root. Antigravity
+    reports ``denied_actions`` inside ``usage`` (and older/newer adapters may
+    expose either field at the result root), so only those known structured
+    locations are inspected. Model-authored prose is deliberately not treated
+    as evidence that a tool action occurred.
+    """
+
+    if payload is None:
+        return False
+    containers = [payload]
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        containers.append(usage)
+    return any(
+        bool(container.get(field))
+        for container in containers
+        for field in ("permission_denials", "denied_actions")
+    )
+
+
+def _structured_values_and_unstructured_output(output: str) -> tuple[list[object], str]:
+    """Split line-oriented CLI JSON values from genuinely unstructured text.
+
+    Headless CLIs may emit more than one JSON value, with diagnostic prose
+    before, between, or after them.  Only values beginning a logical output
+    line (or immediately following another decoded value) are treated as CLI
+    records, so a JSON example embedded in model-authored prose is not
+    mistaken for transport metadata.
+    """
+
+    decoder = json.JSONDecoder()
+    values: list[object] = []
+    spans: list[tuple[int, int]] = []
+    position = 0
+    while position < len(output):
+        line_end = output.find("\n", position)
+        if line_end == -1:
+            line_end = len(output)
+        candidate = position
+        while candidate < line_end and output[candidate] in " \t\r":
+            candidate += 1
+        try:
+            value, end = decoder.raw_decode(output, candidate)
+        except (json.JSONDecodeError, TypeError):
+            position = line_end + 1
+            continue
+        values.append(value)
+        spans.append((candidate, end))
+        position = end
+
+    unstructured: list[str] = []
+    previous_end = 0
+    for start, end in spans:
+        unstructured.append(output[previous_end:start])
+        previous_end = end
+    unstructured.append(output[previous_end:])
+    return values, "".join(unstructured)
+
+
+def worker_action_denied(output: str) -> bool:
+    """Return whether CLI evidence proves that a worker tool action was denied."""
+
+    values, unstructured = _structured_values_and_unstructured_output(output)
+    return any(_structured_denial(value) for value in values if isinstance(value, dict)) or (
+        "tool permission requests are auto-denied" in unstructured.lower()
+    )
+
+
 def structured_failure(output: str) -> str | None:
     """Return a failure reason exposed by a structured CLI result, if any."""
 
     payload = _first_json_object(output)
-    lowered = output.lower()
-    if "tool permission requests are auto-denied" in lowered or "was denied" in lowered:
+    if worker_action_denied(output):
         return "worker tool action was denied by the configured read-only permission boundary"
     if payload is None:
         return None
