@@ -583,6 +583,115 @@ def test_usage_endpoint_is_cached_and_does_not_spawn_a_subprocess_on_every_call(
     assert len(calls) > first_call_count, "?refresh=true must force a fresh read"
 
 
+def test_usage_telemetry_filters_and_budget_progress_are_safe_and_truthful(client, ctx):
+    leaked_identity = "/" + "private/operator/task"
+    ctx.state.append_usage_ledger(
+        {
+            "project_id": "project-a",
+            "task_id": leaked_identity,
+            "runbook_id": "RB-usage",
+            "run_id": "RUN-usage",
+            "session_id": None,
+            "worker": "claude-code",
+            "provider": "Anthropic",
+            "effective_model": "claude-sonnet-5",
+            "occurred_at": "2026-09-30T12:00:00+00:00",
+            "source_record": {
+                "runbook_id": "RB-usage",
+                "task_id": leaked_identity,
+                "telemetry_quality": "exact",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "updated_at": "2026-09-30T12:00:00+00:00",
+            },
+            "source_attempt": {
+                "worker": "claude-code",
+                "provider": "Anthropic",
+                "model": "claude-sonnet-5",
+                "cost_class": "premium-subscription",
+            },
+        }
+    )
+    ctx.state.upsert_usage_budget(
+        {
+            "id": "measured-zero",
+            "project_id": "project-a",
+            "scope_type": "task",
+            "scope_key": "no-matching-task",
+            "constraint_type": "attempts",
+            "limit_value": 2,
+        }
+    )
+    ctx.state.upsert_usage_budget(
+        {
+            "id": "unknown-reserve",
+            "project_id": "project-a",
+            "scope_type": "provider",
+            "scope_key": "Anthropic",
+            "constraint_type": "provider_quota_reserve",
+            "limit_value": 10,
+        }
+    )
+    ctx.state.upsert_usage_budget(
+        {
+            "id": "warning-attempts",
+            "project_id": "project-a",
+            "scope_type": "global",
+            "scope_key": None,
+            "constraint_type": "attempts",
+            "limit_value": 2,
+            "warning_fraction": 0.5,
+        }
+    )
+    ctx.state.upsert_usage_budget(
+        {
+            "id": "blocked-attempts",
+            "project_id": "project-a",
+            "scope_type": "global",
+            "scope_key": None,
+            "constraint_type": "attempts",
+            "limit_value": 0,
+        }
+    )
+
+    response = client.get(
+        "/api/usage-telemetry",
+        params={"project": "project-a", "provider": "Anthropic", "model": "claude-sonnet-5"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["filters"] == {
+        "project": "project-a",
+        "task": None,
+        "provider": "Anthropic",
+        "model": "claude-sonnet-5",
+    }
+    assert body["filter_options"]["projects"] == ["project-a"]
+    assert body["filter_options"]["providers"] == ["Anthropic"]
+    assert body["filter_options"]["models"] == ["claude-sonnet-5"]
+    assert body["filter_options"]["tasks"] == ["[absolute path omitted]"]
+    assert len(body["rows"]) == 1
+
+    measured = next(item for item in body["budgets"] if item["budget_id"] == "measured-zero")
+    unknown = next(item for item in body["budgets"] if item["budget_id"] == "unknown-reserve")
+    assert measured["value"] == 0
+    assert measured["evidence_class"] == "MEASURED"
+    assert measured["progress_percent"] == 0
+    assert unknown["value"] is None
+    assert unknown["remaining"] is None
+    assert unknown["progress_percent"] is None
+    assert next(item for item in body["budgets"] if item["budget_id"] == "warning-attempts")["status"] == "WARNING"
+    assert next(item for item in body["budgets"] if item["budget_id"] == "blocked-attempts")["status"] == "BLOCKED"
+    attention = client.get("/api/attention").json()
+    assert {item["budget_id"] for item in attention["usage_budgets"]} == {
+        "warning-attempts", "blocked-attempts",
+    }
+    serialized = json.dumps(body)
+    assert ("/" + "private/operator") not in serialized
+    assert "source_record" not in serialized
+    assert "source_attempt" not in serialized
+
+
 def test_quickstart_endpoint_is_honest_when_the_ledger_does_not_exist(client):
     # ctx.repo_root is a bare tmp_path with no docs/video-editor ledger, so
     # this must report "not ready" with a real reason rather than a fabricated

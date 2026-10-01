@@ -3216,6 +3216,50 @@ select:focus, input:focus, textarea:focus { border-color: var(--accent); }
   gap: 14px;
 }
 .usage-aggregates:empty { display: none; }
+.usage-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+.usage-filters label { min-width: 0; font-size: 10px; color: var(--muted); }
+.usage-filters select { width: 100%; min-width: 0; margin-top: 4px; }
+.usage-budget-section { margin: 14px 0; }
+.usage-budget-section h3 { margin: 0 0 8px; font-size: 13px; }
+.usage-budget-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+.usage-budget {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.usage-budget.is-warning { border-style: dashed; border-color: var(--warn); }
+.usage-budget.is-blocked { border-width: 2px; border-color: var(--err); }
+.usage-budget.is-unknown { border-style: dotted; }
+.usage-budget-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.usage-budget-head strong { overflow-wrap: anywhere; }
+.budget-status { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.04em; }
+.budget-status.is-warning { color: var(--warn); }
+.budget-status.is-blocked { color: var(--err); font-weight: 700; }
+.budget-status.is-unknown { color: var(--muted); }
+.usage-budget-scope, .usage-budget-source, .usage-budget-no-bar {
+  margin: 7px 0 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.usage-budget-values { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 10px; margin-top: 9px; font-size: 11px; }
+.usage-budget-track { height: 7px; margin-top: 9px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface); border: 1px solid var(--border); }
+.usage-budget-fill { display: block; height: 100%; background: var(--accent); }
+.budget-event-state { display: inline-block; margin-top: 4px; font-family: var(--font-mono); font-size: 9px; font-weight: 700; }
+.budget-event-state.is-warning { color: var(--warn); }
+.budget-event-state.is-blocked { color: var(--err); }
+.budget-event-state.is-unknown { color: var(--muted); }
+@media (max-width: 767px) {
+  .usage-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .usage-window {
   padding: 12px 14px;
   border: 1px solid var(--border);

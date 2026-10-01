@@ -123,6 +123,81 @@ test('agent/provider names are human-readable and locally cached icons load', as
   expect(await icon.evaluate((node) => node.naturalWidth)).toBeGreaterThan(0);
 });
 
+test('usage filters, truthful budget progress, attention, and run events share the shipped surfaces', async ({ page }) => {
+  await navTo(page, 'view-providers');
+  await expect(page.locator('.usage-row').first()).toBeVisible();
+
+  const project = page.locator('#usage-filter-project');
+  const task = page.locator('#usage-filter-task');
+  const provider = page.locator('#usage-filter-provider');
+  const model = page.locator('#usage-filter-model');
+  for (const control of [project, task, provider, model]) await expect(control).toBeVisible();
+
+  const projectValue = await project.locator('option:not([value=""])').first().getAttribute('value');
+  expect(projectValue).toBeTruthy();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes('/api/usage-telemetry?') && response.url().includes('project=')),
+    project.selectOption(projectValue),
+  ]);
+
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes('task=fx-rb-fallback-session')),
+    task.selectOption('fx-rb-fallback-session'),
+  ]);
+  await expect(page.locator('.usage-row')).toHaveCount(1);
+  await expect(page.locator('.usage-row').first()).toContainText('fx-rb-fallback');
+
+  await task.selectOption('');
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes('provider=xAI')),
+    provider.selectOption('xAI'),
+  ]);
+  await expect(page.locator('.usage-row').first()).toContainText('xAI');
+  await expect(page.locator('#usage-telemetry-rows')).not.toContainText('Anthropic');
+
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes('model=grok-4.6')),
+    model.selectOption('grok-4.6'),
+  ]);
+  await expect(page.locator('.usage-row').first().locator('.usage-row-identity')).toContainText('grok-4.6');
+
+  const measuredZero = page.locator('.usage-budget', { hasText: 'fx-budget-zero-cash' });
+  const unknown = page.locator('.usage-budget', { hasText: 'fx-budget-quota-unknown' });
+  await expect(measuredZero).toContainText('Used: $0.00');
+  await expect(measuredZero.locator('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '0');
+  await expect(unknown).toContainText('UNKNOWN');
+  await expect(unknown).toContainText('Confidence: UNKNOWN');
+  await expect(unknown.locator('[role="progressbar"]')).toHaveCount(0);
+
+  const warning = page.locator('.usage-budget.is-warning', { hasText: 'fx-budget-token-warning' });
+  const blocked = page.locator('.usage-budget.is-blocked', { hasText: 'fx-budget-attempt-block' });
+  await expect(warning).toContainText('WARNING');
+  await expect(warning).toContainText('scope task:fx-rb-fallback-session');
+  await expect(blocked).toContainText('HARD BLOCK');
+  await expect(blocked).toContainText('scope global');
+
+  await navTo(page, 'view-overview');
+  const warningAttention = page.locator('#overview-attention-list [data-attention-kind="budget_warning"]');
+  const blockedAttention = page.locator('#overview-attention-list [data-attention-kind="budget_block"]');
+  await expect(warningAttention).toContainText('Budget warning');
+  await expect(blockedAttention).toContainText('Budget hard block');
+  await warningAttention.locator('button').click();
+  await expect(page.locator('#view-providers')).toBeVisible();
+  await navTo(page, 'view-overview');
+  await blockedAttention.locator('button').click();
+  await expect(page.locator('#view-providers')).toBeVisible();
+
+  await navTo(page, 'view-history');
+  await expect(page.locator('.budget-event-warning')).toContainText('WARNING · scope task:fx-rb-fallback-session');
+  await expect(page.locator('.budget-event-blocked')).toContainText('HARD BLOCK · scope global');
+
+  await navTo(page, 'view-runs');
+  await page.locator('[data-runbook-id="fx-rb-running"]').click();
+  await expect(page.locator('#run-detail')).toContainText('Usage & budget evidence');
+  await expect(page.locator('#run-detail .budget-event-warning')).toContainText('scope task:fx-rb-fallback-session');
+  await expect(page.locator('#run-detail .budget-event-blocked')).toContainText('scope global');
+});
+
 test('System shows selected-project Graphify operational health without a second page', async ({ page }) => {
   await navTo(page, 'view-system');
   const card = page.locator('#card-graphify');

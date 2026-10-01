@@ -42,6 +42,7 @@ from ..graph_lifecycle import state_event_recorder as graphify_state_event_recor
 from ..redaction import redact_text
 from . import manager_chat as _manager_chat
 from . import pricing as _pricing
+from . import usage_budgets as _usage_budgets
 from . import usage_ledger as _usage_ledger
 from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
@@ -955,6 +956,24 @@ def create_app(
 
     def scoped_events(limit: int) -> list[Any]:
         return ctx.state.list_events(limit=limit, project_id=ctx.selected_project_id)
+
+    def current_budget_progress(*, pricing_book: Any | None = None) -> list[dict[str, Any]]:
+        """Safe presentation rows for enabled budgets in the selected project."""
+
+        _usage_ledger.reconcile_usage_governance(
+            ctx.state,
+            project_id=ctx.selected_project_id,
+            registry=ctx.registry,
+        )
+        rows = _usage_budgets.progress(
+            ctx.state,
+            registry=ctx.registry,
+            project_id=ctx.selected_project_id,
+            pricing_book=pricing_book or pricing_loader(),
+        )
+        # Budget identifiers and scope keys are configuration identity, not a
+        # license to expose a host path if malformed legacy data contains one.
+        return [sanitize_data(row) for row in rows]
 
     refresh_repository_health(ctx)
 
@@ -2108,12 +2127,17 @@ def create_app(
         # surfaced here -- never a time-based "this claimed wake looks stuck" guess,
         # mirroring stale_leases's refusal to classify staleness from elapsed time.
         troubled_wakes = wake_queue_attention(ctx.state, project_id=ctx.selected_project_id)
+        troubled_budgets = [
+            row for row in current_budget_progress()
+            if row["status"] in {_usage_budgets.STATUS_WARNING, _usage_budgets.STATUS_BLOCKED}
+        ]
         return {
             "tasks": failed_or_blocked,
             "providers": troubled_providers,
             "runbooks": troubled_runbooks,
             "execution_leases": troubled_leases,
             "wakes": troubled_wakes,
+            "usage_budgets": troubled_budgets,
         }
 
     @app.post("/api/wake-queue/manual")
@@ -2352,19 +2376,34 @@ def create_app(
         """
 
         book = pricing_loader()
+        if ctx.selected_project_id is not None and project not in {None, ctx.selected_project_id}:
+            raise HTTPException(status_code=404, detail="usage project is outside the selected project scope")
         selected_project = project or ctx.selected_project_id
         _usage_ledger.reconcile_usage_governance(
             ctx.state,
             project_id=ctx.selected_project_id,
             registry=ctx.registry,
         )
+        catalog_entries = ctx.state.list_usage_ledger(project_id=ctx.selected_project_id)
         entries = ctx.state.list_usage_ledger(
             project_id=selected_project,
             task_id=task,
             provider=provider,
             model=model,
         )
-        rows = _usage_ledger.build_ledger_rows(entries, registry=ctx.registry, pricing_book=book)
+        rows = [
+            sanitize_data(row)
+            for row in _usage_ledger.build_ledger_rows(entries, registry=ctx.registry, pricing_book=book)
+        ]
+
+        def safe_options(key: str) -> list[str]:
+            return sorted(
+                {
+                    sanitize_text(str(value))
+                    for entry in catalog_entries
+                    if (value := entry.get(key)) is not None
+                }
+            )
 
         return {
             "rows": rows,
@@ -2379,6 +2418,19 @@ def create_app(
             # them: it describes where rates came from, and is never evidence
             # about how anything was billed.
             "pricing_source": book.provenance(),
+            "filters": {
+                "project": sanitize_text(selected_project) if selected_project else None,
+                "task": sanitize_text(task) if task else None,
+                "provider": sanitize_text(provider) if provider else None,
+                "model": sanitize_text(model) if model else None,
+            },
+            "filter_options": {
+                "projects": safe_options("project_id"),
+                "tasks": safe_options("task_id"),
+                "providers": safe_options("provider"),
+                "models": safe_options("effective_model"),
+            },
+            "budgets": current_budget_progress(pricing_book=book),
             "unavailable_metrics": _usage_telemetry.unavailable_metrics(),
             "note": (
                 "Cache-category tokens and effective context limits are not reported by any worker runtime "

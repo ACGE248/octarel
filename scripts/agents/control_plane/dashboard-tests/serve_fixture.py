@@ -670,6 +670,57 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             }
         )
 
+    # ENG-PC-05 scope C: exercise every truthful budget presentation path.
+    # The token budget is a warning, the global attempt budget is a hard block,
+    # the subscription cash budget has a measured zero, and quota reserve stays
+    # UNKNOWN because the fixture has no authoritative provider quota source.
+    for budget in (
+        {
+            "id": "fx-budget-token-warning", "scope_type": "task",
+            "scope_key": "fx-rb-fallback-session", "constraint_type": "tokens",
+            "limit_value": 200_000, "warning_fraction": 0.75,
+        },
+        {
+            "id": "fx-budget-attempt-block", "scope_type": "global",
+            "scope_key": None, "constraint_type": "attempts",
+            "limit_value": 1, "warning_fraction": 0.8,
+        },
+        {
+            "id": "fx-budget-zero-cash", "scope_type": "task",
+            "scope_key": "fx-rb-fallback-session", "constraint_type": "metered_cash_usd",
+            "limit_value": 1, "warning_fraction": 0.8,
+        },
+        {
+            "id": "fx-budget-quota-unknown", "scope_type": "provider",
+            "scope_key": "xAI", "constraint_type": "provider_quota_reserve",
+            "limit_value": 10, "warning_fraction": 0.8,
+        },
+    ):
+        state.upsert_usage_budget(budget)
+
+    for status, event_type, level, budget_id, scope in (
+        ("WARNING", "usage.budget_warning", "warning", "fx-budget-token-warning", "task:fx-rb-fallback-session"),
+        ("BLOCKED", "usage.budget_blocked", "error", "fx-budget-attempt-block", "global"),
+    ):
+        state.record_run_event(
+            RunEvent(
+                run_id="fx-rb-running",
+                event_class="usage",
+                event_type=event_type,
+                source="control_plane.usage_budgets",
+                provenance="MEASURED",
+                message=f"usage budget {budget_id} at {scope} is {status}",
+                task_id="fx-rb-running-session",
+                level=level,
+                data={
+                    "status": status,
+                    "budget_id": budget_id,
+                    "bounding_scope": scope,
+                    "evidence_class": "MEASURED",
+                },
+            )
+        )
+
     # ENG-PC-04: a real typed event plus an existing .agent-output pointer for
     # the chronological timeline and Run Detail browser coverage.
     event_run_dir = root / ".agent-output" / "ENG-AGENT-02-S5" / "claude-code" / "fixture-event"

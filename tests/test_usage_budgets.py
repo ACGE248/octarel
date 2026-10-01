@@ -20,6 +20,7 @@ from scripts.agents.control_plane.usage_budgets import (
     CONSTRAINT_METERED_CASH,
     CONSTRAINT_PROVIDER_QUOTA_RESERVE,
     CONSTRAINT_TOKENS,
+    PROGRESS_BASIS,
     SCOPE_GLOBAL,
     SCOPE_PROVIDER,
     SCOPE_TASK,
@@ -29,6 +30,7 @@ from scripts.agents.control_plane.usage_budgets import (
     BudgetContext,
     emit_decision,
     evaluate,
+    progress,
     save_definition,
 )
 from scripts.agents.control_plane.usage_ledger import record_usage_attempts
@@ -341,3 +343,30 @@ def test_restart_persists_definition_and_idempotent_ledger_consumption(tmp_path)
         evaluation = decision.evaluations[0]
         assert evaluation["value"] == 2  # one durable attempt + this proposed launch
         assert len(reopened.list_usage_ledger()) == 1
+
+
+def test_progress_carries_the_basis_that_separates_it_from_enforcement():
+    """A progress figure must say it is incurred-only, because enforcement is not.
+
+    ``progress`` counts durable usage that already happened; ``evaluate``
+    additionally counts the launch or fallback being proposed. Those are
+    different numbers by design, so a budget can show headroom and still refuse
+    the very next launch. An operator reading "2 of 5 attempts" with only a
+    ``source`` of "count of matching append-only ledger attempts" would
+    reasonably conclude a third attempt is permitted.
+
+    The qualifier therefore has to travel with the figure. ``source`` says where
+    the number came from, which is a different question.
+    """
+
+    state, registry = _available_dispatch_state()
+    _budget(state, "basis-check", limit=100)
+    rows = progress(state, registry=registry, project_id="project-a", pricing_book=FixedBook())
+
+    assert rows, "an enabled budget must produce a progress row"
+    for row in rows:
+        assert row["basis"] == PROGRESS_BASIS
+        # The basis is a distinct claim from provenance and from origin.
+        assert row["basis"] != row.get("source")
+        assert row["basis"] != row.get("evidence_class")
+        assert "proposed" in row["basis"]

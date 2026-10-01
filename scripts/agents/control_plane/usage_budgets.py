@@ -275,6 +275,7 @@ def evaluate(
                 "remaining": remaining,
                 "evidence_class": evidence_class,
                 "source": source,
+                "basis": PROGRESS_BASIS,
             }
         )
 
@@ -309,6 +310,110 @@ def evaluate(
         allowed, binding["status"], reason, scope, binding["budget_id"],
         binding["evidence_class"], tuple(evaluations),
     )
+
+
+# A progress figure and an enforcement decision are deliberately computed from
+# different bases: ``progress`` reports only durable usage that already happened,
+# while ``evaluate`` additionally counts the launch or fallback being proposed. So
+# a budget can read as having headroom here and still refuse the very next launch.
+# That qualifier travels with the figure instead of living only in a docstring --
+# an operator reading "2 of 5 attempts" would otherwise reasonably conclude a third
+# is permitted.
+PROGRESS_BASIS = (
+    "usage already incurred; enforcement additionally counts the launch or fallback being proposed, "
+    "so a budget with headroom here can still refuse the next launch"
+)
+
+
+def progress(
+    state,
+    *,
+    registry: Any,
+    project_id: str | None,
+    pricing_book: Any | None = None,
+    quota_sources: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Project enabled budgets into truthful, read-only UI progress rows.
+
+    This deliberately does not call :func:`evaluate`: attempts and fallbacks in
+    an enforcement decision include the proposed launch, while a progress view
+    reports only durable usage that has already happened.  The threshold rules
+    and evidence readers otherwise remain the same ones used by enforcement.
+    """
+
+    book = pricing_book or load_pricing_book()
+    quota = quota_sources or {}
+    rows: list[dict[str, Any]] = []
+    for definition in state.list_usage_budgets(project_id=project_id, enabled_only=True):
+        validate_definition(definition)
+        entries = _entries_for(state, definition)
+        rendered = _rows(entries, registry=registry, pricing_book=book)
+        constraint = definition["constraint_type"]
+        if constraint == CONSTRAINT_ATTEMPTS:
+            value, evidence_class, source = (
+                float(len(entries)), CLASS_MEASURED, "count of matching append-only ledger attempts"
+            )
+        elif constraint == CONSTRAINT_FALLBACKS:
+            value, evidence_class, source = (
+                float(sum(1 for entry in entries if entry.get("source_attempt", {}).get("automatic"))),
+                CLASS_MEASURED,
+                "count of matching automatic fallbacks in the append-only ledger",
+            )
+        else:
+            provider = definition.get("scope_key") if definition["scope_type"] == SCOPE_PROVIDER else None
+            value, evidence_class, source = _evidence(
+                definition,
+                entries,
+                rendered,
+                context=BudgetContext(project_id, provider, None, None, None),
+                quota_sources=quota,
+            )
+
+        limit = float(definition["limit_value"])
+        remaining: float | None = None
+        progress_percent: float | None = None
+        if value is None:
+            status = STATUS_UNKNOWN
+        elif constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE:
+            remaining = value - limit
+            if value <= limit:
+                status = STATUS_BLOCKED
+            else:
+                ratio = limit / value if value else 1.0
+                status = STATUS_WARNING if ratio >= float(definition["warning_fraction"]) else STATUS_OK
+            # A reserve threshold is not a total quota denominator.  Showing a
+            # percentage would invent the provider's full allowance.
+        else:
+            remaining = limit - value
+            breached = value > limit if constraint in {CONSTRAINT_ATTEMPTS, CONSTRAINT_FALLBACKS} else value >= limit
+            if breached:
+                status = STATUS_BLOCKED
+            else:
+                ratio = value / limit if limit else 1.0
+                status = STATUS_WARNING if ratio >= float(definition["warning_fraction"]) else STATUS_OK
+            if limit > 0:
+                progress_percent = (value / limit) * 100.0
+
+        rows.append(
+            {
+                "budget_id": definition["id"],
+                "scope_type": definition["scope_type"],
+                "scope_key": definition.get("scope_key"),
+                "bounding_scope": definition["scope_type"] + (
+                    f":{definition['scope_key']}" if definition.get("scope_key") is not None else ""
+                ),
+                "constraint_type": constraint,
+                "status": status,
+                "value": value,
+                "limit": limit,
+                "remaining": remaining,
+                "progress_percent": progress_percent,
+                "evidence_class": evidence_class,
+                "source": source,
+                "basis": PROGRESS_BASIS,
+            }
+        )
+    return rows
 
 
 def emit_decision(state, *, task: Any, decision: BudgetDecision) -> None:
@@ -355,5 +460,5 @@ __all__ = [
     "CONSTRAINT_METERED_CASH", "CONSTRAINT_PROVIDER_QUOTA_RESERVE", "CONSTRAINT_TOKENS",
     "CONSTRAINT_WALL_CLOCK", "SCOPE_GLOBAL", "SCOPE_PROGRAM", "SCOPE_PROVIDER", "SCOPE_RUN",
     "SCOPE_SESSION", "SCOPE_TASK", "STATUS_BLOCKED", "STATUS_OK", "STATUS_UNKNOWN",
-    "STATUS_WARNING", "context_for_task", "emit_decision", "evaluate", "save_definition",
+    "STATUS_WARNING", "context_for_task", "emit_decision", "evaluate", "progress", "save_definition",
 ]
