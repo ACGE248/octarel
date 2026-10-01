@@ -16,6 +16,11 @@ import uvicorn
 from fastapi.testclient import TestClient
 
 from scripts.agents.control_plane.commands import CommandContext
+from scripts.agents.control_plane.context_cursor import (
+    AncestryRequest,
+    ContextIdentity,
+    build_incremental_context,
+)
 from scripts.agents.control_plane.dashboard_api import (
     create_app,
     probe_octascene_app,
@@ -26,6 +31,7 @@ from scripts.agents.control_plane.run_events import RunEvent
 from scripts.agents.control_plane.scheduler import Scheduler
 from scripts.agents.control_plane.state import State
 from scripts.agents.control_plane.supervisor import Supervisor
+from scripts.agents.policy import PolicyBundle
 from scripts.agents.registry import load_registry
 
 ROADMAP_FIXTURE = """# Roadmap
@@ -148,6 +154,137 @@ def test_graphify_manual_refresh_queues_and_records_lifecycle_event(client, ctx,
     assert response.json()["status"] == "REFRESHING"
     assert captured == [(ctx.project_root, None, "manual")]
     assert any(event.category == "graphify" and "trigger=manual" in event.message for event in ctx.state.list_events())
+
+
+def _context_policy(prompt: str = "MANDATORY POLICY BUNDLE\n") -> PolicyBundle:
+    return PolicyBundle(
+        prompt=prompt,
+        manifest={
+            "preserved_policy_identity": {
+                "universal_policy": "AGENTS.md",
+                "role": "IMPLEMENTER",
+                "workflow": "IMPLEMENT",
+                "provider": "OpenAI",
+            }
+        },
+    )
+
+
+def _context_identity(task_id: str, consumer_id: str, **changes: str) -> ContextIdentity:
+    values = {
+        "project_id": "project-context",
+        "task_id": task_id,
+        "consumer_id": consumer_id,
+        "tree_sha": "a" * 40,
+        "policy_digest": "policy-v1",
+        "task_contract_digest": "contract-v1",
+    }
+    values.update(changes)
+    return ContextIdentity(**values)
+
+
+def test_context_inspector_projects_safe_recorded_facts_and_derived_formula(client, ctx):
+    ctx.state.upsert_task(Task(
+        id="context-task", task_ref="ENG-PC-06", role="primary-implementation",
+        worker="codex-build", project_id="project-context",
+    ))
+    ancestry = AncestryRequest(
+        parent_program="ENG-PC",
+        parent_task="ENG-PC-04",
+        source_references=(
+            "https://github.com/ACGE248/octarel/issues/34?token=DO_NOT_EXPOSE",
+            "/private/operator/source",
+        ),
+        limit=4,
+    )
+    identity = _context_identity("context-task", "codex-build")
+    build_incremental_context(
+        ctx.state,
+        identity=identity,
+        policy_bundle=_context_policy("RAW_PROMPT_MUST_NOT_APPEAR\n"),
+        ancestry=ancestry,
+        graph_context_supplier=lambda: {"text": "GRAPH_TEXT_MUST_NOT_APPEAR", "evidence": {"status": "READY"}},
+    )
+    # The second delivery has measured zero additions; that must not collapse
+    # into UNKNOWN, and its saving is an explicit comparison rather than a
+    # claimed runtime measurement.
+    build_incremental_context(
+        ctx.state,
+        identity=identity,
+        policy_bundle=_context_policy("RAW_PROMPT_MUST_NOT_APPEAR\n"),
+        ancestry=ancestry,
+        graph_context_supplier=lambda: {"text": "GRAPH_TEXT_MUST_NOT_APPEAR", "evidence": {"status": "READY"}},
+    )
+
+    response = client.get("/api/context-inspector/ENG-PC-06/codex-build")
+    assert response.status_code == 200
+    body = response.json()
+    serialized = response.text
+
+    assert body["task_additions"] == {"value": 0, "class": "MEASURED", "reason": None, "unit": None}
+    assert body["event_additions"]["value"] == 0
+    assert body["ancestry_additions"]["value"] == 0
+    assert body["context_savings_characters"]["class"] == "DERIVED"
+    assert body["context_savings_characters"]["formula"] == (
+        "full_refresh_characters - required_incremental_characters"
+    )
+    assert body["context_savings_characters"]["value"] > 0
+    assert body["graphify_supplied"]["value"] is True
+    assert body["graphify_status"]["value"] == "READY"
+    assert body["ancestry"]["nodes"][2]["href"] == "https://github.com/ACGE248/octarel/issues/34"
+    assert body["ancestry"]["nodes"][3]["reference"] == "WITHHELD_UNSAFE_REFERENCE"
+    assert "token=" not in serialized
+    assert "/private/operator" not in serialized
+    assert "RAW_PROMPT_MUST_NOT_APPEAR" not in serialized
+    assert "GRAPH_TEXT_MUST_NOT_APPEAR" not in serialized
+    stored = ctx.state.get_context_cursor(
+        project_id="project-context", task_id="context-task", consumer_id="codex-build"
+    )
+    assert "token=" not in json.dumps(stored)
+
+
+def test_context_inspector_names_invalidation_component_without_identity_values_or_paths(client, ctx):
+    ctx.state.upsert_task(Task(
+        id="context-invalidated", task_ref="ENG-PC-06-invalidated", role="primary-implementation",
+        worker="codex-build", project_id="project-context",
+    ))
+    original = _context_identity("context-invalidated", "codex-build")
+    build_incremental_context(ctx.state, identity=original, policy_bundle=_context_policy())
+    build_incremental_context(
+        ctx.state,
+        identity=_context_identity(
+            "context-invalidated", "codex-build", task_contract_digest="/private/operator/secret-contract"
+        ),
+        policy_bundle=_context_policy(),
+    )
+
+    response = client.get("/api/context-inspector/ENG-PC-06-invalidated/codex-build")
+    assert response.status_code == 200
+    assert response.json()["invalidation_component"]["value"] == "task contract digest changed"
+    assert "/private/operator" not in response.text
+
+
+def test_context_inspector_unknown_saving_is_not_zero_and_cross_project_task_is_rejected(client, ctx):
+    ctx.state.upsert_task(Task(
+        id="context-large", task_ref="ENG-PC-06-large", role="primary-implementation",
+        worker="codex-build", project_id="project-context",
+    ))
+    ctx.state.record_run_event(RunEvent(
+        run_id="context-run", event_class="review", event_type="review.result",
+        source="test", provenance="MEASURED", message="x" * 2_000,
+        project_id="project-context", task_id="context-large",
+    ))
+    build_incremental_context(
+        ctx.state,
+        identity=_context_identity("context-large", "codex-build"),
+        policy_bundle=_context_policy(),
+        max_incremental_characters=256,
+    )
+
+    body = client.get("/api/context-inspector/ENG-PC-06-large/codex-build").json()
+    assert body["context_savings_characters"]["class"] == "UNKNOWN"
+    assert body["context_savings_characters"]["value"] is None
+    assert client.get("/api/context-inspector/NOT-THIS-PROJECT/codex-build").status_code == 404
 
 
 def test_agent_and_provider_endpoints_expose_registry_driven_human_metadata(client):

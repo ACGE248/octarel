@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
+from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 from ..policy import PolicyBundle, validate_policy_preservation
+from ..redaction import redact_text
 from .models import Event, Task
 from .state import State
 
@@ -77,6 +81,7 @@ class ContextCursor:
     last_event_id: int
     last_outcome: str
     last_attempted_characters: int
+    inspection_summary: Mapping[str, Any]
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> ContextCursor:
@@ -97,6 +102,7 @@ class ContextCursor:
             last_event_id=int(row["last_event_id"]),
             last_outcome=str(row["last_outcome"]),
             last_attempted_characters=int(row["last_attempted_characters"]),
+            inspection_summary=dict(row.get("inspection_summary") or {}),
         )
 
 
@@ -210,6 +216,37 @@ def _event_context(event: Event) -> dict[str, object]:
     }
 
 
+def _inspection_ancestry(nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Retain safe reference identities for UI projection, never host paths or URL queries."""
+
+    safe_nodes: list[dict[str, str]] = []
+    for node in nodes:
+        raw = str(node.get("reference") or "").strip()
+        parsed = urlparse(raw)
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.netloc
+            and not parsed.username
+            and re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc)
+        ):
+            reference = f"{parsed.scheme}://{parsed.netloc}{redact_text(parsed.path)}"
+            if parsed.fragment:
+                reference += f"#{redact_text(parsed.fragment)}"
+        elif (
+            parsed.scheme
+            or not raw
+            or raw.startswith(("/", "~", "\\"))
+            or "\\" in raw
+            or ".." in PurePosixPath(raw).parts
+            or re.match(r"^[A-Za-z]:", raw)
+        ):
+            reference = "WITHHELD_UNSAFE_REFERENCE"
+        else:
+            reference = redact_text(raw)
+        safe_nodes.append({"kind": str(node.get("kind") or "reference"), "reference": reference})
+    return safe_nodes
+
+
 def _graph_payload(supplier: Callable[[], object] | None) -> tuple[dict[str, object], str]:
     if supplier is None:
         return {"status": "ABSENT", "supplied": False}, ""
@@ -245,6 +282,7 @@ def _cursor_row(
     last_event_id: int,
     outcome: str,
     attempted_characters: int,
+    inspection_summary: Mapping[str, Any],
 ) -> dict[str, object]:
     return {
         **asdict(identity),
@@ -256,6 +294,7 @@ def _cursor_row(
         "last_event_id": last_event_id,
         "last_outcome": outcome,
         "last_attempted_characters": attempted_characters,
+        "inspection_summary": dict(inspection_summary),
     }
 
 
@@ -346,6 +385,36 @@ def build_incremental_context(
     if graph_text:
         payload["graphify_text"] = graph_text
 
+    # Inspector-only comparison baseline. It is assembled from the same
+    # bounded authoritative inputs, but with every currently relevant task,
+    # event and ancestry node present. It never changes cursor decisions and
+    # is never added to the provider prompt.
+    full_events = state.list_run_events(
+        project_id=identity.project_id,
+        after_id=0,
+        task_ids=sorted(relevant_task_ids),
+        limit=MAX_EVENT_READ,
+        ascending=True,
+    )
+    full_payload: dict[str, object] = {
+        "schema": 1,
+        "authority": "INCREMENTAL_BESIDE_MANDATORY_POLICY",
+        "authoritative": {
+            "invalidation_reason": invalidation,
+            "task_changes": [
+                _task_context(tasks[task_id]) for task_id in sorted(current_task_identities)
+            ],
+            "events": [_event_context(event) for event in full_events],
+            "ancestry": ancestry_record,
+        },
+        "graphify": graph_record,
+    }
+    if graph_text:
+        full_payload["graphify_text"] = graph_text
+    full_refresh_characters = len(
+        "\n--- INCREMENTAL TASK CONTEXT ---\n" + _canonical(full_payload) + "\n"
+    )
+
     rendered = "\n--- INCREMENTAL TASK CONTEXT ---\n" + _canonical(payload) + "\n"
     if len(rendered) > max_incremental_characters and graph_text:
         payload.pop("graphify_text")
@@ -378,6 +447,27 @@ def build_incremental_context(
     # exact fallback preservation rule instead of introducing a weaker copy.
     validate_policy_preservation(policy_bundle.manifest, delivery_manifest)
 
+    inspection_summary: dict[str, object] = {
+        "bundle_identity": bundle_digest,
+        "mandatory_bundle_characters": len(policy_bundle.prompt),
+        "incremental_characters": len(rendered),
+        "required_incremental_characters": required,
+        "max_incremental_characters": max_incremental_characters,
+        "full_refresh_characters": full_refresh_characters,
+        "task_additions": len(changed_tasks),
+        "event_additions": len(events),
+        "ancestry_additions": len(ancestry_nodes) if include_ancestry else 0,
+        "ancestry_nodes": _inspection_ancestry(ancestry_nodes),
+        "ancestry_truncated": ancestry_truncated,
+        "invalidation_component": invalidation.split(":", 1)[0] if invalidation else None,
+        "graphify_supplied": bool(payload["graphify"].get("supplied")),  # type: ignore[union-attr]
+        "graphify_status": (
+            str(payload["graphify"].get("status"))  # type: ignore[union-attr]
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*", str(payload["graphify"].get("status", "")))  # type: ignore[union-attr]
+            else "UNKNOWN"
+        ),
+    }
+
     if required > max_incremental_characters:
         outcome = OUTCOME_SIZE_LIMIT_EXCEEDED
         marker = {
@@ -391,12 +481,15 @@ def build_incremental_context(
         retained_ancestry = "" if reset or stored is None else stored.delivered_ancestry_identity
         retained_event = 0 if reset or stored is None else stored.last_event_id
         stored_bundle = base_bundle_identity
+        inspection_summary["incremental_characters"] = len(rendered)
+        inspection_summary["savings_available"] = False
     else:
         outcome = OUTCOME_DELIVERED
         retained_tasks = current_task_identities
         retained_ancestry = ancestry_identity
         retained_event = last_event_id
         stored_bundle = base_bundle_identity
+        inspection_summary["savings_available"] = True
 
     row = state.upsert_context_cursor(
         _cursor_row(
@@ -408,6 +501,7 @@ def build_incremental_context(
             last_event_id=retained_event,
             outcome=outcome,
             attempted_characters=required,
+            inspection_summary=inspection_summary,
         )
     )
     cursor = ContextCursor.from_row(row)

@@ -41,6 +41,11 @@ if str(_REPO_ROOT) not in sys.path:
 import subprocess  # noqa: E402
 
 from scripts.agents.control_plane.commands import CommandContext  # noqa: E402
+from scripts.agents.control_plane.context_cursor import (  # noqa: E402
+    AncestryRequest,
+    ContextIdentity,
+    build_incremental_context,
+)
 from scripts.agents.control_plane.dashboard_api import create_app  # noqa: E402
 from scripts.agents.control_plane.models import (  # noqa: E402
     KIND_READ,
@@ -80,6 +85,7 @@ from scripts.agents.control_plane.scheduler import (  # noqa: E402
 )
 from scripts.agents.control_plane.state import State, default_db_path  # noqa: E402
 from scripts.agents.control_plane.supervisor import Supervisor  # noqa: E402
+from scripts.agents.policy import PolicyBundle  # noqa: E402
 from scripts.agents.registry import load_registry  # noqa: E402
 
 FIXTURE_BRANCH = "fixture-main"
@@ -828,6 +834,51 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
     )
     migrate_legacy_state_to_project(state, OCTASCENE_PROJECT_ID)
     select_project(state, OCTASCENE_PROJECT_ID)
+
+    # ENG-PC-06: two real deliveries make the Run Detail context inspector
+    # exercise a measured zero delta, a positive DERIVED saving, bounded
+    # ancestry with visible truncation, and advisory Graphify status. Prompt
+    # and Graphify text are intentionally distinctive so browser/API tests can
+    # prove neither secret-bearing body is exposed by the inspector.
+    context_identity = ContextIdentity(
+        project_id=OCTASCENE_PROJECT_ID,
+        task_id="fx-rb-running-session",
+        consumer_id="claude-code",
+        tree_sha="a" * 40,
+        policy_digest="fixture-policy-v1",
+        task_contract_digest="fixture-contract-v1",
+    )
+    context_policy = PolicyBundle(
+        prompt="FIXTURE_RAW_COMPOSED_PROMPT_MUST_NOT_APPEAR\n",
+        manifest={
+            "preserved_policy_identity": {
+                "universal_policy": "AGENTS.md",
+                "role": "IMPLEMENTER",
+                "workflow": "IMPLEMENT",
+                "provider": "OpenAI",
+            }
+        },
+    )
+    context_ancestry = AncestryRequest(
+        parent_program="ENG-PC",
+        parent_task="ENG-PC-04",
+        source_references=(
+            "https://github.com/ACGE248/octarel/issues/34",
+            "docs/ROADMAP.md#ENG-PC-06",
+        ),
+        limit=3,
+    )
+    for _ in range(2):
+        build_incremental_context(
+            state,
+            identity=context_identity,
+            policy_bundle=context_policy,
+            ancestry=context_ancestry,
+            graph_context_supplier=lambda: {
+                "text": "FIXTURE_GRAPH_TEXT_MUST_NOT_APPEAR",
+                "evidence": {"status": "READY"},
+            },
+        )
 
     return CommandContext(state=state, registry=registry, scheduler=scheduler, supervisor=supervisor, repo_root=root)
 

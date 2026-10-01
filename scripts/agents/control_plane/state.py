@@ -461,6 +461,7 @@ CREATE TABLE IF NOT EXISTS context_cursors (
     last_event_id INTEGER NOT NULL DEFAULT 0,
     last_outcome TEXT NOT NULL DEFAULT 'DELIVERED',
     last_attempted_characters INTEGER NOT NULL DEFAULT 0,
+    inspection_summary TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (project_id, task_id, consumer_id)
@@ -561,6 +562,7 @@ _CONTEXT_CURSORS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("delivered_ancestry_identity", "TEXT NOT NULL DEFAULT ''"),
     ("last_outcome", "TEXT NOT NULL DEFAULT 'DELIVERED'"),
     ("last_attempted_characters", "INTEGER NOT NULL DEFAULT 0"),
+    ("inspection_summary", "TEXT NOT NULL DEFAULT '{}'"),
 )
 _EVENTS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("run_id", "TEXT"),
@@ -1543,6 +1545,7 @@ class State:
             "bundle_identity",
             "preserved_policy_identity",
             "delivered_task_identities",
+            "inspection_summary",
         ):
             item[key] = json.loads(item[key])
         return item
@@ -1586,6 +1589,9 @@ class State:
             "last_event_id": int(row.get("last_event_id", 0)),
             "last_outcome": row.get("last_outcome", "DELIVERED"),
             "last_attempted_characters": int(row.get("last_attempted_characters", 0)),
+            "inspection_summary": json.dumps(
+                row.get("inspection_summary", {}), sort_keys=True, separators=(",", ":")
+            ),
             "created_at": row.get("created_at") or now,
             "updated_at": now,
         }
@@ -1594,12 +1600,12 @@ class State:
             "(project_id, task_id, consumer_id, tree_sha, policy_digest, task_contract_digest, "
             "identity_fingerprint, bundle_identity, preserved_policy_identity, "
             "delivered_task_identities, delivered_ancestry_identity, last_event_id, "
-            "last_outcome, last_attempted_characters, created_at, updated_at) "
+            "last_outcome, last_attempted_characters, inspection_summary, created_at, updated_at) "
             "VALUES (:project_id, :task_id, :consumer_id, :tree_sha, :policy_digest, "
             ":task_contract_digest, :identity_fingerprint, :bundle_identity, "
             ":preserved_policy_identity, :delivered_task_identities, "
             ":delivered_ancestry_identity, :last_event_id, :last_outcome, "
-            ":last_attempted_characters, :created_at, :updated_at) "
+            ":last_attempted_characters, :inspection_summary, :created_at, :updated_at) "
             "ON CONFLICT(project_id, task_id, consumer_id) DO UPDATE SET "
             "tree_sha=excluded.tree_sha, policy_digest=excluded.policy_digest, "
             "task_contract_digest=excluded.task_contract_digest, "
@@ -1610,6 +1616,7 @@ class State:
             "delivered_ancestry_identity=excluded.delivered_ancestry_identity, "
             "last_event_id=excluded.last_event_id, last_outcome=excluded.last_outcome, "
             "last_attempted_characters=excluded.last_attempted_characters, "
+            "inspection_summary=excluded.inspection_summary, "
             "updated_at=excluded.updated_at",
             payload,
         )

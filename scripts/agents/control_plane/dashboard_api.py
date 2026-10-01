@@ -48,6 +48,13 @@ from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .agent_session import MODE_FRESH, age_seconds, request_forced_fresh
 from .commands import CommandContext, CommandError, apply_command
+from .context_cursor import (
+    OUTCOME_DELIVERED,
+    REASON_POLICY_DIGEST_CHANGED,
+    REASON_PRESERVED_POLICY_CHANGED,
+    REASON_TASK_CONTRACT_CHANGED,
+    REASON_TREE_CHANGED,
+)
 from .models import utc_now_iso
 from .operations import (
     AppLifecycleManager,
@@ -1942,6 +1949,164 @@ def create_app(
 
         return {"value": value, "class": klass, "reason": reason, "unit": unit}
 
+    def _context_reference(value: Any, kind: Any) -> dict[str, Any]:
+        """Project one ancestry identity without leaking a host path or URL secret."""
+
+        raw = str(value or "").strip()
+        parsed = urlparse(raw)
+        href = None
+        safe = raw
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.netloc
+            and not parsed.username
+            and re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc)
+        ):
+            # Query strings can carry credentials. The source identity needs
+            # only the public path/fragment, never query parameters.
+            safe = f"{parsed.scheme}://{parsed.netloc}{redact_text(parsed.path)}"
+            if parsed.fragment:
+                safe += f"#{redact_text(parsed.fragment)}"
+            href = safe
+        elif (
+            parsed.scheme
+            or not raw
+            or raw.startswith(("/", "~", "\\"))
+            or "\\" in raw
+            or ".." in Path(raw).parts
+            or re.match(r"^[A-Za-z]:", raw)
+        ):
+            safe = "WITHHELD_UNSAFE_REFERENCE"
+        else:
+            safe = sanitize_text(raw)
+        return {"kind": sanitize_text(str(kind or "reference")), "reference": safe, "href": href}
+
+    def _context_inspector_view(task_id: str, consumer_id: str) -> dict[str, Any]:
+        task = _authorized_task_id(task_id)
+        if consumer_id not in ctx.registry.workers:
+            raise HTTPException(status_code=404, detail=f"unknown worker {consumer_id!r}")
+        project_id = task.project_id or ctx.selected_project_id
+        row = (
+            ctx.state.get_context_cursor(
+                project_id=project_id,
+                task_id=task.id,
+                consumer_id=consumer_id,
+            )
+            if project_id is not None
+            else None
+        )
+        unknown = _session_fact(klass="UNKNOWN", reason="no context delivery is recorded")
+        if row is None:
+            return {
+                "task": sanitize_text(task_id),
+                "consumer": sanitize_text(consumer_id),
+                "outcome": "NOT_REPORTED",
+                "bundle_identity": unknown,
+                "bundle_characters": unknown,
+                "incremental_characters": unknown,
+                "task_additions": unknown,
+                "event_additions": unknown,
+                "ancestry_additions": unknown,
+                "context_savings_characters": {
+                    **unknown,
+                    "formula": "full_refresh_characters - required_incremental_characters",
+                    "inputs": {"full_refresh_characters": None, "required_incremental_characters": None},
+                },
+                "invalidation_component": unknown,
+                "ancestry": {"nodes": [], "truncated": None, "class": "UNKNOWN"},
+                "graphify_supplied": unknown,
+                "graphify_status": unknown,
+                "authority": "NO_RECORDED_DELIVERY",
+            }
+
+        summary = row.get("inspection_summary") or {}
+
+        def measured_int(key: str) -> dict[str, Any]:
+            value = summary.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return _session_fact(value, klass="MEASURED", unit="characters" if "characters" in key else None)
+            return _session_fact(klass="UNKNOWN", reason=f"{key} was not recorded")
+
+        identity = summary.get("bundle_identity")
+        safe_identity = identity if isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{64}", identity) else None
+        mandatory = summary.get("mandatory_bundle_characters")
+        incremental = summary.get("incremental_characters")
+        bundle_characters = (
+            _session_fact(mandatory + incremental, klass="MEASURED", unit="characters")
+            if isinstance(mandatory, int) and isinstance(incremental, int) and mandatory >= 0 and incremental >= 0
+            else _session_fact(klass="UNKNOWN", reason="bundle size inputs were not both recorded")
+        )
+        full = summary.get("full_refresh_characters")
+        required = summary.get("required_incremental_characters")
+        savings_known = (
+            row.get("last_outcome") == OUTCOME_DELIVERED
+            and summary.get("savings_available") is True
+            and isinstance(full, int)
+            and isinstance(required, int)
+            and full >= required >= 0
+        )
+        savings = {
+            "value": full - required if savings_known else None,
+            "class": "DERIVED" if savings_known else "UNKNOWN",
+            "reason": None if savings_known else "both comparison inputs are not known for a delivered context",
+            "unit": "characters",
+            "formula": "full_refresh_characters - required_incremental_characters",
+            "inputs": {
+                "full_refresh_characters": full if isinstance(full, int) and full >= 0 else None,
+                "required_incremental_characters": required if isinstance(required, int) and required >= 0 else None,
+            },
+        }
+        allowed_components = {
+            REASON_TREE_CHANGED,
+            REASON_POLICY_DIGEST_CHANGED,
+            REASON_TASK_CONTRACT_CHANGED,
+            REASON_PRESERVED_POLICY_CHANGED,
+        }
+        component = summary.get("invalidation_component")
+        component_fact = (
+            _session_fact(component, klass="MEASURED")
+            if component in allowed_components
+            else _session_fact(klass="UNKNOWN", reason="no cursor invalidation was recorded")
+        )
+        raw_nodes = summary.get("ancestry_nodes")
+        nodes = [
+            _context_reference(item.get("reference"), item.get("kind"))
+            for item in raw_nodes[:32]
+            if isinstance(item, dict)
+        ] if isinstance(raw_nodes, list) else []
+        ancestry_recorded = isinstance(raw_nodes, list) and isinstance(summary.get("ancestry_truncated"), bool)
+        graph_supplied = summary.get("graphify_supplied")
+        graph_status = summary.get("graphify_status")
+        return {
+            "task": sanitize_text(task_id),
+            "consumer": sanitize_text(consumer_id),
+            "outcome": sanitize_text(str(row.get("last_outcome") or "UNKNOWN")),
+            "bundle_identity": _session_fact(safe_identity, klass="MEASURED") if safe_identity else unknown,
+            "bundle_characters": bundle_characters,
+            "incremental_characters": measured_int("incremental_characters"),
+            "task_additions": measured_int("task_additions"),
+            "event_additions": measured_int("event_additions"),
+            "ancestry_additions": measured_int("ancestry_additions"),
+            "context_savings_characters": savings,
+            "invalidation_component": component_fact,
+            "ancestry": {
+                "nodes": nodes,
+                "truncated": summary.get("ancestry_truncated") if ancestry_recorded else None,
+                "class": "MEASURED" if ancestry_recorded else "UNKNOWN",
+            },
+            "graphify_supplied": (
+                _session_fact(graph_supplied, klass="MEASURED")
+                if isinstance(graph_supplied, bool)
+                else _session_fact(klass="UNKNOWN", reason="Graphify supply status was not recorded")
+            ),
+            "graphify_status": (
+                _session_fact(sanitize_text(graph_status), klass="MEASURED")
+                if isinstance(graph_status, str) and graph_status
+                else _session_fact(klass="UNKNOWN", reason="Graphify status was not recorded")
+            ),
+            "authority": "RECORDED_CONTEXT_DELIVERY",
+        }
+
     def _session_view(task_id: str, worker: str) -> dict[str, Any]:
         # Authorization must precede the registry and persistence reads. In
         # particular, an unknown/foreign task may not be used as an oracle for
@@ -2028,6 +2193,12 @@ def create_app(
         """Safe task-scoped session facts for the existing Run Detail panel."""
 
         return _session_view(task_id, worker)
+
+    @app.get("/api/context-inspector/{task_id}/{consumer_id}")
+    def context_inspector_detail(task_id: str, consumer_id: str) -> dict[str, Any]:
+        """Safe facts about a delivery; composed prompt content is never returned."""
+
+        return _context_inspector_view(task_id, consumer_id)
 
     @app.post("/api/agent-sessions/{task_id}/{worker}/start-fresh")
     def agent_session_start_fresh(task_id: str, worker: str, request: Request) -> dict[str, Any]:
