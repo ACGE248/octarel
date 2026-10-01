@@ -3089,6 +3089,9 @@
 
   async function refreshOverview() {
     const data = await getJSON("/api/overview");
+    const wq = data.wake_queue || {};
+    const wqAge = wq.oldest_pending_age_seconds;
+    const wqLabel = `${wq.pending ?? 0} pending${wqAge == null ? "" : ` · oldest ${Math.round(wqAge)}s`}${wq.poisoned ? ` · ${wq.poisoned} poisoned` : ""}`;
     renderKV("overview-body", [
       ["Active", data.task_count],
       ["Queued", data.task_counts?.queued ?? 0],
@@ -3096,6 +3099,7 @@
       ["Needs attention", data.task_counts?.needs_attention ?? 0],
       ["Providers", `${data.configured_provider_count}/${data.provider_count} configured`],
       ["Stop after current", data.stop_after_current ? "yes" : "no"],
+      ["Wake queue", wqLabel, wq.poisoned ? "warn" : undefined],
     ]);
     const badge = document.getElementById("app-status");
     const status = data.octascene_app_status || "UNKNOWN";
@@ -4808,6 +4812,7 @@
     failed: { label: "Task failed", glyph: "✕", tone: "err", view: "view-tasks" },
     run: { label: "Run needs attention", glyph: "!", tone: "warn", view: "view-runs" },
     lease: { label: "Stale execution lease", glyph: "⚠", tone: "warn", view: "view-tasks" },
+    wake: { label: "Poisoned wake", glyph: "☠", tone: "err", view: "view-history" },
   };
 
   function attentionItems(data) {
@@ -4861,6 +4866,16 @@
         `${lease.stale_reason || "owner not alive"}${lease.task_id ? ` (task ${lease.task_id})` : ""}`
       );
     });
+    // ENG-PC-03 (issue #31): a wake is only ever surfaced here once it reaches the
+    // explicit POISONED dead-letter state (attempts exhausted) -- never a guess from
+    // how long it has been pending/claimed.
+    (data.wakes || []).forEach((wake) => {
+      add(
+        "wake",
+        `Poisoned wake: ${wake.reason}${wake.task_id ? ` (task ${wake.task_id})` : ""}`,
+        `${wake.coalesced_count} coalesced trigger(s), ${wake.attempts}/${wake.max_attempts} attempts${wake.last_error ? ` — ${wake.last_error}` : ""}`
+      );
+    });
     return items;
   }
 
@@ -4886,24 +4901,26 @@
     const data = await getJSON("/api/attention");
     const runbooksNeedingAttention = data.runbooks || [];
     const staleLeases = data.execution_leases || [];
+    const poisonedWakes = data.wakes || [];
     renderKV("attention-body", [
       ["Tasks needing attention", data.tasks.length],
       ["Providers needing attention", data.providers.length],
       ["Runbooks needing attention", runbooksNeedingAttention.length],
       ["Stale execution leases", staleLeases.length],
+      ["Poisoned wakes", poisonedWakes.length],
     ]);
     const items = attentionItems(data);
     const list = document.getElementById("attention-list");
     const attentionSignature = JSON.stringify([data, items]);
     if (list.dataset.signature === attentionSignature) {
-      state.attentionCount = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length;
+      state.attentionCount = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length;
       return;
     }
     list.dataset.signature = attentionSignature;
     list.innerHTML = "";
     // The popover keeps one row per /api/attention entry; advancement-derived
     // rows appear on the Overview card only.
-    const base = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length;
+    const base = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length;
     items.slice(0, base).forEach((item) => list.appendChild(attentionRow(item, { action: true })));
     const card = document.getElementById("overview-attention-list");
     if (card) {

@@ -23,6 +23,8 @@ from .models import (
     ProviderState,
     Runbook,
     Task,
+    WakeContribution,
+    WakeRequest,
     WorktreeRecord,
     utc_now_iso,
 )
@@ -265,6 +267,53 @@ CREATE TABLE IF NOT EXISTS execution_leases (
     updated_at TEXT NOT NULL
 );
 
+-- ENG-PC-03 (issue #31): durable wake queue. ``wake_queue`` is the current,
+-- coalesced state of each pending/in-flight wake; ``wake_queue_contributions``
+-- is the append-only, never-mutated record of every individual trigger that
+-- asked for one (including duplicates), which is how coalescing retains
+-- count, reasons and provenance instead of just a counter. See
+-- ``models.WakeRequest``/``models.WakeContribution`` and ``wake_queue.py`` for
+-- the policy layer (typed reasons, bounded retry/backoff, poisoning).
+CREATE TABLE IF NOT EXISTS wake_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT,
+    task_id TEXT,
+    stage TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    reason TEXT NOT NULL,
+    coalesced_count INTEGER NOT NULL DEFAULT 1,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    next_attempt_at TEXT,
+    run_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    claimed_at TEXT,
+    claimed_by TEXT,
+    completed_at TEXT,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS wake_queue_contributions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wake_id INTEGER NOT NULL REFERENCES wake_queue(id),
+    reason TEXT NOT NULL,
+    source TEXT,
+    provenance TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- The coalescing invariant: at most one PENDING wake per project/task/stage.
+-- ``IFNULL(..., '')`` folds NULLs into a stable, comparable value so two
+-- project-less or stage-less wakes for the same task still collide as
+-- intended rather than each getting its own NULL-valued "unique" row (SQLite
+-- unique indexes otherwise never treat two NULLs as equal).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wake_queue_pending_key
+    ON wake_queue (IFNULL(project_id, ''), IFNULL(task_id, ''), IFNULL(stage, ''))
+    WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS idx_wake_queue_status ON wake_queue (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_wake_queue_contributions_wake ON wake_queue_contributions (wake_id, id);
+
 CREATE TABLE IF NOT EXISTS overnight_sessions (
     session_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -397,6 +446,9 @@ _RUNBOOKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
 #   Project A repository-health snapshot can never render as Project B's.
 # - ``usage_governance`` -- keyed by ``runbook_id``; it inherits project scope
 #   transitively from the runbook it belongs to rather than duplicating it.
+# - ``wake_queue_contributions`` -- keyed by ``wake_id``; it inherits project
+#   scope transitively from the ``wake_queue`` row it belongs to, exactly like
+#   ``usage_governance`` above, rather than duplicating the column.
 #
 # This is an explicit audit, not a blanket "add project_id to everything".
 _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
@@ -409,6 +461,7 @@ _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
     "dispatch_decisions",
     "task_intake_claims",
     "execution_leases",
+    "wake_queue",
 )
 
 # ``control_settings`` keys that are derived, project-dependent caches rather
@@ -1466,6 +1519,198 @@ class State:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    # ------------------------------------------------------------ wake queue
+    # ENG-PC-03 (issue #31). Every mutation below is a single guarded SQL
+    # statement, the same discipline as the execution-lease block above: the
+    # database's own atomicity decides concurrent outcomes, never a Python
+    # read-then-write. See ``wake_queue.py`` for the typed policy layer built
+    # on top (reason validation, backoff, poisoning, run-event emission).
+
+    @_serialized
+    def enqueue_wake(
+        self,
+        *,
+        project_id: str | None,
+        task_id: str | None,
+        stage: str | None,
+        reason: str,
+        source: str | None,
+        provenance: str,
+        run_id: str | None,
+        max_attempts: int,
+    ) -> WakeRequest:
+        """Atomically create-or-coalesce one wake, and durably record this contribution.
+
+        The ``INSERT ... ON CONFLICT (...) WHERE status = 'PENDING' DO UPDATE`` targets
+        exactly the partial unique index declared in the schema: SQLite only resolves a
+        conflict target against a partial index when the conflict clause's own ``WHERE``
+        matches it verbatim, which is what makes a duplicate pending wake for the same
+        project/task/stage a single atomic increment of the existing row rather than a
+        second row or a lost update -- proven against real concurrent connections, not
+        mocked, in ``tests/test_wake_queue.py``. The contribution row is inserted in the
+        same transaction so ``coalesced_count`` and the provenance ledger never drift
+        apart.
+        """
+
+        now = utc_now_iso()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            cursor = self._conn.execute(
+                "INSERT INTO wake_queue "
+                "(project_id, task_id, stage, status, reason, coalesced_count, attempts, "
+                "max_attempts, run_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'PENDING', ?, 1, 0, ?, ?, ?, ?) "
+                "ON CONFLICT (IFNULL(project_id, ''), IFNULL(task_id, ''), IFNULL(stage, '')) "
+                "WHERE status = 'PENDING' "
+                "DO UPDATE SET reason = excluded.reason, coalesced_count = coalesced_count + 1, "
+                "updated_at = excluded.updated_at "
+                "RETURNING id",
+                (project_id, task_id, stage, reason, max_attempts, run_id, now, now),
+            )
+            wake_id = cursor.fetchone()["id"]
+            self._conn.execute(
+                "INSERT INTO wake_queue_contributions (wake_id, reason, source, provenance, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (wake_id, reason, source, provenance, now),
+            )
+            row = self._conn.execute("SELECT * FROM wake_queue WHERE id = ?", (wake_id,)).fetchone()
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        return WakeRequest.from_row(dict(row))
+
+    @_serialized
+    def claim_next_wake(self, *, claimed_by: str, now: str | None = None) -> WakeRequest | None:
+        """Claim the oldest due wake (``PENDING``, or ``FAILED`` whose backoff elapsed).
+
+        One atomic ``UPDATE ... WHERE id = (SELECT ...) RETURNING`` -- the subquery and
+        the write are the same SQLite statement, so no other writer can observe or claim
+        the selected row between the pick and the claim. ``None`` means nothing is due;
+        never blocks and never spins.
+        """
+
+        now = now or utc_now_iso()
+        cursor = self._conn.execute(
+            "UPDATE wake_queue SET status = 'CLAIMED', claimed_at = ?, claimed_by = ?, "
+            "attempts = attempts + 1, updated_at = ? "
+            "WHERE id = ("
+            "  SELECT id FROM wake_queue "
+            "  WHERE status = 'PENDING' "
+            "     OR (status = 'FAILED' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?) "
+            "  ORDER BY created_at ASC LIMIT 1"
+            ") "
+            "RETURNING *",
+            (now, claimed_by, now, now),
+        )
+        row = cursor.fetchone()
+        self._conn.commit()
+        return WakeRequest.from_row(dict(row)) if row else None
+
+    @_serialized
+    def complete_wake(self, *, wake_id: int, now: str | None = None) -> WakeRequest | None:
+        """CAS: only a currently-``CLAIMED`` row may be marked ``COMPLETED``."""
+
+        now = now or utc_now_iso()
+        cursor = self._conn.execute(
+            "UPDATE wake_queue SET status = 'COMPLETED', completed_at = ?, updated_at = ? "
+            "WHERE id = ? AND status = 'CLAIMED' "
+            "RETURNING *",
+            (now, now, wake_id),
+        )
+        row = cursor.fetchone()
+        self._conn.commit()
+        return WakeRequest.from_row(dict(row)) if row else None
+
+    @_serialized
+    def fail_wake(
+        self, *, wake_id: int, error: str, next_attempt_at: str | None, now: str | None = None
+    ) -> WakeRequest | None:
+        """CAS: only a currently-``CLAIMED`` row may be marked ``FAILED``/``POISONED``.
+
+        Poisoning is decided from the typed ``attempts``/``max_attempts`` columns read
+        from this same row, never from ``error`` text -- ``error`` is stored only as an
+        informational, operator-facing record. Only this process (the one holding the
+        claim) may ever observe the row in ``CLAIMED``, so the read immediately before
+        the guarded write is not a race: no other caller can claim, complete, or fail
+        the same id while it is ``CLAIMED``.
+        """
+
+        now = now or utc_now_iso()
+        current = self._conn.execute(
+            "SELECT * FROM wake_queue WHERE id = ? AND status = 'CLAIMED'", (wake_id,)
+        ).fetchone()
+        if current is None:
+            return None
+        poisoned = int(current["attempts"]) >= int(current["max_attempts"])
+        status = "POISONED" if poisoned else "FAILED"
+        cursor = self._conn.execute(
+            "UPDATE wake_queue SET status = ?, last_error = ?, next_attempt_at = ?, updated_at = ? "
+            "WHERE id = ? AND status = 'CLAIMED' "
+            "RETURNING *",
+            (status, error, None if poisoned else next_attempt_at, now, wake_id),
+        )
+        row = cursor.fetchone()
+        self._conn.commit()
+        return WakeRequest.from_row(dict(row)) if row else None
+
+    @_serialized
+    def recover_claimed_wakes(self, *, project_id: str | None = None) -> int:
+        """Daemon-restart recovery: a ``CLAIMED`` wake's only possible claimant was this
+        same single-daemon-authority process (see ``advancement_lease.daemon_authority_active``);
+        if the process is restarting, that claim is definitionally orphaned. Unlike
+        execution leases, there is no cross-process ownership question here to prove --
+        resetting to ``PENDING`` is always safe, never a timeout-based guess.
+        """
+
+        now = utc_now_iso()
+        if project_id is not None:
+            cursor = self._conn.execute(
+                "UPDATE wake_queue SET status = 'PENDING', claimed_at = NULL, claimed_by = NULL, updated_at = ? "
+                "WHERE status = 'CLAIMED' AND project_id = ?",
+                (now, project_id),
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE wake_queue SET status = 'PENDING', claimed_at = NULL, claimed_by = NULL, updated_at = ? "
+                "WHERE status = 'CLAIMED'",
+                (now,),
+            )
+        self._conn.commit()
+        return cursor.rowcount
+
+    @_serialized
+    def get_wake(self, wake_id: int) -> WakeRequest | None:
+        row = self._conn.execute("SELECT * FROM wake_queue WHERE id = ?", (wake_id,)).fetchone()
+        return WakeRequest.from_row(dict(row)) if row else None
+
+    @_serialized
+    def list_wakes(
+        self, *, project_id: str | None = None, status: str | None = None, limit: int = 500
+    ) -> list[WakeRequest]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.append(limit)
+        rows = self._conn.execute(
+            f"SELECT * FROM wake_queue {where} ORDER BY created_at ASC LIMIT ?", values
+        ).fetchall()
+        return [WakeRequest.from_row(dict(row)) for row in rows]
+
+    @_serialized
+    def list_wake_contributions(self, wake_id: int) -> list[WakeContribution]:
+        rows = self._conn.execute(
+            "SELECT * FROM wake_queue_contributions WHERE wake_id = ? ORDER BY id ASC", (wake_id,)
+        ).fetchall()
+        return [WakeContribution.from_row(dict(row)) for row in rows]
 
     # ---------------------------------------------------------- advancement
 

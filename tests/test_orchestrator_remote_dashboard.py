@@ -320,6 +320,23 @@ def test_remote_graphify_check_and_refresh_are_identity_audited(ctx, keypair, mo
     assert any(MAINTAINER_EMAIL in message and "graphify_refresh" in message and "OK" in message for message in messages)
 
 
+def test_remote_manual_wake_is_identity_audited(ctx, keypair):
+    private_key, public_key = keypair
+    client = TestClient(create_app(ctx, remote=_remote_state(public_key)))
+    headers = {ACCESS_JWT_HEADER: _token(private_key), "Origin": f"https://{HOSTNAME}"}
+
+    resp = client.post(
+        "/api/wake-queue/manual", headers=headers, json={"task_id": "t1", "stage": "build"}
+    )
+
+    assert resp.status_code == 200 and resp.json()["status"]
+    messages = [e.message for e in ctx.state.list_events(limit=50) if e.category == "remote_audit"]
+    assert any(
+        MAINTAINER_EMAIL in message and "wake_queue_manual" in message and "OK" in message
+        for message in messages
+    )
+
+
 def test_local_state_changes_are_not_marked_as_remote_audit_events(ctx, keypair):
     """A purely local POST (no Access token at all) must not be misrecorded as
 

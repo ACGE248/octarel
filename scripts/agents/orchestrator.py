@@ -52,6 +52,8 @@ from .control_plane.state import (
     resolve_standalone_db_path,
 )
 from .control_plane.supervisor import Supervisor
+from .control_plane.wake_queue import drain_due as drain_due_wakes
+from .control_plane.wake_queue import recover_on_restart as recover_wakes_on_restart
 from .registry import load_registry
 from .runner import ENV_CANONICAL_REPO_ROOT, repo_root
 
@@ -281,6 +283,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _run_startup_recovery(ctx, root)
     recover_runbooks_on_restart(state=ctx.state)
     recover_overnight_on_restart(ctx.state)
+    # ENG-PC-03 (issue #31): a wake left CLAIMED by a previous daemon instance has no
+    # surviving claimant -- this is the only process that could ever have held it -- so
+    # it is always safe to reset to PENDING here, never a timeout-based guess.
+    recover_wakes_on_restart(ctx.state)
     print(f"orchestrator daemon started (state: {ctx.state.db_path})")
     try:
         while True:
@@ -298,6 +304,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 state=ctx.state, registry=ctx.registry, supervisor=ctx.supervisor, scheduler=ctx.scheduler,
                 allow_launch=not ctx.stop_after_current,
             )
+            # ENG-PC-03: mark due wakes (e.g. an operator's MANUAL request) handled now
+            # that this tick's unconditional reconcile/overnight pass above has already
+            # run. This never schedules anything itself -- see ``wake_queue.drain_due``.
+            drain_due_wakes(ctx.state, claimed_by="daemon")
             if ctx.stop_after_current:
                 still_running = [t for t in ctx.state.list_tasks() if t.state == "RUNNING"]
                 if not still_running:
