@@ -666,6 +666,20 @@
             <h2>Model &amp; session usage</h2>
             <span class="hint" id="usage-telemetry-note"></span>
           </div>
+          <div class="usage-filters" aria-label="Usage ledger filters">
+            <label>Project
+              <select id="usage-filter-project" aria-label="Filter usage by project"><option value="">All selected-project usage</option></select>
+            </label>
+            <label>Task
+              <select id="usage-filter-task" aria-label="Filter usage by task"><option value="">All tasks</option></select>
+            </label>
+            <label>Provider
+              <select id="usage-filter-provider" aria-label="Filter usage by provider"><option value="">All providers</option></select>
+            </label>
+            <label>Model
+              <select id="usage-filter-model" aria-label="Filter usage by model"><option value="">All models</option></select>
+            </label>
+          </div>
           <!-- OCTAREL-UI-07 (issue #42): value and spend, side by side and
                never combined. The estimated figures say what the tokens would
                have been worth at public API rates; only the last row is money
@@ -673,6 +687,10 @@
           <div id="usage-aggregates" class="usage-aggregates"></div>
           <p class="hint usage-invariant" id="usage-aggregate-invariant"></p>
           <p class="hint usage-invariant" id="usage-pricing-provenance"></p>
+          <section class="usage-budget-section" aria-labelledby="usage-budget-heading">
+            <h3 id="usage-budget-heading">Budget progress</h3>
+            <div id="usage-budget-progress" class="usage-budget-list"></div>
+          </section>
           <div id="usage-telemetry-rows" class="entity-list">Loading…</div>
         </div>
         <div class="card wide" id="card-usage-routing">

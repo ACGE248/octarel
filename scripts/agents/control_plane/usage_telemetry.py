@@ -564,6 +564,8 @@ def build_row(
     *,
     facts: WorkerFacts,
     project_id: str | None,
+    run_id: str | None = None,
+    session_id: str | None = None,
     duration_seconds: float | None = None,
     pricing: ModelPricing | None = None,
     pricing_reason: str | None = None,
@@ -595,6 +597,8 @@ def build_row(
             "project_id": project_id,
             "runbook_id": record.get("runbook_id"),
             "task_id": record.get("task_id"),
+            "run_id": run_id,
+            "session_id": session_id,
             "worker": facts.worker,
             "provider": facts.provider,
             "execution_system": facts.execution_system,
@@ -774,7 +778,15 @@ def _sum_cell(values: list[float], *, formula: str, rows: int) -> dict[str, Any]
     return cell
 
 
-def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = None) -> dict[str, Any]:
+def build_aggregates(
+    rows: list[dict[str, Any]],
+    *,
+    now: _dt.datetime | None = None,
+    project_id: str | None = None,
+    task_id: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
     """Per-window totals, with estimated value and actual spend kept apart.
 
     Three totals of *value* -- what the tokens would have been worth on the
@@ -786,6 +798,20 @@ def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = N
     figures with work of unknown age.
     """
 
+    filters = {
+        "project_id": project_id,
+        "task_id": task_id,
+        "provider": provider,
+        "model": model,
+    }
+    rows = [
+        row
+        for row in rows
+        if all(
+            expected is None or (row.get("attribution") or {}).get(key) == expected
+            for key, expected in filters.items()
+        )
+    ]
     moment = (now or _dt.datetime.now(_dt.UTC)).astimezone(_dt.UTC)
     starts = window_starts(moment)
 
@@ -885,6 +911,7 @@ def build_aggregates(rows: list[dict[str, Any]], *, now: _dt.datetime | None = N
         "basis": WINDOW_BASIS,
         "invariant": AGGREGATE_INVARIANT,
         "generated_at": moment.isoformat(),
+        "filters": filters,
         "excluded_undated_rows": undated,
         "excluded_future_rows": future,
         "excluded_reason": (

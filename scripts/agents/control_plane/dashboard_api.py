@@ -42,6 +42,8 @@ from ..graph_lifecycle import state_event_recorder as graphify_state_event_recor
 from ..redaction import redact_text
 from . import manager_chat as _manager_chat
 from . import pricing as _pricing
+from . import usage_budgets as _usage_budgets
+from . import usage_ledger as _usage_ledger
 from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .agent_session import MODE_FRESH, age_seconds, request_forced_fresh
@@ -954,6 +956,24 @@ def create_app(
 
     def scoped_events(limit: int) -> list[Any]:
         return ctx.state.list_events(limit=limit, project_id=ctx.selected_project_id)
+
+    def current_budget_progress(*, pricing_book: Any | None = None) -> list[dict[str, Any]]:
+        """Safe presentation rows for enabled budgets in the selected project."""
+
+        _usage_ledger.reconcile_usage_governance_safely(
+            ctx.state,
+            project_id=ctx.selected_project_id,
+            registry=ctx.registry,
+        )
+        rows = _usage_budgets.progress(
+            ctx.state,
+            registry=ctx.registry,
+            project_id=ctx.selected_project_id,
+            pricing_book=pricing_book or pricing_loader(),
+        )
+        # Budget identifiers and scope keys are configuration identity, not a
+        # license to expose a host path if malformed legacy data contains one.
+        return [sanitize_data(row) for row in rows]
 
     refresh_repository_health(ctx)
 
@@ -2107,12 +2127,17 @@ def create_app(
         # surfaced here -- never a time-based "this claimed wake looks stuck" guess,
         # mirroring stale_leases's refusal to classify staleness from elapsed time.
         troubled_wakes = wake_queue_attention(ctx.state, project_id=ctx.selected_project_id)
+        troubled_budgets = [
+            row for row in current_budget_progress()
+            if row["status"] in {_usage_budgets.STATUS_WARNING, _usage_budgets.STATUS_BLOCKED}
+        ]
         return {
             "tasks": failed_or_blocked,
             "providers": troubled_providers,
             "runbooks": troubled_runbooks,
             "execution_leases": troubled_leases,
             "wakes": troubled_wakes,
+            "usage_budgets": troubled_budgets,
         }
 
     @app.post("/api/wake-queue/manual")
@@ -2326,11 +2351,17 @@ def create_app(
         }
 
     @app.get("/api/usage-telemetry")
-    def usage_telemetry() -> dict[str, Any]:
+    def usage_telemetry(
+        project: str | None = None,
+        task: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         """AO-style per-run model/session usage, context and cost (issues #25, #42).
 
-        A read model over the durable usage-governance records the supervisor
-        already writes, joined with registry facts for the worker that ran.
+        A read model over the durable per-run usage ledger, joined with
+        registry facts for the worker that ran. Legacy usage-governance
+        records are promoted idempotently so pre-ledger history remains visible.
         Every metric carries the class that established it -- MEASURED,
         DERIVED, UNKNOWN, NOT_EXPOSED or NOT_APPLICABLE -- so a figure Octarel
         cannot establish is stated as unavailable rather than estimated.
@@ -2345,66 +2376,61 @@ def create_app(
         """
 
         book = pricing_loader()
-        rows: list[dict[str, Any]] = []
-        for record in ctx.state.list_usage_governance():
-            # The worker that actually ran is the most recent route-history
-            # entry; attributing usage to a configured default would misreport
-            # a run that fell back to a different worker.
-            history = record.get("route_history") or []
-            entry: dict[str, Any] = {}
-            worker_name = None
-            for candidate in reversed(history):
-                if isinstance(candidate, dict) and candidate.get("worker"):
-                    entry = candidate
-                    worker_name = str(candidate["worker"])
-                    break
-            worker = ctx.registry.workers.get(worker_name) if worker_name else None
+        if ctx.selected_project_id is not None and project not in {None, ctx.selected_project_id}:
+            raise HTTPException(status_code=404, detail="usage project is outside the selected project scope")
+        selected_project = project or ctx.selected_project_id
+        _usage_ledger.reconcile_usage_governance_safely(
+            ctx.state,
+            project_id=ctx.selected_project_id,
+            registry=ctx.registry,
+        )
+        catalog_entries = ctx.state.list_usage_ledger(project_id=ctx.selected_project_id)
+        entries = ctx.state.list_usage_ledger(
+            project_id=selected_project,
+            task_id=task,
+            provider=provider,
+            model=model,
+        )
+        rows = [
+            sanitize_data(row)
+            for row in _usage_ledger.build_ledger_rows(entries, registry=ctx.registry, pricing_book=book)
+        ]
 
-            # Prefer what the run itself recorded. The registry describes the
-            # worker as configured *now*: a pool worker resolves a different
-            # model per run, and a later workers.json edit would otherwise
-            # silently relabel history. A registry-sourced value is still shown,
-            # but marked as derived rather than as this run's measurement.
-            recorded_model = entry.get("model") or None
-            recorded_cost_class = entry.get("cost_class") or None
-            facts = _usage_telemetry.WorkerFacts(
-                worker=worker_name or "UNKNOWN",
-                provider=entry.get("provider") or getattr(worker, "provider", None),
-                execution_system=getattr(worker, "execution_system", None),
-                model=recorded_model
-                or (getattr(worker, "effective_model", None) or getattr(worker, "default_model", None))
-                or None,
-                cost_class=recorded_cost_class or getattr(worker, "cost_class", None),
-                model_from_record=bool(recorded_model),
-                cost_class_from_record=bool(recorded_cost_class),
-                # OCTAREL-UI-08 (issue #44): from the same attempt that supplies
-                # the worker above, so a cost can never be reported against a
-                # worker that did not produce it.
-                reported_cost_usd=entry.get("reported_cost_usd"),
-                reported_cost_source=entry.get("reported_cost_source"),
-            )
-            # Priced from the model this run is attributed to -- including a
-            # fallback run, which is attributed to the worker that actually
-            # executed, so its value is priced at that worker's model rather
-            # than the one originally preferred.
-            lookup = book.lookup(provider=facts.provider, model=facts.model)
-            rows.append(
-                _usage_telemetry.build_row(
-                    record,
-                    facts=facts,
-                    project_id=ctx.selected_project_id,
-                    pricing=lookup.pricing,
-                    pricing_reason=lookup.reason,
-                )
+        def safe_options(key: str) -> list[str]:
+            return sorted(
+                {
+                    sanitize_text(str(value))
+                    for entry in catalog_entries
+                    if (value := entry.get(key)) is not None
+                }
             )
 
         return {
             "rows": rows,
-            "aggregates": _usage_telemetry.build_aggregates(rows),
+            "aggregates": _usage_telemetry.build_aggregates(
+                rows,
+                project_id=selected_project,
+                task_id=task,
+                provider=provider,
+                model=model,
+            ),
             # Snapshot provenance, kept beside the rows rather than inside
             # them: it describes where rates came from, and is never evidence
             # about how anything was billed.
             "pricing_source": book.provenance(),
+            "filters": {
+                "project": sanitize_text(selected_project) if selected_project else None,
+                "task": sanitize_text(task) if task else None,
+                "provider": sanitize_text(provider) if provider else None,
+                "model": sanitize_text(model) if model else None,
+            },
+            "filter_options": {
+                "projects": safe_options("project_id"),
+                "tasks": safe_options("task_id"),
+                "providers": safe_options("provider"),
+                "models": safe_options("effective_model"),
+            },
+            "budgets": current_budget_progress(pricing_book=book),
             "unavailable_metrics": _usage_telemetry.unavailable_metrics(),
             "note": (
                 "Cache-category tokens and effective context limits are not reported by any worker runtime "

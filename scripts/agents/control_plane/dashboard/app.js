@@ -722,6 +722,107 @@
     });
   }
 
+  const BUDGET_CONSTRAINT_LABELS = {
+    metered_cash_usd: "Metered cash",
+    tokens: "Tokens",
+    wall_clock_seconds: "Wall clock",
+    attempts: "Attempts",
+    fallbacks: "Fallbacks",
+    provider_quota_reserve: "Provider quota reserve",
+  };
+
+  function budgetNumber(value, constraint) {
+    if (!Number.isFinite(Number(value))) return "UNKNOWN";
+    if (constraint === "metered_cash_usd") return usdText(value);
+    if (constraint === "tokens") return Number(value).toLocaleString();
+    if (constraint === "wall_clock_seconds") return `${Number(value).toFixed(0)}s`;
+    return Number(value).toLocaleString();
+  }
+
+  function renderUsageBudgets(budgets) {
+    const root = document.getElementById("usage-budget-progress");
+    if (!root) return;
+    root.innerHTML = "";
+    if (!budgets || !budgets.length) {
+      root.appendChild(el("p", { class: "hint", text: "No enabled usage budgets apply to this project." }));
+      return;
+    }
+    budgets.forEach((budget) => {
+      const known = USAGE_ESTABLISHED.has(budget.evidence_class)
+        && budget.value !== null && budget.value !== undefined;
+      const status = ["WARNING", "BLOCKED"].includes(budget.status) ? budget.status : budget.status || "UNKNOWN";
+      const progressKnown = known && Number.isFinite(Number(budget.progress_percent));
+      const scope = budget.bounding_scope || budget.scope_type || "UNKNOWN";
+      const amount = known
+        ? `${budgetNumber(budget.value, budget.constraint_type)} / ${budgetNumber(budget.limit, budget.constraint_type)}`
+        : "UNKNOWN / " + budgetNumber(budget.limit, budget.constraint_type);
+      const statusLabel = status === "BLOCKED" ? "HARD BLOCK" : status;
+      root.appendChild(el("article", {
+        class: `usage-budget is-${status.toLowerCase()}`,
+        "data-budget-status": status,
+      }, [
+        el("header", { class: "usage-budget-head" }, [
+          el("strong", { text: budget.budget_id || "budget" }),
+          el("span", { class: `budget-status is-${status.toLowerCase()}`, text: statusLabel }),
+        ]),
+        el("p", {
+          class: "usage-budget-scope",
+          text: `${BUDGET_CONSTRAINT_LABELS[budget.constraint_type] || budget.constraint_type} · scope ${scope}`,
+        }),
+        el("div", { class: "usage-budget-values" }, [
+          el("span", { text: `Used: ${amount}` }),
+          el("span", {
+            text: `Remaining: ${known && budget.remaining !== null ? budgetNumber(budget.remaining, budget.constraint_type) : "UNKNOWN"}`,
+          }),
+        ]),
+        progressKnown
+          ? el("div", {
+              class: "usage-budget-track",
+              role: "progressbar",
+              "aria-label": `${budget.budget_id} budget progress`,
+              "aria-valuemin": "0",
+              "aria-valuemax": "100",
+              "aria-valuenow": String(Math.max(0, Math.min(100, Number(budget.progress_percent)))),
+            }, [el("span", {
+              class: "usage-budget-fill",
+              style: `width: ${Math.max(0, Math.min(100, Number(budget.progress_percent)))}%`,
+            })])
+          : el("p", {
+              class: "usage-budget-no-bar",
+              text: "Progress bar unavailable: numerator or denominator is UNKNOWN or is not a total allowance.",
+            }),
+        el("p", {
+          class: "usage-budget-source",
+          text: `Source: ${budget.source || "UNKNOWN"} · Confidence: ${budget.evidence_class || "UNKNOWN"}`,
+        }),
+        // The figure above counts incurred usage only; enforcement also counts the
+        // proposed launch. Without saying so, headroom here reads as permission.
+        el("p", {
+          class: "usage-budget-source",
+          text: `Basis: ${budget.basis || "UNKNOWN"}`,
+        }),
+      ]));
+    });
+  }
+
+  function syncUsageFilter(id, values, fallbackLabel) {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const selected = select.value;
+    select.innerHTML = "";
+    select.appendChild(el("option", { value: "", text: fallbackLabel }));
+    (values || []).forEach((value) => select.appendChild(el("option", { value, text: value })));
+    select.value = (values || []).includes(selected) ? selected : "";
+  }
+
+  function renderUsageFilterOptions(options) {
+    const values = options || {};
+    syncUsageFilter("usage-filter-project", values.projects, "All selected-project usage");
+    syncUsageFilter("usage-filter-task", values.tasks, "All tasks");
+    syncUsageFilter("usage-filter-provider", values.providers, "All providers");
+    syncUsageFilter("usage-filter-model", values.models, "All models");
+  }
+
   function usageMetricCell(label, cell) {
     /* The class decides, not the presence of a value. A cell classed
        NOT_EXPOSED/UNKNOWN/NOT_APPLICABLE must never render as a figure even if
@@ -764,6 +865,8 @@
     if (note) note.textContent = body && body.note ? body.note : "";
 
     renderUsageAggregates(body && body.aggregates);
+    renderUsageBudgets(body && body.budgets);
+    renderUsageFilterOptions(body && body.filter_options);
     const invariant = document.getElementById("usage-aggregate-invariant");
     if (invariant) {
       const aggregates = (body && body.aggregates) || {};
@@ -849,14 +952,24 @@
     const root = document.getElementById("usage-telemetry-rows");
     if (!root || !isViewActive("view-providers")) return;
     try {
-      renderUsageTelemetry(await getJSON("/api/usage-telemetry"));
+      const query = new URLSearchParams();
+      [
+        ["project", "usage-filter-project"],
+        ["task", "usage-filter-task"],
+        ["provider", "usage-filter-provider"],
+        ["model", "usage-filter-model"],
+      ].forEach(([key, id]) => {
+        const value = document.getElementById(id)?.value;
+        if (value) query.set(key, value);
+      });
+      renderUsageTelemetry(await getJSON(`/api/usage-telemetry${query.size ? `?${query}` : ""}`));
     } catch (err) {
       root.innerHTML = "";
       const note = document.getElementById("usage-telemetry-note");
       if (note) note.textContent = "";
       /* A failed read must not leave last poll's totals standing beside a
          "could not be read" message: stale money figures are worse than none. */
-      ["usage-aggregates", "usage-aggregate-invariant", "usage-pricing-provenance"].forEach((id) => {
+      ["usage-aggregates", "usage-budget-progress", "usage-aggregate-invariant", "usage-pricing-provenance"].forEach((id) => {
         const node = document.getElementById(id);
         if (node) node.textContent = "";
       });
@@ -4550,6 +4663,9 @@
       text: taskRef && worker ? "Loading session capability…" : "Task or worker is NOT_REPORTED.",
     });
     const sessionControl = el("div", { class: "run-detail-session-control" }, [freshButton, freshReason]);
+    const usageEvidence = el("div", { class: "run-detail-usage" }, [
+      el("p", { class: "hint", text: "Loading durable usage evidence…" }),
+    ]);
     root.append(
       el("header", { class: "run-detail-head" }, [
         el("div", {}, [el("span", { class: "eyebrow", text: "Run Detail" }), el("h3", { text: run.name })]),
@@ -4557,12 +4673,45 @@
       ]),
       facts,
       sessionControl,
+      el("h4", { text: "Usage & budget evidence" }),
+      usageEvidence,
       el("h4", { text: "Execution timeline" })
     );
     const list = el("ul", { class: "events-list event-feed run-detail-events" });
     if (events.length) renderEventItems(list, events.slice().reverse(), true);
     else list.appendChild(el("li", { class: "event-empty" }, [el("span", { text: "No events are recorded for this run yet." })]));
     root.appendChild(list);
+
+    if (linkedTask) {
+      getJSON(`/api/usage-telemetry?task=${encodeURIComponent(linkedTask.id)}`).then((payload) => {
+        if (root.dataset.runId !== run.id) return;
+        usageEvidence.innerHTML = "";
+        const row = (payload.rows || []).find((item) => item.attribution?.runbook_id === run.id)
+          || (payload.rows || [])[0];
+        if (!row) {
+          usageEvidence.appendChild(el("p", { class: "hint", text: "No usage is recorded for this run." }));
+          return;
+        }
+        usageEvidence.append(
+          usageMoneyBlock(row),
+          el("dl", { class: "usage-metrics run-detail-usage-metrics" }, [
+            usageMetricCell("Input", row.metrics?.input_tokens || { class: "UNKNOWN", value: null }),
+            usageMetricCell("Output", row.metrics?.output_tokens || { class: "UNKNOWN", value: null }),
+            usageMetricCell("Tokens processed", row.metrics?.total_tokens || { class: "UNKNOWN", value: null }),
+          ]),
+        );
+      }).catch(() => {
+        if (root.dataset.runId !== run.id) return;
+        usageEvidence.innerHTML = "";
+        usageEvidence.appendChild(el("p", {
+          class: "hint",
+          text: "Usage evidence is UNKNOWN because the read failed.",
+        }));
+      });
+    } else {
+      usageEvidence.innerHTML = "";
+      usageEvidence.appendChild(el("p", { class: "hint", text: "Usage evidence is NOT_REPORTED for this run." }));
+    }
 
     if (!taskRef || !worker) return;
     const endpoint = `/api/agent-sessions/${encodeURIComponent(taskRef)}/${encodeURIComponent(worker)}`;
@@ -4906,6 +5055,8 @@
     run: { label: "Run needs attention", glyph: "!", tone: "warn", view: "view-runs" },
     lease: { label: "Stale execution lease", glyph: "⚠", tone: "warn", view: "view-tasks" },
     wake: { label: "Poisoned wake", glyph: "☠", tone: "err", view: "view-history" },
+    budget_warning: { label: "Budget warning", glyph: "△", tone: "warn", view: "view-providers" },
+    budget_block: { label: "Budget hard block", glyph: "■", tone: "err", view: "view-providers" },
   };
 
   function attentionItems(data) {
@@ -4969,6 +5120,14 @@
         `${wake.coalesced_count} coalesced trigger(s), ${wake.attempts}/${wake.max_attempts} attempts${wake.last_error ? ` — ${wake.last_error}` : ""}`
       );
     });
+    (data.usage_budgets || []).forEach((budget) => {
+      const kind = budget.status === "BLOCKED" ? "budget_block" : "budget_warning";
+      add(
+        kind,
+        `${budget.budget_id}: ${budget.status === "BLOCKED" ? "HARD BLOCK" : "WARNING"}`,
+        `${budget.constraint_type} at ${budget.bounding_scope} · ${budget.evidence_class} · ${budget.source}`
+      );
+    });
     return items;
   }
 
@@ -4995,25 +5154,27 @@
     const runbooksNeedingAttention = data.runbooks || [];
     const staleLeases = data.execution_leases || [];
     const poisonedWakes = data.wakes || [];
+    const troubledBudgets = data.usage_budgets || [];
     renderKV("attention-body", [
       ["Tasks needing attention", data.tasks.length],
       ["Providers needing attention", data.providers.length],
       ["Runbooks needing attention", runbooksNeedingAttention.length],
       ["Stale execution leases", staleLeases.length],
       ["Poisoned wakes", poisonedWakes.length],
+      ["Budget warnings / hard blocks", troubledBudgets.length],
     ]);
     const items = attentionItems(data);
     const list = document.getElementById("attention-list");
     const attentionSignature = JSON.stringify([data, items]);
     if (list.dataset.signature === attentionSignature) {
-      state.attentionCount = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length;
+      state.attentionCount = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
       return;
     }
     list.dataset.signature = attentionSignature;
     list.innerHTML = "";
     // The popover keeps one row per /api/attention entry; advancement-derived
     // rows appear on the Overview card only.
-    const base = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length;
+    const base = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
     items.slice(0, base).forEach((item) => list.appendChild(attentionRow(item, { action: true })));
     const card = document.getElementById("overview-attention-list");
     if (card) {
@@ -5054,8 +5215,20 @@
       const attribution = model ? `${model.execution_system} · ${model.provider} · ${model.default_model} · ${model.default_intensity}` : e.provider || "Local control plane";
       const title = e.message || `${e.category}`;
       const short = title.length > 90 ? `${title.slice(0, 87)}…` : title;
+      const budgetStatus = e.event_type === "usage.budget_blocked"
+        ? ((e.data || {}).status || "BLOCKED")
+        : e.event_type === "usage.budget_warning" ? ((e.data || {}).status || "WARNING") : null;
+      const budgetEventLabel = budgetStatus === "BLOCKED"
+        ? "HARD BLOCK"
+        : budgetStatus === "UNKNOWN" ? "EVIDENCE UNKNOWN" : budgetStatus;
       const body = el("div", {}, [
         el("strong", { text: short }),
+        budgetStatus
+          ? el("span", {
+              class: `budget-event-state is-${budgetStatus.toLowerCase()}`,
+              text: `${budgetEventLabel} · scope ${(e.data || {}).bounding_scope || "UNKNOWN"}`,
+            })
+          : null,
         el("div", {
           class: "entity-meta",
           text: rich
@@ -5094,7 +5267,7 @@
         ]), `event:${e.id}`));
       }
       listEl.appendChild(
-        el("li", { class: `level-${e.level} event-group-${e.display_group || "lifecycle"}`, "data-searchable": "true", "data-search": JSON.stringify(e) }, [
+        el("li", { class: `level-${e.level} event-group-${e.display_group || "lifecycle"}${budgetStatus ? ` budget-event-${budgetStatus.toLowerCase()}` : ""}`, "data-searchable": "true", "data-search": JSON.stringify(e) }, [
           el("span", { class: "evt-icon", text: eventIcon(e) }),
           body,
           el("span", { class: "evt-when", text: relativeTime(e.ts) }),
@@ -5843,6 +6016,9 @@
   initOvernightActions();
   initOverviewContinueAction();
   initTerminal();
+  ["usage-filter-project", "usage-filter-task", "usage-filter-provider", "usage-filter-model"].forEach((id) => {
+    document.getElementById(id)?.addEventListener("change", () => refreshUsageTelemetry());
+  });
   document.getElementById("usage-refresh-btn")?.addEventListener("click", () => refreshUsage(true));
   refreshAll();
   refreshUsage();

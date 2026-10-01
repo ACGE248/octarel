@@ -293,7 +293,7 @@ A subscription route **does** carry a visible API-equivalent estimate; that was 
 
 The remaining gap is attribution depth, durability as a first-class ledger, and enforcement.
 
-Promote usage from a read model over runbook-scoped governance records into a durable, append-only usage ledger attributable to project, task, runbook, run, session, worker, provider, effective model and time — reusing the existing state store and the ENG-PC-04 event envelope rather than adding a second telemetry store. Extend aggregation to filter by project, task, provider and model, not only by time window and billing class. Preserve every existing provenance class and formula string; a ledger row may not be more confident than the record it came from.
+Promote usage from a read model over runbook-scoped governance records into a durable, append-only usage ledger attributable to project, program, task, runbook, run, session, worker, provider, effective model and time — reusing the existing state store and the ENG-PC-04 event envelope rather than adding a second telemetry store. Run identity is globally unique and later project attribution completes the existing row rather than creating another accounting event. Extend aggregation to filter by project, task, provider and model, not only by time window and billing class. Preserve every existing provenance class and formula string; a ledger row may not be more confident than the record it came from.
 
 Add budget/usage policy scopes: global -> provider -> program/task -> run/session. Supported constraints may include metered cash, tokens, wall-clock, attempts/fallbacks and provider quota reserve when a real source exists. Enforcement happens before launch/fallback and cannot authorize a paid route.
 
