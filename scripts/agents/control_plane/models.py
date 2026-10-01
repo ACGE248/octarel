@@ -387,6 +387,91 @@ class WorktreeRecord:
 
 
 @dataclass
+class ExecutionLease:
+    """ENG-PC-01 (issue #29): the durable execution-ownership record for one worktree.
+
+    Distinct from the three mechanisms it composes with rather than duplicates:
+    ``advancement_lease`` (who may advance one runbook's acceptance pipeline), the
+    ``.write-lock`` file (the OS-enforced mutual exclusion the spawned worker subprocess
+    itself holds for the run's duration, kernel-released on crash), and
+    ``task_intake_claims`` (which owner_ref may claim a stable external task id at
+    *intake* time). This record answers a fourth, previously-implicit question: which
+    single execution attempt is currently entitled to launch/run inside a given
+    worktree. ``worktree`` is the primary key because that is the actual contended
+    resource -- two different tasks racing to use the same worktree is exactly as
+    unsafe as the same task racing itself.
+
+    ``generation`` increments on every successful acquisition (fresh or reclaimed) and
+    is the compare-and-swap guard: acquisition always issues a conditional
+    ``UPDATE ... WHERE worktree = ? AND generation = ?`` (see ``state.py``), so the
+    database's own atomicity -- not a read-then-write race in Python -- decides which
+    of two concurrent acquirers wins. ``owner_pid``/``owner_pid_create_time`` are the
+    liveness/PID-reuse proof (mirroring ``operations.py``'s existing
+    ``psutil.Process(pid).create_time()`` pattern): a lease may only be reclaimed once
+    ``recovery.pid_is_alive`` proves the recorded pid dead, or once a live pid's
+    create-time no longer matches the recorded one (the pid was reused by an unrelated
+    process). Never reclaimed on a timeout or executable-name match alone.
+    """
+
+    worktree: str
+    generation: int = 0
+    status: str = "RELEASED"
+    project_id: str | None = None
+    task_id: str | None = None
+    stable_task_id: str | None = None
+    runbook_id: str | None = None
+    worker: str | None = None
+    owner_host: str | None = None
+    owner_pid: int | None = None
+    owner_pid_create_time: float | None = None
+    # True from the moment ``acquire`` wins the CAS until ``attach_pid`` durably
+    # records the real worker subprocess's pid. While true, ``owner_pid`` is the
+    # *launching supervisor's* own pid, not yet the worker's -- so a dead
+    # ``owner_pid`` proves only that the supervisor died, never that no worker
+    # process exists (the worker is spawned with ``start_new_session=True`` and
+    # can outlive a dead parent). See ``execution_lease._classify_owner``.
+    spawn_pending: bool = False
+    acquired_at: str | None = None
+    heartbeat_at: str | None = None
+    released_at: str | None = None
+    release_reason: str | None = None
+    recovery_reason: str | None = None
+    conflict_reason: str | None = None
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "ExecutionLease":
+        return cls(
+            worktree=row["worktree"],
+            generation=row["generation"],
+            status=row["status"],
+            project_id=row.get("project_id"),
+            task_id=row.get("task_id"),
+            stable_task_id=row.get("stable_task_id"),
+            runbook_id=row.get("runbook_id"),
+            worker=row.get("worker"),
+            owner_host=row.get("owner_host"),
+            owner_pid=row.get("owner_pid"),
+            owner_pid_create_time=row.get("owner_pid_create_time"),
+            spawn_pending=bool(row.get("spawn_pending") or 0),
+            acquired_at=row.get("acquired_at"),
+            heartbeat_at=row.get("heartbeat_at"),
+            released_at=row.get("released_at"),
+            release_reason=row.get("release_reason"),
+            recovery_reason=row.get("recovery_reason"),
+            conflict_reason=row.get("conflict_reason"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+EXECUTION_LEASE_ACQUIRED = "ACQUIRED"
+EXECUTION_LEASE_RELEASED = "RELEASED"
+EXECUTION_LEASE_STATES = frozenset({EXECUTION_LEASE_ACQUIRED, EXECUTION_LEASE_RELEASED})
+
+
+@dataclass
 class Event:
     id: int | None
     ts: str

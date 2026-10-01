@@ -3188,11 +3188,21 @@
           || ((task.dependencies || []).length ? `Waiting on ${task.dependencies.join(", ")}` : null))
         : null;
 
+      const lease = task.execution_lease;
+      const leaseLine = lease
+        ? `Execution lease: ${lease.status} · gen ${lease.generation} · owner pid ${lease.owner_pid ?? "—"}`
+          + ` · acquired ${lease.acquired_at ? relativeTime(lease.acquired_at) : "—"}`
+          + (lease.heartbeat_at ? ` · heartbeat ${relativeTime(lease.heartbeat_at)}` : "")
+          + (lease.released_at ? ` · released ${relativeTime(lease.released_at)} (${lease.release_reason || "—"})` : "")
+          + (lease.recovery_reason ? ` · recovered: ${lease.recovery_reason}` : "")
+        : null;
+
       const details = rememberDisclosure(el("details", { class: "entity-more" }, [
         el("summary", { text: "Scheduling details" }),
         el("div", { class: "entity-meta", text: `Wave ${task.dependency_wave ?? "—"} · ${task.admission_state || "PENDING"}${task.admission_reason ? ` · ${task.admission_reason}` : ""}` }),
         el("div", { class: "entity-meta", text: `Alternatives: ${task.selection_alternatives?.length ? task.selection_alternatives.map(displayName).join(", ") : "none eligible/reported"}` }),
         el("div", { class: "entity-meta", text: `${task.kind} · priority ${task.priority ?? 0} · ${task.worker}${task.worktree ? ` · ${task.worktree}` : ""}` }),
+        leaseLine ? el("div", { class: "entity-meta", text: leaseLine }) : null,
       ]), `task:${task.id}`);
 
       appendAll(card, [
@@ -4745,6 +4755,7 @@
     stale: { label: "Stale repository state", glyph: "↻", tone: "warn", view: "view-runs" },
     failed: { label: "Task failed", glyph: "✕", tone: "err", view: "view-tasks" },
     run: { label: "Run needs attention", glyph: "!", tone: "warn", view: "view-runs" },
+    lease: { label: "Stale execution lease", glyph: "⚠", tone: "warn", view: "view-tasks" },
   };
 
   function attentionItems(data) {
@@ -4788,6 +4799,16 @@
         add(kind, `Next task for ${r.name}: blocked`, a.reason);
       }
     });
+    // ENG-PC-01 (issue #29): a genuinely stale execution lease (owner pid
+    // already proven dead by the server) -- never surfaced from a timeout or
+    // an executable-name guess, only from typed lease/pid evidence.
+    (data.execution_leases || []).forEach((lease) => {
+      add(
+        "lease",
+        `Stale execution lease on ${lease.worktree}`,
+        `${lease.stale_reason || "owner not alive"}${lease.task_id ? ` (task ${lease.task_id})` : ""}`
+      );
+    });
     return items;
   }
 
@@ -4812,23 +4833,25 @@
   async function refreshAttention() {
     const data = await getJSON("/api/attention");
     const runbooksNeedingAttention = data.runbooks || [];
+    const staleLeases = data.execution_leases || [];
     renderKV("attention-body", [
       ["Tasks needing attention", data.tasks.length],
       ["Providers needing attention", data.providers.length],
       ["Runbooks needing attention", runbooksNeedingAttention.length],
+      ["Stale execution leases", staleLeases.length],
     ]);
     const items = attentionItems(data);
     const list = document.getElementById("attention-list");
     const attentionSignature = JSON.stringify([data, items]);
     if (list.dataset.signature === attentionSignature) {
-      state.attentionCount = data.tasks.length + data.providers.length + runbooksNeedingAttention.length;
+      state.attentionCount = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length;
       return;
     }
     list.dataset.signature = attentionSignature;
     list.innerHTML = "";
     // The popover keeps one row per /api/attention entry; advancement-derived
     // rows appear on the Overview card only.
-    const base = data.tasks.length + data.providers.length + runbooksNeedingAttention.length;
+    const base = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length;
     items.slice(0, base).forEach((item) => list.appendChild(attentionRow(item, { action: true })));
     const card = document.getElementById("overview-attention-list");
     if (card) {
