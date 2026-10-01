@@ -336,6 +336,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_wake_queue_pending_key
 CREATE INDEX IF NOT EXISTS idx_wake_queue_status ON wake_queue (status, created_at);
 CREATE INDEX IF NOT EXISTS idx_wake_queue_contributions_wake ON wake_queue_contributions (wake_id, id);
 
+-- ENG-PC-02 (issue #30): one active task-scoped native agent session per
+-- project/task/worker. Opaque adapter state is confined to continuation_state;
+-- ordinary read APIs below intentionally never select or return that column.
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    worker TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    effective_model TEXT NOT NULL,
+    worktree_path TEXT NOT NULL,
+    tree_sha TEXT NOT NULL,
+    permission_profile TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    identity_fingerprint TEXT NOT NULL,
+    continuation_state TEXT,
+    continuation_count INTEGER NOT NULL DEFAULT 0,
+    force_fresh_next INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    last_run_id TEXT,
+    last_mode TEXT NOT NULL DEFAULT 'FRESH',
+    reason TEXT NOT NULL,
+    state_reason TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sessions_live_task_worker
+    ON agent_sessions (project_id, task_id, worker)
+    WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_identity
+    ON agent_sessions (identity_fingerprint, active);
+
 CREATE TABLE IF NOT EXISTS overnight_sessions (
     session_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -421,6 +455,9 @@ _WORKTREES_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
 _EXECUTION_LEASES_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("spawn_pending", "INTEGER NOT NULL DEFAULT 0"),
 )
+_AGENT_SESSIONS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("state_reason", "TEXT"),
+)
 _EVENTS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("run_id", "TEXT"),
     ("run_sequence", "INTEGER"),
@@ -484,6 +521,7 @@ _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
     "task_intake_claims",
     "execution_leases",
     "wake_queue",
+    "agent_sessions",
 )
 
 # ``control_settings`` keys that are derived, project-dependent caches rather
@@ -568,6 +606,7 @@ class State:
             self._migrate_worktrees_columns()
             self._migrate_runbooks_columns()
             self._migrate_execution_leases_columns()
+            self._migrate_agent_sessions_columns()
             self._migrate_project_id_columns()
             self._migrate_events_columns()
         except Exception:
@@ -610,6 +649,13 @@ class State:
         for column, ddl in _EXECUTION_LEASES_MIGRATED_COLUMNS:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE execution_leases ADD COLUMN {column} {ddl}")
+
+    @_serialized
+    def _migrate_agent_sessions_columns(self) -> None:
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(agent_sessions)").fetchall()}
+        for column, ddl in _AGENT_SESSIONS_MIGRATED_COLUMNS:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE agent_sessions ADD COLUMN {column} {ddl}")
 
     @_serialized
     def _migrate_events_columns(self) -> None:
@@ -1847,6 +1893,159 @@ class State:
         record["state"] = row["state"]
         record["updated_at"] = row["updated_at"]
         return record
+
+    # ----------------------------------------------------- agent sessions
+    # ENG-PC-02 policy (compatibility, redaction screening, reasons) lives in
+    # ``agent_session.py``. These primitives only provide atomic persistence.
+
+    @staticmethod
+    def _public_agent_session(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        """Return session metadata without the opaque native continuation state."""
+
+        public = dict(row)
+        public.pop("continuation_state", None)
+        public["has_stored_state"] = bool(row["continuation_state"])
+        public["force_fresh_next"] = bool(row["force_fresh_next"])
+        public["active"] = bool(row["active"])
+        return public
+
+    @_serialized
+    def get_active_agent_session(self, *, project_id: str, task_id: str, worker: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM agent_sessions WHERE project_id = ? AND task_id = ? AND worker = ? AND active = 1",
+            (project_id, task_id, worker),
+        ).fetchone()
+        return self._public_agent_session(row) if row else None
+
+    @_serialized
+    def list_agent_sessions(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
+        """List safe metadata only; opaque continuation state never crosses this boundary."""
+
+        if project_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM agent_sessions ORDER BY last_activity_at DESC, id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM agent_sessions WHERE project_id = ? ORDER BY last_activity_at DESC, id",
+                (project_id,),
+            ).fetchall()
+        return [self._public_agent_session(row) for row in rows]
+
+    @_serialized
+    def replace_active_agent_session(
+        self,
+        *,
+        row: dict[str, Any],
+        expected_session_id: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically replace the active row, returning ``(row, won)``.
+
+        The expected id is a compare-and-swap guard. ``BEGIN IMMEDIATE`` and
+        the partial unique index jointly decide concurrent creators. Any index
+        conflict is contained and returned as ``won=False``; it never escapes
+        into a daemon caller loop.
+        """
+
+        key = (row["project_id"], row["task_id"], row["worker"])
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            current = self._conn.execute(
+                "SELECT * FROM agent_sessions WHERE project_id = ? AND task_id = ? AND worker = ? AND active = 1",
+                key,
+            ).fetchone()
+            current_id = current["id"] if current else None
+            if current_id != expected_session_id:
+                self._conn.rollback()
+                return (self._public_agent_session(current), False) if current else ({}, False)
+            if current is not None:
+                self._conn.execute("UPDATE agent_sessions SET active = 0 WHERE id = ? AND active = 1", (current_id,))
+            columns = tuple(row)
+            self._conn.execute(
+                f"INSERT INTO agent_sessions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                tuple(row[column] for column in columns),
+            )
+            stored = self._conn.execute("SELECT * FROM agent_sessions WHERE id = ?", (row["id"],)).fetchone()
+        except sqlite3.IntegrityError:
+            self._conn.rollback()
+            winner = self._conn.execute(
+                "SELECT * FROM agent_sessions WHERE project_id = ? AND task_id = ? AND worker = ? AND active = 1",
+                key,
+            ).fetchone()
+            return (self._public_agent_session(winner), False) if winner else ({}, False)
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        return self._public_agent_session(stored), True
+
+    @_serialized
+    def try_resume_agent_session(
+        self,
+        *,
+        session_id: str,
+        identity_fingerprint: str,
+        now: str,
+        run_id: str | None,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """CAS an actual resume and increment its continuation count exactly once."""
+
+        cursor = self._conn.execute(
+            "UPDATE agent_sessions SET continuation_count = continuation_count + 1, "
+            "last_activity_at = ?, last_run_id = ?, last_mode = 'RESUMED', reason = ? "
+            "WHERE id = ? AND active = 1 AND identity_fingerprint = ? "
+            "AND force_fresh_next = 0 AND continuation_state IS NOT NULL RETURNING *",
+            (now, run_id, reason, session_id, identity_fingerprint),
+        )
+        row = cursor.fetchone()
+        self._conn.commit()
+        return self._public_agent_session(row) if row else None
+
+    @_serialized
+    def store_agent_session_state(
+        self,
+        *,
+        session_id: str,
+        continuation_state: str | None,
+        now: str,
+        run_id: str | None,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        cursor = self._conn.execute(
+            "UPDATE agent_sessions SET continuation_state = ?, last_activity_at = ?, last_run_id = ?, state_reason = ? "
+            "WHERE id = ? AND active = 1 RETURNING *",
+            (continuation_state, now, run_id, reason, session_id),
+        )
+        row = cursor.fetchone()
+        self._conn.commit()
+        return self._public_agent_session(row) if row else None
+
+    @_serialized
+    def request_agent_session_fresh(self, *, project_id: str, task_id: str, worker: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE agent_sessions SET force_fresh_next = 1 "
+            "WHERE project_id = ? AND task_id = ? AND worker = ? AND active = 1",
+            (project_id, task_id, worker),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_serialized
+    def _agent_session_resume_state(self, *, session_id: str, identity_fingerprint: str) -> str | None:
+        """Capability-gated internal read used only to build a native resume argv.
+
+        Deliberately private: dashboards, manifests, list APIs, and generic
+        callers receive metadata only.
+        """
+
+        row = self._conn.execute(
+            "SELECT continuation_state FROM agent_sessions "
+            "WHERE id = ? AND identity_fingerprint = ? AND active = 1 AND continuation_state IS NOT NULL",
+            (session_id, identity_fingerprint),
+        ).fetchone()
+        return str(row["continuation_state"]) if row else None
 
     # ------------------------------------------------- overnight sessions
 

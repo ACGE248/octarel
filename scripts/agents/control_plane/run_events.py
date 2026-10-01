@@ -22,6 +22,7 @@ EVENT_CLASSES = frozenset(
         "wake",
         "route",
         "lease",
+        "session",
         "process",
         "adapter_tool",
         "checkpoint",
