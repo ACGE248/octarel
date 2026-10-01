@@ -69,34 +69,47 @@ def _emit(
     ``execution_lease.acquire``/``release`` -- a wake enqueued before any run/runbook
     exists for it (e.g. a bare ``SCHEDULE``/``OVERNIGHT_TICK`` tick with no specific
     task yet) still queues correctly; it simply has no per-run timeline entry to join.
+
+    Contained at this boundary: unlike ``execution_lease``'s emit (which always runs
+    strictly *after* the state mutation it describes is already durable, so a raise
+    there can never undo anything), this module's ``claim()`` sits *between* a
+    committed state transition and a required follow-up (``complete()``/``fail()``).
+    A ``record_run_event`` failure here -- a busy ``BEGIN IMMEDIATE`` under
+    contention, or ``normalize_run_event`` rejecting a bad field -- must never be
+    allowed to propagate out and abort that follow-up, or the row would be stranded
+    CLAIMED with nothing left to move it on. So this is the one place in the module
+    that swallows: every caller below may assume ``_emit`` never raises.
     """
 
     run_id = wake.run_id or wake.task_id
     if not run_id:
         return
-    state.record_run_event(
-        RunEvent(
-            run_id=run_id,
-            event_class="wake",
-            event_type=event_type,
-            source="control_plane.wake_queue",
-            provenance="MEASURED",
-            task_id=wake.task_id,
-            project_id=wake.project_id,
-            level=level,
-            message=message,
-            data={
-                "wake_id": wake.id,
-                "reason": wake.reason,
-                "stage": wake.stage or "NOT_REPORTED",
-                "status": wake.status,
-                "coalesced_count": wake.coalesced_count,
-                "attempts": wake.attempts,
-                "max_attempts": wake.max_attempts,
-                **(extra or {}),
-            },
+    try:
+        state.record_run_event(
+            RunEvent(
+                run_id=run_id,
+                event_class="wake",
+                event_type=event_type,
+                source="control_plane.wake_queue",
+                provenance="MEASURED",
+                task_id=wake.task_id,
+                project_id=wake.project_id,
+                level=level,
+                message=message,
+                data={
+                    "wake_id": wake.id,
+                    "reason": wake.reason,
+                    "stage": wake.stage or "NOT_REPORTED",
+                    "status": wake.status,
+                    "coalesced_count": wake.coalesced_count,
+                    "attempts": wake.attempts,
+                    "max_attempts": wake.max_attempts,
+                    **(extra or {}),
+                },
+            )
         )
-    )
+    except Exception:  # noqa: BLE001 - a logging failure must never block the state transition it follows
+        pass
 
 
 def enqueue(
@@ -193,6 +206,32 @@ def fail(state: State, *, wake_id: int, error: str) -> WakeRequest | None:
     return wake
 
 
+def _recover_stranded_claims(state: State, *, claimed_by: str) -> None:
+    """Self-heal within this same daemon, no restart and no timeout: reset any wake
+    still ``CLAIMED`` by this ``claimed_by`` identity from a previous pass back to
+    ``PENDING`` before a new pass claims anything.
+
+    ``claimed_by`` is a single fixed identity per daemon (``orchestrator._cmd_run``
+    always calls ``drain_due`` with ``claimed_by="daemon"``), so a row still ``CLAIMED``
+    under it when a new pass begins cannot belong to any other claimant -- it can only
+    be this same process's own prior ``claim()``/``complete()`` sequence, which must
+    have raised somewhere between the two (e.g. ``complete_wake``'s own write hitting a
+    busy database under contention). That is identity evidence, not an elapsed-time
+    guess, so it is safe to run on every pass rather than inferring staleness.
+    """
+
+    recovered = state.recover_claimed_wakes(claimed_by=claimed_by)
+    if recovered:
+        state.record_event(
+            category="wake_queue",
+            level="warning",
+            message=(
+                f"drain_due: {recovered} wake(s) still CLAIMED by {claimed_by!r} from a prior "
+                "pass reset to PENDING (claim/complete did not reach COMPLETED)"
+            ),
+        )
+
+
 def drain_due(state: State, *, claimed_by: str, limit: int = 10) -> int:
     """Claim and mark handled up to ``limit`` currently-due wakes. Returns how many.
 
@@ -206,8 +245,15 @@ def drain_due(state: State, *, claimed_by: str, limit: int = 10) -> int:
     multi-tick work on a wake's behalf; a future producer that needs the pass to actually
     fail/retry a specific wake should call ``claim``/``complete``/``fail`` directly instead
     of this helper. Never raises -- a bad row is skipped, not fatal to the daemon loop.
+
+    Every pass opens with ``_recover_stranded_claims`` so a row this same daemon left
+    ``CLAIMED`` on a prior pass (``complete_wake`` itself raising, e.g. a busy database
+    under contention -- ``_emit`` is contained and can no longer be the cause) is
+    returned to ``PENDING`` and can be claimed again in this same pass, not just on the
+    next restart.
     """
 
+    _recover_stranded_claims(state, claimed_by=claimed_by)
     drained = 0
     for _ in range(max(0, limit)):
         try:
@@ -218,17 +264,25 @@ def drain_due(state: State, *, claimed_by: str, limit: int = 10) -> int:
             break
         try:
             complete(state, wake_id=wake.id)
-        except Exception:  # noqa: BLE001 - see above
+        except Exception:  # noqa: BLE001 - see above; recovered on the next pass by
+            # _recover_stranded_claims rather than left stuck until a restart
             pass
         drained += 1
     return drained
 
 
 def recover_on_restart(state: State, *, project_id: str | None = None) -> int:
-    """Daemon-start recovery: any wake left ``CLAIMED`` by a previous process instance is
-    reset to ``PENDING`` so it is retried, never silently lost (restart durability). Mirrors
+    """Daemon-start recovery: any wake left ``CLAIMED`` at this point belonged to a
+    previous process instance that is now gone, so it is reset to ``PENDING`` and
+    retried rather than silently lost (restart durability). Mirrors
     ``runbooks.recover_runbooks_on_restart``'s shape: a single bounded sweep logged once,
     not a per-row event flood.
+
+    This is restart-scoped, not the only route a ``CLAIMED`` row can recover through:
+    a *live* daemon can also strand one mid-run (``complete_wake`` itself raising), and
+    that case is recovered every ``drain_due`` pass by ``_recover_stranded_claims``
+    instead -- this function only ever needs to run once, at process start, because a
+    live daemon no longer depends on it to get unstuck.
     """
 
     recovered = state.recover_claimed_wakes(project_id=project_id)

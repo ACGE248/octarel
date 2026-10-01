@@ -1657,27 +1657,41 @@ class State:
         return WakeRequest.from_row(dict(row)) if row else None
 
     @_serialized
-    def recover_claimed_wakes(self, *, project_id: str | None = None) -> int:
-        """Daemon-restart recovery: a ``CLAIMED`` wake's only possible claimant was this
-        same single-daemon-authority process (see ``advancement_lease.daemon_authority_active``);
-        if the process is restarting, that claim is definitionally orphaned. Unlike
-        execution leases, there is no cross-process ownership question here to prove --
-        resetting to ``PENDING`` is always safe, never a timeout-based guess.
+    def recover_claimed_wakes(
+        self, *, project_id: str | None = None, claimed_by: str | None = None
+    ) -> int:
+        """Reset orphaned ``CLAIMED`` wake(s) back to ``PENDING``. Identity-based, never
+        a timeout-based guess -- used two ways:
+
+        - at daemon startup (``project_id`` only, no ``claimed_by``): every row still
+          ``CLAIMED`` belonged to a previous process instance that is now gone, so it is
+          definitionally orphaned (see ``advancement_lease.daemon_authority_active`` --
+          there is only ever one daemon authority, so there is no cross-process
+          ownership question to prove the way execution leases must).
+        - at the start of every ``wake_queue.drain_due`` pass within one still-running
+          daemon (``claimed_by`` only, no restart involved): ``claimed_by`` is a single
+          fixed identity per daemon (``orchestrator._cmd_run`` always claims as
+          ``"daemon"``), so a row still ``CLAIMED`` under that identity when a new pass
+          begins cannot belong to anyone else -- it is this same process's own prior
+          ``claim()``/``complete()`` sequence, which must have raised before reaching
+          ``COMPLETED``. Resetting it here lets the very next pass claim and retry it,
+          recovering within one daemon lifetime instead of requiring a restart.
         """
 
         now = utc_now_iso()
+        clauses = ["status = 'CLAIMED'"]
+        values: list[Any] = []
         if project_id is not None:
-            cursor = self._conn.execute(
-                "UPDATE wake_queue SET status = 'PENDING', claimed_at = NULL, claimed_by = NULL, updated_at = ? "
-                "WHERE status = 'CLAIMED' AND project_id = ?",
-                (now, project_id),
-            )
-        else:
-            cursor = self._conn.execute(
-                "UPDATE wake_queue SET status = 'PENDING', claimed_at = NULL, claimed_by = NULL, updated_at = ? "
-                "WHERE status = 'CLAIMED'",
-                (now,),
-            )
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if claimed_by is not None:
+            clauses.append("claimed_by = ?")
+            values.append(claimed_by)
+        cursor = self._conn.execute(
+            "UPDATE wake_queue SET status = 'PENDING', claimed_at = NULL, claimed_by = NULL, updated_at = ? "
+            f"WHERE {' AND '.join(clauses)}",
+            (now, *values),
+        )
         self._conn.commit()
         return cursor.rowcount
 

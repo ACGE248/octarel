@@ -19,6 +19,8 @@ from scripts.agents.control_plane import runbooks, wake_queue
 from scripts.agents.control_plane.models import (
     RUNBOOK_RUNNING,
     RUNBOOK_SUCCEEDED,
+    WAKE_CLAIMED,
+    WAKE_COMPLETED,
     WAKE_FAILED,
     WAKE_PENDING,
     WAKE_POISONED,
@@ -191,6 +193,79 @@ def test_restart_recovers_a_claimed_wake_back_to_pending(tmp_path: Path):
     assert wake.claimed_by is None
     # It is genuinely claimable again, not just reset in name.
     assert wake_queue.claim(restarted, claimed_by="daemon-2").id == wake.id
+
+
+def test_an_emit_failure_during_claim_never_strands_the_row_claimed():
+    """A logging failure between the commit of CLAIMED and the caller's next step must
+    never propagate out of ``claim()`` -- see the module's ``_emit`` containment."""
+
+    state = State(":memory:")
+    wake_queue.enqueue(state, reason="TASK_ELIGIBLE", source="x", task_id="t1", stage="implement", run_id="run-1")
+
+    def boom(*_a, **_k):
+        raise ValueError("normalize_run_event rejected a bad field")
+
+    original_record_run_event = state.record_run_event
+    state.record_run_event = boom  # type: ignore[method-assign]
+    claimed = wake_queue.claim(state, claimed_by="daemon")
+    assert claimed is not None
+    assert claimed.status == WAKE_CLAIMED
+    # No timeline entry for the failed emit, but the claim itself is real and the
+    # process can still proceed to complete it -- exactly as if emit had never failed.
+    state.record_run_event = original_record_run_event
+    assert wake_queue.complete(state, wake_id=claimed.id)
+    assert state.get_wake(claimed.id).status == WAKE_COMPLETED
+
+
+def test_a_complete_failure_recovers_within_one_daemon_lifetime_not_only_on_restart(monkeypatch):
+    """A ``complete_wake`` failure (e.g. a busy database under contention) must not
+    strand the row CLAIMED forever within a still-running daemon -- it must be
+    claimable and completable again on the very next ``drain_due`` pass, with no
+    restart and no elapsed-time staleness check involved."""
+
+    state = State(":memory:")
+    wake_queue.enqueue(state, reason="TASK_ELIGIBLE", source="x", task_id="t1", stage="implement")
+    claimed = wake_queue.claim(state, claimed_by="daemon")
+    assert claimed is not None
+
+    real_complete_wake = State.complete_wake
+
+    def boom(self, *, wake_id, now=None):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(State, "complete_wake", boom)
+    with pytest.raises(RuntimeError):
+        wake_queue.complete(state, wake_id=claimed.id)
+    # The failed completion left the row CLAIMED, not silently finalized.
+    assert state.get_wake(claimed.id).status == WAKE_CLAIMED
+
+    monkeypatch.setattr(State, "complete_wake", real_complete_wake)
+    # Nothing else is PENDING, so any claim/complete this pass performs is only this
+    # recovered row -- proving the recovery path itself, not a coincidental re-claim.
+    drained = wake_queue.drain_due(state, claimed_by="daemon")
+    assert drained == 1
+    assert state.get_wake(claimed.id).status == WAKE_COMPLETED
+
+    recovery_events = [
+        e for e in state.list_events(limit=50)
+        if e.category == "wake_queue" and "reset to PENDING" in e.message
+    ]
+    assert len(recovery_events) == 1
+    assert "prior pass" in recovery_events[0].message
+
+
+def test_a_claimed_row_stranded_under_a_different_identity_is_not_touched():
+    """``_recover_stranded_claims`` is identity-scoped: a row CLAIMED by some other
+    claimant must never be reset just because a differently-identified pass runs."""
+
+    state = State(":memory:")
+    wake_queue.enqueue(state, reason="TASK_ELIGIBLE", source="x", task_id="t1", stage="implement")
+    claimed = wake_queue.claim(state, claimed_by="daemon-other")
+    assert claimed is not None
+    # A drain pass under a different identity must not recover the other claim.
+    drained = wake_queue.drain_due(state, claimed_by="daemon")
+    assert drained == 0
+    assert state.get_wake(claimed.id).status == WAKE_CLAIMED
 
 
 def test_queue_depth_and_oldest_age_are_local_reads_with_no_provider_call():
