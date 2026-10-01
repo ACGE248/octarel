@@ -96,6 +96,15 @@ KNOWN_AVAILABILITY_REASONS = frozenset(
     }
 )
 
+# Native CLI flags that deliberately disable persistence for the invocation.
+# This is a derived diagnostic over a worker's own declared template only; it
+# never probes a CLI or guesses from provider/model names.
+SESSION_PERSISTENCE_OPTOUT_FLAGS = (
+    "--no-session-persistence",
+    "--ephemeral",
+    "--single",
+)
+
 # Checked first in Worker.check_auth() so a negated CLI status line (e.g. "Not
 # logged in") can never be mistaken for a positive match just because it
 # happens to contain a configured success_pattern as a literal substring.
@@ -174,6 +183,13 @@ class Worker:
     # See ``availability_reason`` for when this actually fires.
     launch_probe_args: tuple[str, ...] = ()
     launch_probe_success_pattern: str | None = None
+    # Native resume is an explicitly declared transport fact. It is allowed on
+    # read-only workers: continuing a review does not grant write permission,
+    # and the existing capability/profile checks remain the authorization
+    # boundary. Conflating resume with write access would reject a safe,
+    # useful read-only review session for an unrelated reason.
+    resume_args: tuple[str, ...] = ()
+    resume_state_source: str = ""
     # ENG-AO-02: explicit, AO-orchestrated read-only bot fan-out policy for a write-capable primary
     # (empty for every ordinary worker, including ``grok-build``).  See ``scripts/agents/subagents.py``.
     subagents: dict[str, Any] = field(default_factory=dict)
@@ -192,6 +208,27 @@ class Worker:
     @property
     def is_read_only(self) -> bool:
         return self.capability == READ_ONLY_CAPABILITY
+
+    @property
+    def supports_native_resume(self) -> bool:
+        """Whether this worker explicitly declares a valid native resume transport."""
+
+        return bool(self.resume_args and self.resume_state_source)
+
+    @property
+    def session_persistence_optout_flag(self) -> str | None:
+        """The declared persistence-disabling flag in this worker's base template, if any."""
+
+        return next((flag for flag in SESSION_PERSISTENCE_OPTOUT_FLAGS if flag in self.cli_template), None)
+
+    def build_resume_args(self, session_id: str) -> tuple[str, ...]:
+        """Substitute the adapter-provided opaque native session id into its declared template."""
+
+        if not self.supports_native_resume:
+            raise RegistryError(f"worker {self.name!r} declares no cli.resume block")
+        if not session_id:
+            raise RegistryError("native session id must be non-empty")
+        return tuple(token.replace("{session_id}", session_id) for token in self.resume_args)
 
     @property
     def effective_model(self) -> str:
@@ -412,6 +449,24 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
         permission_profiles_raw = cli.get("permission_profiles", {})
         auth_check_raw = cli.get("auth_check") or {}
         launch_probe_raw = cli.get("launch_probe") or {}
+        resume_raw = cli.get("resume")
+        resume_args: tuple[str, ...] = ()
+        resume_state_source = ""
+        if resume_raw is not None:
+            if not isinstance(resume_raw, dict):
+                raise RegistryError(f"worker {name!r} cli.resume must be an object")
+            raw_args = resume_raw.get("args", ())
+            if not isinstance(raw_args, list) or not all(isinstance(arg, str) for arg in raw_args):
+                raise RegistryError(f"worker {name!r} cli.resume.args must be a list of strings")
+            resume_args = tuple(raw_args)
+            if not any("{session_id}" in arg for arg in resume_args):
+                raise RegistryError(
+                    f"worker {name!r} cli.resume.args must contain the literal {{session_id}} placeholder"
+                )
+            raw_state_source = resume_raw.get("state_source")
+            if not isinstance(raw_state_source, str) or not raw_state_source.strip():
+                raise RegistryError(f"worker {name!r} cli.resume.state_source must be a non-empty string")
+            resume_state_source = raw_state_source.strip()
         return Worker(
             name=name,
             execution_system=data["execution_system"],
@@ -438,6 +493,8 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             auth_check_success_pattern=auth_check_raw.get("success_pattern"),
             launch_probe_args=tuple(launch_probe_raw.get("args", ())),
             launch_probe_success_pattern=launch_probe_raw.get("success_pattern"),
+            resume_args=resume_args,
+            resume_state_source=resume_state_source,
             subagents=dict(data.get("subagents") or {}),
             model_pool=str(data.get("model_pool") or ""),
             native_model_family=str(data.get("native_model_family") or ""),

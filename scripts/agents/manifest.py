@@ -110,6 +110,12 @@ class RunRecord:
     # typed check outcome rather than to the human-readable note it emits.
     read_only_violation: bool = False
     policy_manifest: dict[str, Any] | None = None
+    # Orchestrator-owned session outcome only. ``session_id`` is the safe row
+    # identifier; the adapter's opaque native continuation state is never put
+    # in a RunRecord, manifest, summary, or other audit artifact.
+    session_id: str | None = None
+    session_updated: bool = False
+    session_update_reason: str | None = None
 
     def set_result(self, result: str, *, note: str | None = None) -> None:
         """The one path every terminal RESULT_* transition in this stack goes through.

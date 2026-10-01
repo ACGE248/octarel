@@ -11,11 +11,10 @@ Two invariants hold everywhere in this module, because they are the entire
 point of the task:
 
 * **A missing capability is explicit, never inferred from a model or
-  marketing name.** Where this stack genuinely does not implement something
-  yet (session resume, streaming events, on-demand cancellation), every
-  worker reports that capability as unsupported with a concrete, named reason
-  -- not silently omitted, and never guessed from how a worker's model
-  happens to be named.
+  marketing name.** Native resume is derived only from a valid registry
+  declaration; capabilities this stack still does not implement (streaming
+  events and on-demand cancellation) remain unsupported with concrete, named
+  reasons -- never silently omitted or guessed from a worker's model name.
 * **This is a read-only seam, not a second policy source.** Nothing here
   changes ``workers.json`` routing order, cost class, auth probing, or the
   ENG-AO-02/03/04 mechanisms; :func:`capabilities_for` only reads facts a
@@ -52,14 +51,6 @@ MODEL_DISCOVERY_STATIC = "static_registry_default"
 MODEL_DISCOVERY_NATIVE_VERIFIED = "native_cli_verified_discovery"
 MODEL_DISCOVERY_RUNTIME_POOL = "runtime_model_pool"
 
-# Stated once, reused by every worker, because it is a true fact about the
-# whole stack today rather than something that varies per provider: ENG-PC-02
-# (resumable sessions) has not landed yet, so no adapter can claim resume
-# support without lying about a task that has not been built.
-RESUME_NOT_IMPLEMENTED_REASON = (
-    "ENG-PC-02 task-scoped resumable sessions is not implemented yet; no worker "
-    "in this registry declares native session/resume support"
-)
 # ENG-PC-04 adds the orchestrator-owned persisted event timeline, polled through
 # the existing API. That does not change this adapter capability: every worker
 # still runs as one blocking subprocess capture
@@ -206,14 +197,25 @@ def capabilities_for(worker: Worker) -> AdapterCapabilities:
         else tuple(sorted({PERMISSION_STANDARD, *worker.permission_profile_templates}))
     )
 
+    optout_flag = worker.session_persistence_optout_flag
+    if worker.supports_native_resume:
+        resume_reason = None
+    elif optout_flag:
+        resume_reason = (
+            f"{worker.name} declares no cli.resume block and its own CLI template passes "
+            f"{optout_flag}, so the stack deliberately runs it without session persistence"
+        )
+    else:
+        resume_reason = f"{worker.name} declares no cli.resume block"
+
     return AdapterCapabilities(
         worker=worker.name,
         provider=worker.provider,
         execution_system=worker.execution_system,
         capability=worker.capability,
         can_write=worker.is_write_capable,
-        can_resume_session=False,
-        resume_unavailable_reason=RESUME_NOT_IMPLEMENTED_REASON,
+        can_resume_session=worker.supports_native_resume,
+        resume_unavailable_reason=resume_reason,
         reports_structured_usage=structured,
         structured_usage_reason=(
             None if structured else f"{worker.name}'s CLI template does not request structured JSON output"
@@ -244,10 +246,7 @@ def capabilities_for(worker: Worker) -> AdapterCapabilities:
 # name this module's own callers and tests use for the taxonomy -- via
 # manifest.classify_failure, which is the single place that derives it from a
 # finished record's own result/exit_status/notes.
-SESSION_UPDATE_NOT_IMPLEMENTED_REASON = (
-    "ENG-PC-02 task-scoped resumable sessions is not implemented yet; no adapter "
-    "produces an opaque session-continuation payload"
-)
+SESSION_UPDATE_NOT_RECORDED_REASON = "this run record carries no session continuation outcome"
 
 
 def classify_finished_run(*, exit_status: int, log_text: str) -> tuple[str, str | None]:
@@ -381,7 +380,15 @@ def run_result_from_record(
         exit_status=record.exit_status,
         duration_seconds=record.duration_seconds,
         usage_categories=structural_usage_keys(capabilities, log_text),
-        session_update=None,
-        session_update_reason=SESSION_UPDATE_NOT_IMPLEMENTED_REASON,
+        session_update=record.session_id if record.session_updated else None,
+        session_update_reason=(
+            record.session_update_reason
+            if record.session_update_reason
+            else (
+                None
+                if record.session_updated and record.session_id
+                else capabilities.resume_unavailable_reason or SESSION_UPDATE_NOT_RECORDED_REASON
+            )
+        ),
         evidence_paths=dict(evidence_paths),
     )

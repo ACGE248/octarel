@@ -32,6 +32,7 @@ def test_event_class_contract_covers_required_timeline_domains() -> None:
         "wake",
         "route",
         "lease",
+        "session",
         "process",
         "adapter_tool",
         "checkpoint",

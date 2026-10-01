@@ -67,9 +67,9 @@ The Glass Orchestration Studio program has landed. It is the live Control Center
 
 The `OCTAREL-UI-07` label is used by two different things and always has been: issue #26 (Graphify status) and the commit/engineering-doc name for issue #42 (subscription-aware cost). Cite the issue number, not the label.
 
-**#23 remains open for three unbuilt surfaces,** named in its merge comment on #27: the Flow canvas (minimap, fit-to-screen, zoom %, fullscreen), the Runs → Run Detail split, and shared entity inspectors. All three are genuinely absent from the dashboard today — `view-runs` is still one page and only one-off sheets exist, no shared inspector component.
+**#23 remains open for two unbuilt surfaces,** named in its merge comment on #27: the Flow canvas (minimap, fit-to-screen, zoom %, fullscreen) and shared entity inspectors. ENG-PC-04 shipped the shared Runs → Run Detail split, and ENG-PC-02 extends that one panel with task-scoped session facts and its bounded fresh-next-attempt control.
 
-Their provenance differs, and the difference matters to whoever picks them up. Only the Flow canvas is recorded as **Deferred** in `docs/engineering/OCTAREL-UI-04.md`; the Run Detail split and shared entity inspectors are not in that file's decision table at all. Treat them as this roadmap's planning rather than as scope #23 formally logged. Several ENG-PC tasks below name a Run Detail or entity inspector as their UI home; whichever task reaches that surface first builds it once, and the rest extend it.
+Their provenance differs, and the difference matters to whoever picks them up. Only the Flow canvas is recorded as **Deferred** in `docs/engineering/OCTAREL-UI-04.md`; shared entity inspectors are not in that file's decision table. Treat the remaining inspector work as this roadmap's planning rather than as scope #23 formally logged. ENG-PC tasks that need run evidence extend the existing Run Detail panel rather than rebuilding it.
 
 Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather than estimated, and no ENG-PC task may quietly fill them with an approximation: **cache categories** (nothing in the stack records fresh input, cache reads or cache writes, so no cache hit rate can be derived) and **effective context limit** (no runtime reports one, and a context window is never inferred from a model name).
 

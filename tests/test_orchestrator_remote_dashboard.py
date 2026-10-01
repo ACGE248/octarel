@@ -10,6 +10,7 @@ network call, or credential is ever required (criteria 13/15).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -20,12 +21,19 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
+from scripts.agents.control_plane import agent_session
+from scripts.agents.control_plane.agent_session import SessionIdentity
 from scripts.agents.control_plane.commands import CommandContext
 from scripts.agents.control_plane.dashboard_api import (
     _terminal_websocket_identity,
     create_app,
 )
 from scripts.agents.control_plane.models import Task
+from scripts.agents.control_plane.project import ProjectContract
+from scripts.agents.control_plane.project_registry import (
+    contract_to_row,
+    select_project,
+)
 from scripts.agents.control_plane.provider_state import seed_provider_states
 from scripts.agents.control_plane.remote_access import (
     ACCESS_JWT_HEADER,
@@ -104,6 +112,85 @@ def _remote_state(public_key, *, allowed_emails: frozenset[str] = frozenset()) -
 
 def _disabled_remote_state() -> RemoteAccessState:
     return RemoteAccessState.from_config(RemoteAccessConfig(enabled=False))
+
+
+def _select_fixture_project(ctx: CommandContext, project_id: str = "project-a") -> Task:
+    ctx.state.upsert_project(
+        contract_to_row(
+            ProjectContract(
+                project_id=project_id,
+                display_name=project_id,
+                local_repo_root=ctx.repo_root,
+            )
+        )
+    )
+    select_project(ctx.state, project_id)
+    task = ctx.state.get_task("t1")
+    assert task is not None
+    task.project_id = project_id
+    ctx.state.upsert_task(task)
+    return task
+
+
+def _resume_worker(ctx: CommandContext):
+    worker = dataclasses.replace(
+        ctx.registry.get("opencode-free-review"),
+        name="fixture-resume-review",
+        resume_args=("--resume", "{session_id}"),
+        resume_state_source="session_id",
+    )
+    ctx.registry.workers[worker.name] = worker
+    return worker
+
+
+def _session_identity(
+    ctx: CommandContext,
+    *,
+    project_id: str,
+    task_ref: str,
+    worker,
+) -> SessionIdentity:
+    return SessionIdentity(
+        project_id=project_id,
+        task_id=task_ref,
+        worker=worker.name,
+        provider=worker.provider,
+        effective_model=worker.default_model,
+        worktree_path=str(ctx.repo_root / "private-session-worktree"),
+        tree_sha="a" * 40,
+        permission_profile="standard",
+        capability=worker.capability,
+        policy_digest="fixture-policy-digest",
+    )
+
+
+def _seed_resumed_session(ctx: CommandContext, *, project_id: str, task_ref: str, worker) -> str:
+    identity = _session_identity(ctx, project_id=project_id, task_ref=task_ref, worker=worker)
+    first = agent_session.resolve_session(
+        ctx.state,
+        identity,
+        worker=worker,
+        run_id="fixture-run-1",
+        now="2026-09-30T12:00:00+00:00",
+    )
+    opaque = "opaque-native-continuation-123"
+    assert agent_session.record_session_outcome(
+        ctx.state,
+        decision=first,
+        worker=worker,
+        structured_result={worker.resume_state_source: opaque},
+        run_id="fixture-run-1",
+        now="2026-09-30T12:00:01+00:00",
+    ) == agent_session.REASON_SESSION_STATE_RECORDED
+    resumed = agent_session.resolve_session(
+        ctx.state,
+        identity,
+        worker=worker,
+        run_id="fixture-run-2",
+        now="2026-09-30T12:01:00+00:00",
+    )
+    assert resumed.mode == agent_session.MODE_RESUMED
+    return opaque
 
 
 class _FakeWebSocket:
@@ -244,6 +331,187 @@ def test_authenticated_remote_maintainer_can_use_existing_bounded_operations(ctx
     resp = client.post("/api/commands/pause", headers=headers, json={"task_id": "t1"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+# --------------------------------------------------------------------------- ENG-PC-02 session inspector
+
+
+def test_session_read_returns_typed_facts_without_opaque_state_or_absolute_paths(ctx):
+    task = _select_fixture_project(ctx)
+    worker = _resume_worker(ctx)
+    opaque = _seed_resumed_session(ctx, project_id="project-a", task_ref=task.task_ref, worker=worker)
+    client = TestClient(create_app(ctx))
+
+    response = client.get(f"/api/agent-sessions/{task.task_ref}/{worker.name}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == {"value": "RESUMED", "class": "MEASURED", "reason": None, "unit": None}
+    assert body["continuation_count"]["value"] == 1
+    assert body["continuation_count"]["class"] == "MEASURED"
+    assert body["session_age_seconds"]["value"] is not None
+    assert body["last_activity"]["value"] == "2026-09-30T12:01:00+00:00"
+    assert body["resume_capability"]["value"] is True
+    assert body["resume_capability"]["class"] == "DERIVED"
+    assert body["invalidation_reason"]["class"] == "NOT_REPORTED"
+    assert body["start_fresh_next_attempt"] == {"enabled": True, "reason": None}
+
+    serialized = response.text
+    assert opaque not in serialized
+    assert str(ctx.repo_root) not in serialized
+    assert "private-session-worktree" not in serialized
+    assert "continuation_state" not in serialized
+    assert "worktree_path" not in serialized
+
+
+def test_worktree_invalidation_reason_names_the_component_without_the_path(ctx):
+    """A worktree invalidation must name the component without carrying the path.
+
+    agent_session._invalidation_reason deliberately embeds ``stored=``/``current=``
+    so an operator sees which component invalidated resume rather than only that
+    something changed. For ``worktree_path`` those values are operator filesystem
+    paths, so the specificity that makes the reason useful is exactly what would
+    make it unsafe to surface -- and the reason is persisted on the session row,
+    then read back by this endpoint.
+
+    The RESUMED case cannot catch this: its invalidation_reason is NOT_REPORTED,
+    so the string is never rendered at all.
+
+    Scrubbing downstream was tried and rejected. redact_text redacts secrets, not
+    paths; the event timeline is clean only because run_events scrubs host paths in
+    its own envelope, and that regex does not match every shape an operator machine
+    produces (a pytest tmp_path under /private/var/folders is not matched). So the
+    values are withheld at the source instead, which is safe by construction for
+    every consumer rather than for the ones that remember to scrub.
+    """
+
+    task = _select_fixture_project(ctx)
+    worker = _resume_worker(ctx)
+    identity = _session_identity(ctx, project_id="project-a", task_ref=task.task_ref, worker=worker)
+    first = agent_session.resolve_session(ctx.state, identity, worker=worker, run_id="fixture-run-1")
+    assert agent_session.record_session_outcome(
+        ctx.state,
+        decision=first,
+        worker=worker,
+        structured_result={worker.resume_state_source: "opaque-native-continuation-123"},
+        run_id="fixture-run-1",
+    ) == agent_session.REASON_SESSION_STATE_RECORDED
+
+    moved = dataclasses.replace(identity, worktree_path=str(ctx.repo_root / "relocated-session-worktree"))
+    invalidated = agent_session.resolve_session(ctx.state, moved, worker=worker, run_id="fixture-run-3")
+    assert invalidated.mode == agent_session.MODE_FRESH
+    # Specific about WHICH component, and carrying neither path.
+    assert invalidated.reason.startswith(agent_session.REASON_WORKTREE_CHANGED)
+    assert "private-session-worktree" not in invalidated.reason
+    assert "relocated-session-worktree" not in invalidated.reason
+
+    response = TestClient(create_app(ctx)).get(f"/api/agent-sessions/{task.task_ref}/{worker.name}")
+
+    assert response.status_code == 200
+    body = response.json()
+    reason = body["invalidation_reason"]
+    assert reason["class"] == "MEASURED"
+    # Still names the component, so the operator-facing value is not lost.
+    assert reason["value"].startswith(agent_session.REASON_WORKTREE_CHANGED)
+    assert "private-session-worktree" not in response.text
+    assert "relocated-session-worktree" not in response.text
+    assert str(ctx.repo_root) not in response.text
+
+
+def test_unknown_session_task_is_rejected_before_session_state_is_touched(ctx, monkeypatch):
+    def unexpected_session_read(**_kwargs):
+        raise AssertionError("unknown task must be rejected before session persistence is read")
+
+    monkeypatch.setattr(ctx.state, "get_active_agent_session", unexpected_session_read)
+    client = TestClient(create_app(ctx))
+
+    response = client.get("/api/agent-sessions/not-this-project/opencode-free-review")
+
+    assert response.status_code == 404
+
+
+def test_forced_fresh_post_is_identity_audited_on_success_and_failure(ctx, keypair):
+    task = _select_fixture_project(ctx)
+    worker = _resume_worker(ctx)
+    _seed_resumed_session(ctx, project_id="project-a", task_ref=task.task_ref, worker=worker)
+    private_key, public_key = keypair
+    client = TestClient(create_app(ctx, remote=_remote_state(public_key)))
+    headers = {ACCESS_JWT_HEADER: _token(private_key), "Origin": f"https://{HOSTNAME}"}
+    endpoint = f"/api/agent-sessions/{task.task_ref}/{worker.name}/start-fresh"
+
+    success = client.post(endpoint, headers=headers, json={})
+    failure = client.post(endpoint, headers=headers, json={})
+
+    assert success.status_code == 200
+    assert success.json()["status"] == "REQUESTED"
+    assert failure.status_code == 409
+    messages = [e.message for e in ctx.state.list_events(limit=50) if e.category == "remote_audit"]
+    assert any(
+        MAINTAINER_EMAIL in message and "agent_session_start_fresh" in message and "OK" in message
+        for message in messages
+    )
+    assert any(
+        MAINTAINER_EMAIL in message and "agent_session_start_fresh" in message and "FAIL" in message
+        for message in messages
+    )
+
+
+def test_forced_fresh_post_cannot_target_a_task_outside_the_selected_project(ctx, keypair):
+    _select_fixture_project(ctx)
+    worker = _resume_worker(ctx)
+    foreign = Task(
+        id="foreign-task-id",
+        task_ref="FOREIGN-SESSION",
+        role="diff-review",
+        worker=worker.name,
+        project_id="project-b",
+    )
+    ctx.state.upsert_task(foreign)
+    identity = _session_identity(
+        ctx,
+        project_id="project-b",
+        task_ref=foreign.task_ref,
+        worker=worker,
+    )
+    agent_session.resolve_session(ctx.state, identity, worker=worker)
+    private_key, public_key = keypair
+    client = TestClient(create_app(ctx, remote=_remote_state(public_key)))
+    headers = {ACCESS_JWT_HEADER: _token(private_key), "Origin": f"https://{HOSTNAME}"}
+
+    response = client.post(
+        f"/api/agent-sessions/{foreign.task_ref}/{worker.name}/start-fresh",
+        headers=headers,
+        json={},
+    )
+
+    assert response.status_code == 404
+    row = ctx.state.get_active_agent_session(
+        project_id="project-b",
+        task_id=foreign.task_ref,
+        worker=worker.name,
+    )
+    assert row is not None
+    assert row["force_fresh_next"] is False
+
+
+def test_worker_without_native_resume_reports_reason_and_disables_control(ctx):
+    task = _select_fixture_project(ctx)
+    worker = ctx.registry.get("opencode2-gemini-flash-lite")
+    identity = _session_identity(ctx, project_id="project-a", task_ref=task.task_ref, worker=worker)
+    decision = agent_session.resolve_session(ctx.state, identity, worker=worker)
+    assert decision.mode == agent_session.MODE_FRESH
+    client = TestClient(create_app(ctx))
+
+    response = client.get(f"/api/agent-sessions/{task.task_ref}/{worker.name}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"]["value"] == "FRESH"
+    assert body["invalidation_reason"]["value"] == agent_session.REASON_ADAPTER_DOES_NOT_SUPPORT_RESUME
+    assert body["resume_capability"]["value"] is False
+    assert worker.name in body["resume_capability"]["reason"]
+    assert body["start_fresh_next_attempt"]["enabled"] is False
+    assert body["start_fresh_next_attempt"]["reason"] == body["resume_capability"]["reason"]
 
 
 # --------------------------------------------------------------------------- criterion 8: CSRF/origin + audit
