@@ -132,11 +132,11 @@ def test_opencode_free_review_reports_runtime_pool_model_discovery():
 def test_no_worker_claims_a_capability_this_stack_has_not_built(monkeypatch):
     """Global proof of the task's central rule.
 
-    Session resume (ENG-PC-02), worker-native incremental streaming (distinct
-    from ENG-PC-04's orchestrator-owned persisted timeline), and on-demand
-    cancellation do not exist anywhere in this stack yet. Every worker --
-    regardless of how new/expensive/fancy its model name is -- must report
-    all three as unsupported with a concrete reason, never silently true.
+    No registered worker declares the session-resume transport built by
+    ENG-PC-02. Worker-native incremental streaming (distinct from ENG-PC-04's
+    orchestrator-owned persisted timeline) and on-demand cancellation are also
+    undeclared. Every registered worker must therefore report all three as
+    unsupported with a concrete reason, never silently true.
     """
 
     for worker in REGISTRY.workers.values():

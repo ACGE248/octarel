@@ -157,6 +157,7 @@ def test_non_resume_adapter_always_starts_fresh_with_adapter_reason():
         ("provider", "FallbackProvider", agent_session.REASON_PROVIDER_CHANGED),
         ("effective_model", "fixture-model-2", agent_session.REASON_MODEL_CHANGED),
         ("worktree_path", "worktrees/recreated", agent_session.REASON_WORKTREE_CHANGED),
+        ("capability", "write", agent_session.REASON_CAPABILITY_CHANGED),
     ],
 )
 def test_each_identity_change_has_its_own_specific_reason(field, value, reason):
@@ -235,6 +236,35 @@ def test_secret_bearing_opaque_payload_is_rejected_not_redacted():
     next_attempt = agent_session.resolve_session(state, identity(), worker=RESUME_WORKER)
     assert next_attempt.mode == agent_session.MODE_FRESH
     assert next_attempt.reason == agent_session.REASON_STORED_STATE_REJECTED_SECRET
+
+
+@pytest.mark.parametrize(
+    "structured_result",
+    [
+        {"session_id": "native-session-after-deactivation"},
+        {"session_id": ""},
+        {"session_id": "sk-ABCDEFGHIJKLMNOP1234567890"},
+    ],
+)
+def test_outcome_never_reports_success_when_session_row_is_inactive(structured_result):
+    state = State(":memory:")
+    stale = seed_resumable(state)
+    replacement = agent_session.resolve_session(
+        state,
+        identity(tree_sha="b" * 40),
+        worker=RESUME_WORKER,
+    )
+    assert replacement.session_id != stale.session_id
+
+    reason = agent_session.record_session_outcome(
+        state,
+        decision=stale,
+        worker=RESUME_WORKER,
+        structured_result=structured_result,
+    )
+
+    assert reason == agent_session.REASON_SESSION_STATE_NOT_RECORDED
+    assert reason != agent_session.REASON_SESSION_STATE_RECORDED
 
 
 def test_opaque_payload_never_appears_in_lists_manifest_or_events():
@@ -319,6 +349,102 @@ def test_sustained_session_replacement_contention_degrades_to_fresh(monkeypatch)
     assert attempts == agent_session._MAX_SESSION_REPLACE_ATTEMPTS
     assert decision.mode == agent_session.MODE_FRESH
     assert decision.reason == agent_session.REASON_SESSION_CONTENTION
+    assert decision.session_id is None
+    assert state.list_agent_sessions() == []
+    assert state.list_events() == []
+    outcome = agent_session.record_session_outcome(
+        state,
+        decision=decision,
+        worker=RESUME_WORKER,
+        structured_result={"session_id": "unpersisted-native-session"},
+    )
+    assert outcome == agent_session.REASON_SESSION_STATE_NOT_RECORDED
+    assert outcome != agent_session.REASON_SESSION_STATE_RECORDED
+
+
+@pytest.mark.parametrize(
+    "cause,expected_reason",
+    [
+        ("missing_state", agent_session.REASON_NO_STORED_STATE),
+        ("fingerprint", agent_session.REASON_IDENTITY_FINGERPRINT_MISMATCH),
+        ("force_fresh", agent_session.REASON_OPERATOR_FORCED_FRESH),
+    ],
+)
+def test_zero_row_resume_reports_specific_cause(monkeypatch, cause, expected_reason):
+    state = State(":memory:")
+    first = seed_resumable(state)
+    original = state.try_resume_agent_session
+
+    def lose_resume_cas(**kwargs):
+        if cause == "missing_state":
+            state.store_agent_session_state(
+                session_id=first.session_id,
+                continuation_state=None,
+                now="2026-01-01T00:00:02+00:00",
+                run_id=None,
+                reason=agent_session.REASON_SESSION_OUTCOME_MISSING,
+            )
+        elif cause == "fingerprint":
+            state._conn.execute(
+                "UPDATE agent_sessions SET identity_fingerprint = ? WHERE id = ?",
+                ("legacy-fingerprint", first.session_id),
+            )
+            state._conn.commit()
+        else:
+            assert agent_session.request_forced_fresh(
+                state,
+                project_id="project-1",
+                task_id="ENG-PC-02",
+                worker=RESUME_WORKER.name,
+            )
+        return original(**kwargs)
+
+    monkeypatch.setattr(state, "try_resume_agent_session", lose_resume_cas)
+    decision = agent_session.resolve_session(state, identity(), worker=RESUME_WORKER)
+
+    assert decision.mode == agent_session.MODE_FRESH
+    assert decision.reason == expected_reason
+    assert decision.session_id != first.session_id
+
+
+def test_concurrent_replacement_is_revalidated_instead_of_deactivated(monkeypatch):
+    state = State(":memory:")
+    first = seed_resumable(state)
+    replacement_id = "concurrent-replacement"
+    original = state.try_resume_agent_session
+    replaced = False
+
+    def replace_before_resume(**kwargs):
+        nonlocal replaced
+        if replaced:
+            return original(**kwargs)
+        replaced = True
+        row = agent_session._fresh_row(
+            identity(),
+            now="2026-01-01T00:00:02+00:00",
+            run_id="concurrent-run",
+            reason=agent_session.REASON_OPERATOR_FORCED_FRESH,
+        )
+        row["id"] = replacement_id
+        _stored, won = state.replace_active_agent_session(row=row, expected_session_id=first.session_id)
+        assert won
+        stored = state.store_agent_session_state(
+            session_id=replacement_id,
+            continuation_state="concurrent-native-session",
+            now="2026-01-01T00:00:03+00:00",
+            run_id="concurrent-run",
+            reason=agent_session.REASON_SESSION_STATE_RECORDED,
+        )
+        assert stored is not None
+        return None
+
+    monkeypatch.setattr(state, "try_resume_agent_session", replace_before_resume)
+    decision = agent_session.resolve_session(state, identity(), worker=RESUME_WORKER)
+
+    assert decision.mode == agent_session.MODE_RESUMED
+    assert decision.session_id == replacement_id
+    rows = {row["id"]: row for row in state.list_agent_sessions()}
+    assert rows[replacement_id]["active"] is True
 
 
 def test_partial_unique_index_contains_a_real_two_connection_race(tmp_path: Path):

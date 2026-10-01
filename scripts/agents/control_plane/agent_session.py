@@ -4,8 +4,9 @@ The durable row belongs to the existing :class:`~scripts.agents.control_plane.st
 store. Resume is deliberately fail-closed: a session is continued only when the
 worker explicitly declares ``cli.resume``, every identity component still matches,
 and a screened opaque state value exists. The identity fingerprint is useful for
-indexing and a cheap equality fast-path, but never explains an invalidation; the
-component-wise comparison below is the sole authority for operator-facing reasons.
+indexing and a cheap equality fast-path. Component-wise comparison remains the
+authority for named identity changes; a fingerprint-only CAS miss is reported as
+an integrity mismatch rather than mislabelled as one of those component changes.
 
 Opaque continuation state is stored in SQLite and read only by
 :func:`resume_args_for_session`. The resume argv returned by that function is the
@@ -44,12 +45,11 @@ REASON_POLICY_DIGEST_CHANGED = "policy digest changed"
 REASON_OPERATOR_FORCED_FRESH = "operator forced fresh"
 REASON_NO_STORED_STATE = "no stored state"
 REASON_STORED_STATE_REJECTED_SECRET = "stored state rejected as secret-bearing"
-REASON_PROJECT_CHANGED = "project changed"
-REASON_TASK_CHANGED = "task changed"
-REASON_WORKER_CHANGED = "worker changed"
 REASON_CAPABILITY_CHANGED = "capability changed"
+REASON_IDENTITY_FINGERPRINT_MISMATCH = "identity fingerprint mismatch"
 REASON_RESUME_COMPATIBLE = "compatible stored session resumed"
 REASON_SESSION_STATE_RECORDED = "adapter session continuation state recorded"
+REASON_SESSION_STATE_NOT_RECORDED = "adapter session continuation state not recorded"
 REASON_SESSION_OUTCOME_MISSING = "adapter result carried no declared session state"
 REASON_SESSION_CONTENTION = "session replacement contention exhausted"
 
@@ -78,7 +78,7 @@ class SessionIdentity:
 @dataclass(frozen=True)
 class SessionDecision:
     mode: str
-    session_id: str
+    session_id: str | None
     continuation_count: int
     session_age_seconds: float | None
     last_activity_at: str
@@ -87,9 +87,6 @@ class SessionDecision:
 
 
 _COMPONENT_REASONS: tuple[tuple[str, str], ...] = (
-    ("project_id", REASON_PROJECT_CHANGED),
-    ("task_id", REASON_TASK_CHANGED),
-    ("worker", REASON_WORKER_CHANGED),
     ("provider", REASON_PROVIDER_CHANGED),
     ("effective_model", REASON_MODEL_CHANGED),
     ("worktree_path", REASON_WORKTREE_CHANGED),
@@ -239,12 +236,29 @@ def resolve_session(
                 decision = _decision(resumed, mode=MODE_RESUMED, reason=REASON_RESUME_COMPATIBLE, now=now)
                 _emit(state, identity, decision, run_id=run_id)
                 return decision
-            # A concurrent process changed the row after our read. Re-read on
-            # the next bounded attempt and never resume uncertain state.
-            current = state.get_active_agent_session(
+            # The resume CAS can lose for several distinct reasons. Re-read and
+            # judge the exact row that is active now; a different row belongs to
+            # a concurrent replacement and must be revalidated on another pass.
+            reread = state.get_active_agent_session(
                 project_id=identity.project_id, task_id=identity.task_id, worker=identity.worker
             )
-            reason = REASON_NO_STORED_STATE
+            if reread is None or reread["id"] != current["id"]:
+                continue
+            current = reread
+            if current["force_fresh_next"]:
+                reason = REASON_OPERATOR_FORCED_FRESH
+            elif not current["has_stored_state"]:
+                reason = (
+                    REASON_STORED_STATE_REJECTED_SECRET
+                    if current.get("state_reason") == REASON_STORED_STATE_REJECTED_SECRET
+                    else REASON_NO_STORED_STATE
+                )
+            elif current["identity_fingerprint"] != identity.fingerprint:
+                reason = REASON_IDENTITY_FINGERPRINT_MISMATCH
+            else:
+                # The row changed and returned to a resumable shape between the
+                # CAS and re-read. Revalidate it through the bounded loop.
+                continue
 
         expected_id = str(current["id"]) if current else None
         fresh = _fresh_row(identity, now=now, run_id=run_id, reason=reason or REASON_NO_STORED_STATE)
@@ -259,12 +273,17 @@ def resolve_session(
             continue
 
     # Sustained contention must not escape into a daemon caller or borrow the
-    # competing row's identity. An unpersisted FRESH decision cannot resume or
-    # overwrite opaque state and is therefore the safe degraded outcome.
-    fresh = _fresh_row(identity, now=now, run_id=run_id, reason=REASON_SESSION_CONTENTION)
-    decision = _decision(fresh, mode=MODE_FRESH, reason=REASON_SESSION_CONTENTION, now=now)
-    _emit(state, identity, decision, run_id=run_id)
-    return decision
+    # competing row's identity. There is deliberately no session id and no event:
+    # without a persisted row, a MEASURED session event would claim false backing.
+    return SessionDecision(
+        mode=MODE_FRESH,
+        session_id=None,
+        continuation_count=0,
+        session_age_seconds=None,
+        last_activity_at=now,
+        reason=REASON_SESSION_CONTENTION,
+        identity_fingerprint=identity.fingerprint,
+    )
 
 
 def request_forced_fresh(state: State, *, project_id: str, task_id: str, worker: str) -> bool:
@@ -292,33 +311,35 @@ def record_session_outcome(
     now = now or utc_now_iso()
     if not worker.supports_native_resume:
         return REASON_ADAPTER_DOES_NOT_SUPPORT_RESUME
+    if decision.session_id is None:
+        return REASON_SESSION_STATE_NOT_RECORDED
     raw = structured_result.get(worker.resume_state_source)
     if not isinstance(raw, str) or not raw:
-        state.store_agent_session_state(
+        stored = state.store_agent_session_state(
             session_id=decision.session_id,
             continuation_state=None,
             now=now,
             run_id=run_id,
             reason=REASON_SESSION_OUTCOME_MISSING,
         )
-        return REASON_SESSION_OUTCOME_MISSING
+        return REASON_SESSION_OUTCOME_MISSING if stored is not None else REASON_SESSION_STATE_NOT_RECORDED
     if redact_text(raw) != raw:
-        state.store_agent_session_state(
+        stored = state.store_agent_session_state(
             session_id=decision.session_id,
             continuation_state=None,
             now=now,
             run_id=run_id,
             reason=REASON_STORED_STATE_REJECTED_SECRET,
         )
-        return REASON_STORED_STATE_REJECTED_SECRET
-    state.store_agent_session_state(
+        return REASON_STORED_STATE_REJECTED_SECRET if stored is not None else REASON_SESSION_STATE_NOT_RECORDED
+    stored = state.store_agent_session_state(
         session_id=decision.session_id,
         continuation_state=raw,
         now=now,
         run_id=run_id,
         reason=REASON_SESSION_STATE_RECORDED,
     )
-    return REASON_SESSION_STATE_RECORDED
+    return REASON_SESSION_STATE_RECORDED if stored is not None else REASON_SESSION_STATE_NOT_RECORDED
 
 
 def resume_args_for_session(state: State, *, decision: SessionDecision, worker: Worker) -> tuple[str, ...]:
@@ -332,7 +353,7 @@ def resume_args_for_session(state: State, *, decision: SessionDecision, worker: 
     a summary, or an event.
     """
 
-    if decision.mode != MODE_RESUMED or not worker.supports_native_resume:
+    if decision.mode != MODE_RESUMED or decision.session_id is None or not worker.supports_native_resume:
         raise ValueError("resume args require a RESUMED decision and a resume-capable worker")
     opaque_state = state._agent_session_resume_state(
         session_id=decision.session_id,
