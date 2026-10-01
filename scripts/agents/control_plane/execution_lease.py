@@ -43,7 +43,12 @@ from pathlib import Path
 from typing import Any
 
 from .models import EXECUTION_LEASE_ACQUIRED, ExecutionLease
-from .recovery import _AGENT_OUTPUT_DIRNAME, _WRITE_LOCK_NAME, _stale_write_lock_holder, pid_is_alive
+from .recovery import (
+    _AGENT_OUTPUT_DIRNAME,
+    _WRITE_LOCK_NAME,
+    _stale_write_lock_holder,
+    pid_is_alive,
+)
 from .state import State
 
 
