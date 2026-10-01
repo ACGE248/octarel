@@ -206,10 +206,26 @@ def fail(state: State, *, wake_id: int, error: str) -> WakeRequest | None:
     return wake
 
 
+def _safe_record_event(state: State, **kwargs: Any) -> None:
+    """Record an operator-facing event, but never let the recording itself raise.
+
+    Used only by the recovery paths below, which must stay no-raise end to end (see
+    ``drain_due``'s and ``recover_on_restart``'s own "never raises" promises) -- a
+    failure to log a recovery must never become a second, different way for queue
+    state to take the daemon down.
+    """
+
+    try:
+        state.record_event(**kwargs)
+    except Exception:  # noqa: BLE001 - logging must never be fatal
+        pass
+
+
 def _recover_stranded_claims(state: State, *, claimed_by: str) -> None:
-    """Self-heal within this same daemon, no restart and no timeout: reset any wake
-    still ``CLAIMED`` by this ``claimed_by`` identity from a previous pass back to
-    ``PENDING`` before a new pass claims anything.
+    """Self-heal within this same daemon, no restart and no timeout: resolve any wake
+    still ``CLAIMED`` by this ``claimed_by`` identity from a previous pass (back to
+    ``PENDING``, or merged into an already-PENDING sibling -- see
+    ``State.recover_claimed_wakes``) before a new pass claims anything.
 
     ``claimed_by`` is a single fixed identity per daemon (``orchestrator._cmd_run``
     always calls ``drain_due`` with ``claimed_by="daemon"``), so a row still ``CLAIMED``
@@ -218,16 +234,34 @@ def _recover_stranded_claims(state: State, *, claimed_by: str) -> None:
     have raised somewhere between the two (e.g. ``complete_wake``'s own write hitting a
     busy database under contention). That is identity evidence, not an elapsed-time
     guess, so it is safe to run on every pass rather than inferring staleness.
+
+    Never raises: this runs at the very start of every ``drain_due`` pass, and
+    ``drain_due``'s own docstring already promises the daemon loop never dies on a bad
+    row here, not just on a bad claim/complete later in the same pass.
     """
 
-    recovered = state.recover_claimed_wakes(claimed_by=claimed_by)
-    if recovered:
-        state.record_event(
-            category="wake_queue",
-            level="warning",
+    try:
+        outcome = state.recover_claimed_wakes(claimed_by=claimed_by)
+    except Exception as exc:  # noqa: BLE001 - queue-state recovery must never be fatal to the daemon loop
+        _safe_record_event(
+            state, category="wake_queue", level="error",
+            message=f"drain_due: recovering wakes CLAIMED by {claimed_by!r} failed, skipped this pass: {exc}",
+        )
+        return
+    if outcome.reset:
+        _safe_record_event(
+            state, category="wake_queue", level="warning",
             message=(
-                f"drain_due: {recovered} wake(s) still CLAIMED by {claimed_by!r} from a prior "
+                f"drain_due: {outcome.reset} wake(s) still CLAIMED by {claimed_by!r} from a prior "
                 "pass reset to PENDING (claim/complete did not reach COMPLETED)"
+            ),
+        )
+    if outcome.merged:
+        _safe_record_event(
+            state, category="wake_queue", level="warning",
+            message=(
+                f"drain_due: {outcome.merged} wake(s) still CLAIMED by {claimed_by!r} from a prior "
+                "pass merged into an already-PENDING sibling for the same project/task/stage"
             ),
         )
 
@@ -273,27 +307,49 @@ def drain_due(state: State, *, claimed_by: str, limit: int = 10) -> int:
 
 def recover_on_restart(state: State, *, project_id: str | None = None) -> int:
     """Daemon-start recovery: any wake left ``CLAIMED`` at this point belonged to a
-    previous process instance that is now gone, so it is reset to ``PENDING`` and
-    retried rather than silently lost (restart durability). Mirrors
-    ``runbooks.recover_runbooks_on_restart``'s shape: a single bounded sweep logged once,
-    not a per-row event flood.
+    previous process instance that is now gone, so it is resolved -- reset to
+    ``PENDING`` and retried, or merged into an already-PENDING sibling for the same
+    key (see ``State.recover_claimed_wakes``) -- rather than silently lost (restart
+    durability). Mirrors ``runbooks.recover_runbooks_on_restart``'s shape: a single
+    bounded sweep logged once, not a per-row event flood.
 
     This is restart-scoped, not the only route a ``CLAIMED`` row can recover through:
     a *live* daemon can also strand one mid-run (``complete_wake`` itself raising), and
     that case is recovered every ``drain_due`` pass by ``_recover_stranded_claims``
     instead -- this function only ever needs to run once, at process start, because a
     live daemon no longer depends on it to get unstuck.
+
+    Never raises: daemon startup must not be blocked by recoverable queue state. A
+    failure here is reported and treated as "nothing recovered yet" rather than
+    aborting the start -- the very next ``drain_due`` pass gets another chance at the
+    same rows via ``_recover_stranded_claims``.
     """
 
-    recovered = state.recover_claimed_wakes(project_id=project_id)
-    if recovered:
-        state.record_event(
-            category="wake_queue",
-            level="warning",
-            message=f"daemon restart: {recovered} claimed wake(s) reset to PENDING for retry",
+    try:
+        outcome = state.recover_claimed_wakes(project_id=project_id)
+    except Exception as exc:  # noqa: BLE001 - queue-state recovery must never block daemon startup
+        _safe_record_event(
+            state, category="wake_queue", level="error",
+            message=f"daemon restart: recovering claimed wakes failed, continuing startup: {exc}",
             project_id=project_id,
         )
-    return recovered
+        return 0
+    if outcome.reset:
+        _safe_record_event(
+            state, category="wake_queue", level="warning",
+            message=f"daemon restart: {outcome.reset} claimed wake(s) reset to PENDING for retry",
+            project_id=project_id,
+        )
+    if outcome.merged:
+        _safe_record_event(
+            state, category="wake_queue", level="warning",
+            message=(
+                f"daemon restart: {outcome.merged} claimed wake(s) merged into an "
+                "already-PENDING sibling for the same project/task/stage"
+            ),
+            project_id=project_id,
+        )
+    return outcome.total
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
@@ -34,6 +35,27 @@ STATE_DIRNAME = ".orchestrator-state"
 DB_FILENAME = "orchestrator.db"
 
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class WakeRecoveryOutcome:
+    """Result of one ``State.recover_claimed_wakes`` sweep (ENG-PC-03).
+
+    ``reset`` counts a stranded ``CLAIMED`` row that had no ``PENDING`` sibling for its
+    (project_id, task_id, stage) key and so went straight back to ``PENDING``. ``merged``
+    counts a stranded row whose key already had a ``PENDING`` sibling -- created by a
+    fresh trigger that arrived while this row was ``CLAIMED`` -- so its contributions and
+    ``coalesced_count`` were folded into that sibling instead of becoming a second
+    ``PENDING`` row for the same key, which the partial unique index forbids. See
+    ``recover_claimed_wakes`` for why both outcomes are needed.
+    """
+
+    reset: int = 0
+    merged: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.reset + self.merged
 
 
 def _serialized(method: Callable[..., _T]) -> Callable[..., _T]:
@@ -1659,9 +1681,9 @@ class State:
     @_serialized
     def recover_claimed_wakes(
         self, *, project_id: str | None = None, claimed_by: str | None = None
-    ) -> int:
-        """Reset orphaned ``CLAIMED`` wake(s) back to ``PENDING``. Identity-based, never
-        a timeout-based guess -- used two ways:
+    ) -> WakeRecoveryOutcome:
+        """Resolve every orphaned ``CLAIMED`` wake out of ``CLAIMED``. Identity-based,
+        never a timeout-based guess -- used two ways:
 
         - at daemon startup (``project_id`` only, no ``claimed_by``): every row still
           ``CLAIMED`` belonged to a previous process instance that is now gone, so it is
@@ -1676,6 +1698,24 @@ class State:
           ``claim()``/``complete()`` sequence, which must have raised before reaching
           ``COMPLETED``. Resetting it here lets the very next pass claim and retry it,
           recovering within one daemon lifetime instead of requiring a restart.
+
+        A stranded row cannot always go straight back to ``PENDING``, though: coalescing
+        only ever merges a fresh trigger into a row that is *currently* ``PENDING`` (see
+        ``enqueue_wake``), so while this row sat ``CLAIMED`` a fresh trigger for the exact
+        same (project_id, task_id, stage) key is free to -- and legitimately does --
+        start its own new ``PENDING`` row for that key. A bare ``UPDATE ... SET status =
+        'PENDING'`` on the stranded row would then collide with that sibling under
+        ``idx_wake_queue_pending_key`` and raise ``sqlite3.IntegrityError``, which used to
+        propagate out of this method into ``drain_due`` and daemon startup alike, turning
+        one contended ``complete_wake`` into a permanent outage. Instead, each stranded
+        row is checked against its own key before being touched: with no ``PENDING``
+        sibling it is reset in place exactly as before; with one, the two rows represent
+        the same ask, so the stranded row's contributions are re-parented onto the
+        sibling, its ``coalesced_count`` is folded in, and the now-empty stranded row is
+        deleted -- never a second ``PENDING`` row, and never a dropped reason, count or
+        contribution. Every row is resolved inside the same transaction, so the
+        at-most-one-``PENDING``-per-key invariant never has a window where it could be
+        violated.
         """
 
         now = utc_now_iso()
@@ -1687,13 +1727,48 @@ class State:
         if claimed_by is not None:
             clauses.append("claimed_by = ?")
             values.append(claimed_by)
-        cursor = self._conn.execute(
-            "UPDATE wake_queue SET status = 'PENDING', claimed_at = NULL, claimed_by = NULL, updated_at = ? "
-            f"WHERE {' AND '.join(clauses)}",
-            (now, *values),
-        )
-        self._conn.commit()
-        return cursor.rowcount
+        where = " AND ".join(clauses)
+        reset = 0
+        merged = 0
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            stranded = self._conn.execute(f"SELECT * FROM wake_queue WHERE {where}", values).fetchall()
+            for row in stranded:
+                wake_id = row["id"]
+                sibling = self._conn.execute(
+                    "SELECT id FROM wake_queue WHERE status = 'PENDING' "
+                    "AND IFNULL(project_id, '') = IFNULL(?, '') "
+                    "AND IFNULL(task_id, '') = IFNULL(?, '') "
+                    "AND IFNULL(stage, '') = IFNULL(?, '') "
+                    "AND id != ?",
+                    (row["project_id"], row["task_id"], row["stage"], wake_id),
+                ).fetchone()
+                if sibling is None:
+                    self._conn.execute(
+                        "UPDATE wake_queue SET status = 'PENDING', claimed_at = NULL, "
+                        "claimed_by = NULL, updated_at = ? WHERE id = ?",
+                        (now, wake_id),
+                    )
+                    reset += 1
+                else:
+                    sibling_id = sibling["id"]
+                    self._conn.execute(
+                        "UPDATE wake_queue_contributions SET wake_id = ? WHERE wake_id = ?",
+                        (sibling_id, wake_id),
+                    )
+                    self._conn.execute(
+                        "UPDATE wake_queue SET coalesced_count = coalesced_count + ?, updated_at = ? "
+                        "WHERE id = ?",
+                        (row["coalesced_count"], now, sibling_id),
+                    )
+                    self._conn.execute("DELETE FROM wake_queue WHERE id = ?", (wake_id,))
+                    merged += 1
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        return WakeRecoveryOutcome(reset=reset, merged=merged)
 
     @_serialized
     def get_wake(self, wake_id: int) -> WakeRequest | None:

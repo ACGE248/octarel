@@ -268,6 +268,109 @@ def test_a_claimed_row_stranded_under_a_different_identity_is_not_touched():
     assert state.get_wake(claimed.id).status == WAKE_CLAIMED
 
 
+def _strand_a_claim_behind_a_fresh_sibling_for_the_same_key(state: State):
+    """Build the exact collision this program's recovery must survive: a wake is
+    claimed, then -- entirely legally, since coalescing only ever merges into a
+    currently-PENDING row and there is none left for this key once the first one is
+    claimed -- a fresh trigger for the identical (project_id, task_id, stage) starts a
+    brand new PENDING sibling. Returns ``(claimed, sibling)``.
+    """
+
+    claimed_wake = wake_queue.enqueue(
+        state, reason="TASK_ELIGIBLE", source="a", task_id="t1", stage="implement"
+    )
+    claimed = wake_queue.claim(state, claimed_by="daemon")
+    assert claimed is not None and claimed.id == claimed_wake.id
+    sibling = wake_queue.enqueue(
+        state, reason="TASK_UNBLOCKED", source="b", task_id="t1", stage="implement"
+    )
+    assert sibling.id != claimed.id
+    assert sibling.status == WAKE_PENDING
+    return claimed, sibling
+
+
+def test_a_stranded_claim_colliding_with_a_fresh_sibling_merges_instead_of_crashing_the_daemon_loop(monkeypatch):
+    """The defect this test guards against: once a wake is claimed, a fresh trigger for
+    the same key legitimately starts a new PENDING sibling. If ``complete_wake`` then
+    fails (leaving the first wake stranded CLAIMED), the daemon's own recovery used to
+    try to reset that stranded row straight back to PENDING -- colliding with the
+    sibling under ``idx_wake_queue_pending_key`` and raising ``IntegrityError`` out of
+    ``drain_due``, the daemon loop's own entry point into the wake queue every tick.
+    Recovery must instead merge the stranded row into the sibling and keep going.
+    """
+
+    state = State(":memory:")
+    claimed, sibling = _strand_a_claim_behind_a_fresh_sibling_for_the_same_key(state)
+
+    real_complete_wake = State.complete_wake
+
+    def boom(self, *, wake_id, now=None):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(State, "complete_wake", boom)
+    with pytest.raises(RuntimeError):
+        wake_queue.complete(state, wake_id=claimed.id)
+    assert state.get_wake(claimed.id).status == WAKE_CLAIMED
+    monkeypatch.setattr(State, "complete_wake", real_complete_wake)
+
+    # This is the daemon loop's own entry point into the wake queue every tick
+    # (``orchestrator._cmd_run`` calls exactly this every pass) -- it must not raise.
+    drained = wake_queue.drain_due(state, claimed_by="daemon")
+
+    # The stranded row is gone (merged, not resurrected as a second PENDING row), and
+    # the sibling absorbed it: combined count, and both contributions preserved with
+    # nothing lost in the merge.
+    assert state.get_wake(claimed.id) is None
+    merged = state.get_wake(sibling.id)
+    assert merged is not None
+    assert merged.coalesced_count == 2
+    contributions = state.list_wake_contributions(sibling.id)
+    assert [c.reason for c in contributions] == ["TASK_ELIGIBLE", "TASK_UNBLOCKED"]
+    assert [c.source for c in contributions] == ["a", "b"]
+    # The merged row is itself drainable in this very pass, not left stuck again.
+    assert drained == 1
+    assert state.get_wake(sibling.id).status == WAKE_COMPLETED
+
+    merge_events = [
+        e for e in state.list_events(limit=50)
+        if e.category == "wake_queue" and "merged into an already-PENDING sibling" in e.message
+    ]
+    assert len(merge_events) == 1
+
+
+def test_recover_on_restart_resolves_the_same_collision_without_raising_and_leaves_the_queue_drainable(
+    tmp_path: Path,
+):
+    """``recover_on_restart`` hits the identical collision at daemon start (e.g. the
+    live daemon crashed outright instead of raising inside ``complete_wake``, so the
+    stranded CLAIMED row and its fresh sibling are both still on disk when a new
+    process starts). It must resolve the same way ``_recover_stranded_claims`` does,
+    not raise and block the daemon from starting at all.
+    """
+
+    db_path = tmp_path / "state.db"
+    state = State(db_path)
+    claimed, sibling = _strand_a_claim_behind_a_fresh_sibling_for_the_same_key(state)
+    state.close()
+
+    restarted = State(db_path)
+    recovered = wake_queue.recover_on_restart(restarted)
+    assert recovered == 1
+
+    assert restarted.get_wake(claimed.id) is None
+    merged = restarted.get_wake(sibling.id)
+    assert merged is not None
+    assert merged.status == WAKE_PENDING
+    assert merged.coalesced_count == 2
+    contributions = restarted.list_wake_contributions(sibling.id)
+    assert [c.reason for c in contributions] == ["TASK_ELIGIBLE", "TASK_UNBLOCKED"]
+
+    # Genuinely drainable afterward, not merely reset in name.
+    drained = wake_queue.drain_due(restarted, claimed_by="daemon")
+    assert drained == 1
+    assert restarted.get_wake(sibling.id).status == WAKE_COMPLETED
+
+
 def test_queue_depth_and_oldest_age_are_local_reads_with_no_provider_call():
     state = State(":memory:")
     assert wake_queue.queue_depth(state).as_dict() == {
