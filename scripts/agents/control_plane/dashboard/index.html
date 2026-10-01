@@ -559,9 +559,14 @@
         </details>
 
         <div class="card wide" id="card-runbooks-list">
-          <h2>Runbooks</h2>
-          <p class="hint">Every value below comes from the durable orchestrator state — nothing here is estimated.</p>
-          <div id="runbooks-cards" class="entity-list"></div>
+          <h2>Runs</h2>
+          <p class="hint">Select a run for its shared detail view. Every value comes from durable orchestrator state; unreported event facts stay explicit.</p>
+          <div class="runs-split">
+            <div id="runbooks-cards" class="entity-list run-list" aria-label="Run list"></div>
+            <aside id="run-detail" class="run-detail" aria-live="polite" aria-label="Run detail">
+              <p class="hint">Select a run to view its execution evidence.</p>
+            </aside>
+          </div>
         </div>
       </section>
 
@@ -728,10 +733,21 @@
 
       <section class="view" id="view-history" role="tabpanel" hidden>
         <div class="card wide" id="card-events">
-          <h2>Development History</h2>
+          <h2>Execution Events</h2>
+          <p class="hint">Chronological live timeline from the existing event store. Typed facts show their source and provenance; older events remain UNKNOWN rather than being inferred.</p>
           <div class="history-tools">
-            <input id="history-search" type="search" placeholder="Search task, branch, provider, result…" aria-label="Search development history" />
-            <select id="history-category" aria-label="History category"><option value="">All categories</option><option>implementation</option><option>testing</option><option>review</option><option>documentation</option><option>git</option><option>worktrees</option><option>terminal</option><option value="app_lifecycle">app lifecycle</option><option>provider</option><option>security</option></select>
+            <input id="history-search" type="search" placeholder="Search run, event, provider, evidence…" aria-label="Search execution events" />
+            <select id="history-category" aria-label="Event class">
+              <option value="">All event classes</option>
+              <option value="group:lifecycle">Lifecycle</option>
+              <option value="group:model_tool">Model / tool</option>
+              <option value="group:safety_approval">Safety / approval</option>
+              <option value="group:validation">Validation</option>
+              <option value="class:lease">Lease</option>
+              <option value="class:usage">Usage</option>
+              <option value="class:wait_attention">Wait / attention</option>
+              <option value="legacy">Legacy / not reported</option>
+            </select>
           </div>
           <div id="run-evidence" class="entity-list"></div>
           <ul id="events-list" class="events-list event-feed"></ul>

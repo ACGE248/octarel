@@ -482,6 +482,17 @@ class Event:
     level: str = "info"
     # ENG-CP-03 (issue #165): the managed project this history entry belongs to.
     project_id: str | None = None
+    # ENG-PC-04: typed run-event fields are additive.  They remain nullable so
+    # every legacy ``record_event`` caller and every pre-migration row keeps its
+    # original meaning; typed writers use ``State.record_run_event``.
+    run_id: str | None = None
+    run_sequence: int | None = None
+    event_class: str | None = None
+    event_type: str | None = None
+    source: str | None = None
+    provenance: str | None = None
+    data: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "Event":
@@ -494,6 +505,14 @@ class Event:
             provider=row["provider"],
             level=row["level"],
             project_id=row["project_id"] if "project_id" in row.keys() else None,
+            run_id=row["run_id"] if "run_id" in row.keys() else None,
+            run_sequence=row["run_sequence"] if "run_sequence" in row.keys() else None,
+            event_class=row["event_class"] if "event_class" in row.keys() else None,
+            event_type=row["event_type"] if "event_type" in row.keys() else None,
+            source=row["source"] if "source" in row.keys() else None,
+            provenance=row["provenance"] if "provenance" in row.keys() else None,
+            data=json.loads(row["data"] or "{}") if "data" in row.keys() else {},
+            evidence=json.loads(row["evidence"] or "{}") if "evidence" in row.keys() else {},
         )
 
 

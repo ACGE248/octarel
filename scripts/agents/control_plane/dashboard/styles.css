@@ -1266,6 +1266,35 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .events-list li.level-error { color: var(--err); }
 .events-list li.level-warning { color: var(--warn); }
 
+/* ENG-PC-04: one responsive Runs -> Run Detail structure and the typed event
+   timeline. Group colour is carried by a left rail as well as colour text, so
+   the distinction remains visible without relying on colour alone. */
+.runs-split { display: grid; grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr); gap: 16px; align-items: start; }
+.run-list { min-width: 0; }
+.run-detail { min-width: 0; position: sticky; top: 76px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--surface) 88%, transparent); }
+.run-detail:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.run-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.run-detail-head h3 { margin: 2px 0 12px; }
+.run-detail-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 10px; margin: 0 0 16px; font-size: 12px; }
+.run-detail-facts dt { color: var(--muted); }
+.run-detail-facts dd { margin: 0; overflow-wrap: anywhere; }
+.run-detail-events { max-height: 440px; }
+.events-list li.event-group-lifecycle { border-left: 3px solid var(--ok); padding-left: 8px; }
+.events-list li.event-group-model_tool { border-left: 3px solid var(--info); padding-left: 8px; }
+.events-list li.event-group-safety_approval { border-left: 3px solid var(--warn); padding-left: 8px; }
+.events-list li.event-group-validation { border-left: 3px solid var(--accent-ink); padding-left: 8px; }
+.event-details { margin-top: 6px; color: var(--text); }
+.event-details > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.event-data, .event-evidence-preview { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); color: var(--text); font-size: 11px; }
+.event-evidence { display: grid; gap: 6px; margin-top: 8px; }
+.event-evidence code { overflow-wrap: anywhere; color: var(--muted); }
+.event-evidence-open { justify-self: start; }
+
+@media (max-width: 900px) {
+  .runs-split { grid-template-columns: 1fr; }
+  .run-detail { position: static; }
+}
+
 .command-bar-icon { display: flex; align-items: center; color: var(--muted); flex-shrink: 0; margin-left: 4px; }
 .command-bar {
   display: flex;

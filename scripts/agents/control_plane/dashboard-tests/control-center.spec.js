@@ -480,6 +480,30 @@ test('Runs view lists fixture runbooks in every status with real data', async ({
   await expect(page.locator('#rb-preset option')).toHaveCount(5);
 });
 
+test('Runs uses one shared Run Detail surface with recorded execution events', async ({ page }) => {
+  await navTo(page, 'view-runs');
+  const running = page.locator('[data-runbook-id="fx-rb-running"]');
+  await running.getByRole('button', { name: 'View detail for Fixture overnight run' }).click();
+  const detail = page.locator('#run-detail');
+  await expect(detail).toContainText('Run Detail');
+  await expect(detail).toContainText('fx-rb-running');
+  await expect(detail).toContainText('lease.acquired');
+  await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
+});
+
+test('Execution Events filters typed classes and opens bounded evidence', async ({ page }) => {
+  await navTo(page, 'view-history');
+  await expect(page.locator('#card-events h2')).toHaveText('Execution Events');
+  await page.locator('#history-category').selectOption('class:lease');
+  const timeline = page.locator('#events-list');
+  await expect(timeline).toContainText('Execution lease acquired');
+  await expect(timeline).toContainText('MEASURED');
+  await timeline.locator('details.event-details summary').click();
+  await expect(timeline).toContainText('.agent-output/ENG-AGENT-02-S5/claude-code/fixture-event/summary.md');
+  await timeline.getByRole('button', { name: 'Open summary' }).click();
+  await expect(timeline.locator('.event-evidence-preview')).toContainText('Fixture measured lease evidence.');
+});
+
 test('Quick Start resolves the fixture ledger task and shows a ready Prepared Run', async ({ page, request, baseURL }) => {
   // ENG-AGENT-02-S7 (issue #97): the exact defect report -- the Runbook form
   // used to be blank, requiring the operator to already know branch/worktree/

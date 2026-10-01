@@ -49,6 +49,7 @@ from .recovery import (
     _stale_write_lock_holder,
     pid_is_alive,
 )
+from .run_events import RunEvent
 from .state import State
 
 
@@ -215,13 +216,26 @@ def acquire(
         conflict_reason = f"lost the race to acquire the execution lease for worktree {worktree!r}"
         state.record_execution_lease_conflict(worktree=worktree, reason=conflict_reason)
         raise ExecutionLeaseConflict(conflict_reason, holder=state.get_execution_lease(worktree))
-    if recovery_reason:
-        state.record_event(
-            category="execution_lease",
-            task_id=task_id,
-            level="warning",
-            message=f"worktree {worktree!r} {recovery_reason}",
-            project_id=project_id,
+    run_id = runbook_id or stable_task_id or task_id
+    if run_id:
+        state.record_run_event(
+            RunEvent(
+                run_id=run_id,
+                event_class="lease",
+                event_type="lease.acquired",
+                category="execution_lease",
+                source="control_plane.execution_lease",
+                provenance="MEASURED",
+                task_id=task_id,
+                project_id=project_id,
+                level="warning" if recovery_reason else "info",
+                message="Execution lease acquired" + (" after proven stale-owner recovery" if recovery_reason else ""),
+                data={
+                    "generation": granted.generation,
+                    "worker": worker or "NOT_REPORTED",
+                    "recovery": recovery_reason or "NOT_REPORTED",
+                },
+            )
         )
     return LeaseGrant(worktree=worktree, generation=granted.generation, task_id=task_id)
 
@@ -248,7 +262,25 @@ def attach_pid(state: State, *, worktree: str, generation: int, pid: int) -> boo
 def release(state: State, *, worktree: str, expected_pid: int, reason: str) -> bool:
     """Graceful self-release by the process whose pid is currently the recorded owner."""
 
-    return state.release_execution_lease(worktree=worktree, expected_pid=expected_pid, reason=reason)
+    current = state.get_execution_lease(worktree)
+    released = state.release_execution_lease(worktree=worktree, expected_pid=expected_pid, reason=reason)
+    run_id = current and (current.runbook_id or current.stable_task_id or current.task_id)
+    if released and current is not None and run_id:
+        state.record_run_event(
+            RunEvent(
+                run_id=run_id,
+                event_class="lease",
+                event_type="lease.released",
+                category="execution_lease",
+                source="control_plane.execution_lease",
+                provenance="MEASURED",
+                task_id=current.task_id,
+                project_id=current.project_id,
+                message="Execution lease released",
+                data={"generation": current.generation, "reason": reason},
+            )
+        )
+    return released
 
 
 def release_before_spawn(state: State, *, worktree: str, generation: int, reason: str) -> bool:

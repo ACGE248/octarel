@@ -34,6 +34,7 @@
     activityHours: 24,
     presets: [],
     runbooks: [],
+    selectedRunId: null,
     quickstart: [],
     usageRefreshedAt: null,
   };
@@ -4028,6 +4029,7 @@
   // Go straight to a run: open Runs, select it, expand its details, scroll and focus it.
   function focusRunbook(runbookId) {
     state.focusRunbookId = runbookId;
+    state.selectedRunId = runbookId;
     disclosureOpen.add(`run:${runbookId}`);
     showView("view-runs");
     state.focusRunbookId = runbookId; // showView clears focus when leaving Runs; re-assert for this navigation
@@ -4355,6 +4357,13 @@
       }
 
       const actions = el("div", { class: "runbook-actions" });
+      const detailBtn = el("button", { type: "button", text: "View details", "aria-label": `View detail for ${r.name}` });
+      detailBtn.addEventListener("click", () => {
+        state.selectedRunId = r.id;
+        renderRunDetail(r);
+        document.getElementById("run-detail")?.focus();
+      });
+      actions.appendChild(detailBtn);
       if (r.status === "DRAFT") {
         const startBtn = el("button", { type: "button", text: "Start" });
         startBtn.addEventListener("click", () => postCommand("runbook_start", { runbook_id: r.id }).then(refreshRunbooks));
@@ -4449,6 +4458,49 @@
       root.appendChild(card);
     });
     if (!runbooks.length) root.appendChild(el("p", { class: "hint", text: "No runbooks yet. Create one above or use Run Overnight." }));
+    if (!runbooks.length) {
+      renderRunDetail(null);
+      return;
+    }
+    const selected = runbooks.find((run) => run.id === state.selectedRunId)
+      || runbooks.find((run) => ["RUNNING", "PAUSED", "STOPPING"].includes(run.status))
+      || runbooks[0];
+    state.selectedRunId = selected.id;
+    renderRunDetail(selected);
+  }
+
+  function renderRunDetail(run) {
+    const root = document.getElementById("run-detail");
+    if (!root) return;
+    root.innerHTML = "";
+    if (!run) {
+      root.appendChild(el("p", { class: "hint", text: "No run is selected." }));
+      return;
+    }
+    root.setAttribute("tabindex", "-1");
+    const linkedTask = (state.tasks || []).find((task) => task.id === run.task_id);
+    const events = (state.events || []).filter((event) =>
+      event.run_id === run.id
+      || event.task_id === run.task_id
+      || (linkedTask && [linkedTask.id, linkedTask.task_ref].includes(event.task_id))
+    );
+    root.append(
+      el("header", { class: "run-detail-head" }, [
+        el("div", {}, [el("span", { class: "eyebrow", text: "Run Detail" }), el("h3", { text: run.name })]),
+        el("span", { class: `status-pill ${statusClass(run.status)}`, text: run.status }),
+      ]),
+      el("dl", { class: "run-detail-facts" }, [
+        el("dt", { text: "Run ID" }), el("dd", { text: run.id }),
+        el("dt", { text: "Task" }), el("dd", { text: linkedTask?.task_ref || run.task_id || "NOT_REPORTED" }),
+        el("dt", { text: "Worker" }), el("dd", { text: run.parent_worker || "NOT_REPORTED" }),
+        el("dt", { text: "Started" }), el("dd", { text: run.started_at || "NOT_REPORTED" }),
+      ]),
+      el("h4", { text: "Execution timeline" })
+    );
+    const list = el("ul", { class: "events-list event-feed run-detail-events" });
+    if (events.length) renderEventItems(list, events.slice().reverse(), true);
+    else list.appendChild(el("li", { class: "event-empty" }, [el("span", { text: "No events are recorded for this run yet." })]));
+    root.appendChild(list);
   }
 
   async function openRunbookReport(runbookId) {
@@ -4884,7 +4936,7 @@
     return "•";
   }
 
-  function renderEventItems(listEl, events) {
+  function renderEventItems(listEl, events, rich = false) {
     listEl.innerHTML = "";
     events.forEach((e) => {
       const task = state.tasks.find((item) => item.id === e.task_id);
@@ -4892,10 +4944,49 @@
       const attribution = model ? `${model.execution_system} · ${model.provider} · ${model.default_model} · ${model.default_intensity}` : e.provider || "Local control plane";
       const title = e.message || `${e.category}`;
       const short = title.length > 90 ? `${title.slice(0, 87)}…` : title;
+      const body = el("div", {}, [
+        el("strong", { text: short }),
+        el("div", {
+          class: "entity-meta",
+          text: rich
+            ? `${e.event_type || "NOT_REPORTED"} · ${e.task_id || "system"} · ${e.source || "UNKNOWN"} · ${e.provenance || "UNKNOWN"}${e.sequence == null ? "" : ` · #${e.sequence}`}`
+            : `${e.category} · ${e.task_id || "system"} · ${attribution}`,
+        }),
+      ]);
+      if (rich && (Object.keys(e.data || {}).length || Object.keys(e.evidence || {}).length)) {
+        const detailChildren = [];
+        if (Object.keys(e.data || {}).length) {
+          detailChildren.push(el("pre", { class: "event-data", text: JSON.stringify(e.data, null, 2) }));
+        }
+        Object.entries(e.evidence || {}).forEach(([kind, path]) => {
+          const preview = el("pre", { class: "event-evidence-preview", hidden: "hidden" });
+          const open = el("button", { type: "button", class: "event-evidence-open", text: `Open ${kind}` });
+          open.addEventListener("click", async () => {
+            open.disabled = true;
+            try {
+              const result = await getJSON(`/api/events/${e.id}/evidence/${encodeURIComponent(kind)}`);
+              preview.textContent = result.content || "(empty evidence file)";
+              if (result.truncated) preview.textContent += "\n… preview truncated";
+              preview.hidden = false;
+            } catch (err) {
+              preview.textContent = "Evidence is unavailable.";
+              preview.hidden = false;
+            } finally {
+              open.disabled = false;
+            }
+          });
+          detailChildren.push(el("div", { class: "event-evidence" }, [
+            el("code", { text: path }), open, preview,
+          ]));
+        });
+        body.appendChild(rememberDisclosure(el("details", { class: "event-details" }, [
+          el("summary", { text: "Structured evidence" }), ...detailChildren,
+        ]), `event:${e.id}`));
+      }
       listEl.appendChild(
-        el("li", { class: `level-${e.level}`, "data-searchable": "true", "data-search": title }, [
+        el("li", { class: `level-${e.level} event-group-${e.display_group || "lifecycle"}`, "data-searchable": "true", "data-search": JSON.stringify(e) }, [
           el("span", { class: "evt-icon", text: eventIcon(e) }),
-          el("div", {}, [el("strong", { text: short }), el("div", { class: "entity-meta", text: `${e.category} · ${e.task_id || "system"} · ${attribution}` })]),
+          body,
           el("span", { class: "evt-when", text: relativeTime(e.ts) }),
         ])
       );
@@ -4908,9 +4999,16 @@
     const hist = document.getElementById("events-list");
     const term = (document.getElementById("history-search")?.value || "").toLowerCase();
     const category = document.getElementById("history-category")?.value || "";
-    renderEventItems(hist, events.filter((e) => (!category || e.category === category) && (!term || JSON.stringify(e).toLowerCase().includes(term))));
+    const matchesClass = (event) => !category
+      || (category.startsWith("group:") && event.display_group === category.slice(6))
+      || (category.startsWith("class:") && event.event_class === category.slice(6))
+      || (category === "legacy" && event.event_class === "NOT_REPORTED");
+    const timeline = events.filter((e) => matchesClass(e) && (!term || JSON.stringify(e).toLowerCase().includes(term))).reverse();
+    renderEventItems(hist, timeline, true);
     const recent = document.getElementById("recent-events");
     renderEventItems(recent, events.slice(0, 8));
+    const selectedRun = state.runbooks.find((run) => run.id === state.selectedRunId);
+    if (selectedRun) renderRunDetail(selectedRun);
     renderActivity(events, state.activityHours);
     renderSystemHealth();
   }

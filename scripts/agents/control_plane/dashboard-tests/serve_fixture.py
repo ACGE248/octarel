@@ -72,6 +72,7 @@ from scripts.agents.control_plane.remote_access import (  # noqa: E402
     RemoteAccessConfig,
     RemoteAccessState,
 )
+from scripts.agents.control_plane.run_events import RunEvent  # noqa: E402
 from scripts.agents.control_plane.runbooks import PRESETS  # noqa: E402
 from scripts.agents.control_plane.scheduler import (  # noqa: E402
     ConcurrencyPolicy,
@@ -668,6 +669,27 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
                 "context_manifest": {},
             }
         )
+
+    # ENG-PC-04: a real typed event plus an existing .agent-output pointer for
+    # the chronological timeline and Run Detail browser coverage.
+    event_run_dir = root / ".agent-output" / "ENG-AGENT-02-S5" / "claude-code" / "fixture-event"
+    event_run_dir.mkdir(parents=True, exist_ok=True)
+    event_summary = event_run_dir / "summary.md"
+    event_summary.write_text("Fixture measured lease evidence.\n", encoding="utf-8")
+    state.record_run_event(
+        RunEvent(
+            run_id="fx-rb-running",
+            event_class="lease",
+            event_type="lease.acquired",
+            source="control_plane.execution_lease",
+            provenance="MEASURED",
+            message="Execution lease acquired",
+            task_id="fx-rb-running-session",
+            data={"generation": 1, "worker": "claude-code"},
+            evidence={"summary": event_summary.relative_to(root).as_posix()},
+        ),
+        repo_root=root,
+    )
 
     # This fixture deliberately seeds more concurrently RUNNING work (two
     # plain tasks plus two write session runbooks) than production's default

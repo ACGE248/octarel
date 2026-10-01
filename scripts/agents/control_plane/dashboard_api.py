@@ -70,6 +70,7 @@ from .remote_access import (
     request_carries_access_assertion,
 )
 from .routing import MODE_SINGLE_PRIMARY, compute_routing
+from .run_events import sanitize_data, sanitize_text, validate_evidence_pointers
 from .runbooks import list_presets
 from .steering import (
     DESTRUCTIVE_VERBS,
@@ -1780,20 +1781,100 @@ def create_app(
             "provider_calls": 0,
         }
 
+    def event_display_group(event: Any) -> str:
+        """UI grouping only; never upgrades a legacy event's provenance."""
+
+        if event.event_class in {"gate", "review", "checkpoint", "pr_merge"}:
+            return "validation"
+        if event.event_class in {"adapter_tool", "usage", "route", "process"}:
+            return "model_tool"
+        if event.event_class in {"approval", "wait_attention", "lease"}:
+            return "safety_approval"
+        category = str(event.category or "").lower()
+        if category in {"testing", "review", "git", "checkpoint", "validation"}:
+            return "validation"
+        if category in {"provider", "graphify", "supervisor", "process", "usage"}:
+            return "model_tool"
+        if category in {"security", "execution_lease", "approval", "attention"}:
+            return "safety_approval"
+        return "lifecycle"
+
+    def public_event(event: Any) -> dict[str, Any]:
+        # Missing typed fields on old rows are explicitly not reported.  The
+        # legacy category/message remain intact for compatibility.
+        safe_evidence = {
+            key: path
+            for key, path in event.evidence.items()
+            if isinstance(path, str)
+            and path.startswith(".agent-output/")
+            and ".." not in Path(path).parts
+        }
+        return {
+            "id": event.id,
+            "ts": event.ts,
+            "category": event.category,
+            "task_id": event.task_id,
+            "provider": event.provider,
+            "level": event.level,
+            "message": sanitize_text(event.message),
+            "run_id": event.run_id,
+            "sequence": event.run_sequence,
+            "event_class": event.event_class or "NOT_REPORTED",
+            "event_type": event.event_type or "NOT_REPORTED",
+            "source": event.source or "legacy.record_event",
+            "provenance": event.provenance or "UNKNOWN",
+            "data": sanitize_data(event.data),
+            "evidence": safe_evidence,
+            "display_group": event_display_group(event),
+        }
+
     @app.get("/api/events")
-    def events(limit: int = 200) -> list[dict[str, Any]]:
-        return [
-            {
-                "id": e.id,
-                "ts": e.ts,
-                "category": e.category,
-                "task_id": e.task_id,
-                "provider": e.provider,
-                "level": e.level,
-                "message": e.message,
-            }
-            for e in scoped_events(limit)
-        ]
+    def events(
+        limit: int = 200,
+        run_id: str | None = None,
+        event_class: str | None = None,
+        chronological: bool = False,
+    ) -> list[dict[str, Any]]:
+        rows = ctx.state.list_run_events(
+            limit=limit,
+            project_id=ctx.selected_project_id,
+            run_id=run_id,
+            event_class=event_class,
+            # Always select the newest bounded window. Chronological mode only
+            # changes its presentation order; it must not strand a live view
+            # on the oldest ``limit`` rows of a long-running execution.
+            ascending=False,
+        )
+        if chronological:
+            rows.reverse()
+        return [public_event(event) for event in rows]
+
+    @app.get("/api/events/{event_id}/evidence/{kind}")
+    def event_evidence(event_id: int, kind: str) -> dict[str, Any]:
+        """Bounded, redacted preview of one already-validated evidence file."""
+
+        event = ctx.state.get_event(event_id, project_id=ctx.selected_project_id)
+        if event is None or kind not in event.evidence:
+            raise HTTPException(status_code=404, detail="event evidence not found")
+        try:
+            pointer = validate_evidence_pointers(ctx.project_root, {kind: event.evidence[kind]})[kind]
+        except ValueError:
+            # A file removed after the event was recorded is unavailable; the
+            # stale pointer is never followed outside its original boundary.
+            raise HTTPException(status_code=404, detail="event evidence is no longer available") from None
+        path = ctx.project_root / pointer
+        limit_chars = 64_000
+        try:
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                raw = stream.read(limit_chars + 1)
+        except OSError:
+            raise HTTPException(status_code=404, detail="event evidence is no longer available") from None
+        return {
+            "kind": kind,
+            "path": pointer,
+            "content": sanitize_text(raw[:limit_chars]),
+            "truncated": len(raw) > limit_chars,
+        }
 
     @app.get("/api/run-evidence")
     def run_evidence(limit: int = 100) -> list[dict[str, Any]]:
