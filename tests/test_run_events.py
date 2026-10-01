@@ -152,4 +152,3 @@ def test_pre_eng_pc_04_database_is_migrated_in_place(tmp_path: Path) -> None:
         assert {"run_id", "run_sequence", "event_class", "source", "provenance", "evidence"} <= columns
         assert migrated.list_events()[0].message == "kept"
         assert migrated.record_run_event(_event()).run_sequence == 1
-
