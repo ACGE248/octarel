@@ -53,6 +53,25 @@ def test_generation_increments_on_every_successful_acquisition(disk_state, tmp_p
     assert second.generation == first.generation + 1 == 2
 
 
+def test_acquire_and_release_emit_measured_typed_events_in_existing_history(disk_state, tmp_path):
+    lease.acquire(
+        disk_state,
+        worktree=str(tmp_path),
+        task_id="session-1",
+        runbook_id="runbook-1",
+        worker="w",
+    )
+    lease.release(disk_state, worktree=str(tmp_path), expected_pid=os.getpid(), reason="finished")
+    events = disk_state.list_run_events(run_id="runbook-1")
+    assert [(event.run_sequence, event.event_type) for event in events] == [
+        (1, "lease.acquired"),
+        (2, "lease.released"),
+    ]
+    assert all(event.provenance == "MEASURED" for event in events)
+    assert all(event.category == "execution_lease" and event.event_class == "lease" for event in events)
+    assert all(str(tmp_path) not in event.message for event in events)
+
+
 # ----------------------------------------------------------------- worktree conflict
 
 

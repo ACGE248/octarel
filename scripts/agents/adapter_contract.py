@@ -60,12 +60,14 @@ RESUME_NOT_IMPLEMENTED_REASON = (
     "ENG-PC-02 task-scoped resumable sessions is not implemented yet; no worker "
     "in this registry declares native session/resume support"
 )
-# Likewise for ENG-PC-04's structured run-event timeline: every worker today
-# runs as one blocking subprocess capture (scripts.agents.runner.run_worker_process),
-# so there is no incremental event stream to report as a per-worker capability.
+# ENG-PC-04 adds the orchestrator-owned persisted event timeline, polled through
+# the existing API. That does not change this adapter capability: every worker
+# still runs as one blocking subprocess capture
+# (scripts.agents.runner.run_worker_process), so no worker can claim a native
+# incremental event stream.
 STREAMING_NOT_IMPLEMENTED_REASON = (
-    "ENG-PC-04 structured run-event timeline is not implemented yet; every worker "
-    "runs as one blocking subprocess capture with no incremental event stream"
+    "the orchestrator records ENG-PC-04 run events, but this worker runs as one "
+    "blocking subprocess capture with no native incremental event stream"
 )
 # The orchestrator can force-kill a run's process group once its timeout
 # elapses, but that is a safety net triggered by the orchestrator's own

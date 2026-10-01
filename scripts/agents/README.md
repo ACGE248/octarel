@@ -518,6 +518,32 @@ explicit operator action rather than retrying continuously. `psutil`
 (`requirements-dev.txt` only, never the shipped app) powers the dashboard's
 resource panel.
 
+### Structured run events (`ENG-PC-04`)
+
+`control_plane/run_events.py` defines the typed `RunEvent` envelope used for
+lifecycle, wake, route, lease, process, adapter/tool, checkpoint, usage,
+review, gate, PR/merge, wait/attention, and approval facts. It extends the
+existing SQLite `events` table with nullable typed columns; the original
+`State.record_event(...)` signature and legacy rows remain valid. Typed writers
+use `State.record_run_event(...)`, which allocates a monotonically increasing
+sequence per project/run inside `BEGIN IMMEDIATE`, so independent SQLite
+connections cannot claim the same position.
+
+Every typed event names its source and uses the existing `MEASURED`, `DERIVED`,
+`UNKNOWN`, or `NOT_EXPOSED` provenance vocabulary. `NOT_REPORTED` is a display
+status for missing facts, not another provenance class. Messages and structured
+summaries are redacted and omit absolute host paths. Large output remains in
+`.agent-output`: the database stores only the manifest-style `paths` mapping,
+and accepts a pointer only when it is repository-relative, stays inside
+`.agent-output`, and resolves to an existing regular file.
+
+The Control Center polls the existing `/api/events` endpoint for the
+chronological Execution Events timeline. Its Runs page has one shared Run
+Detail surface which consumes the same event rows; existing execution-lease and
+Graphify categories are grouped there without copying them into another
+history. Legacy events are shown with `UNKNOWN` provenance and
+`NOT_REPORTED` typed fields rather than inferred progress.
+
 ### Control Center finish (`ENG-AGENT-02-S8`)
 
 Agent display names, descriptions, best-use guidance, provider identity,

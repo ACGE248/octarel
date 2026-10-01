@@ -22,6 +22,7 @@ from scripts.agents.control_plane.dashboard_api import (
 )
 from scripts.agents.control_plane.models import Runbook, Task
 from scripts.agents.control_plane.provider_state import seed_provider_states
+from scripts.agents.control_plane.run_events import RunEvent
 from scripts.agents.control_plane.scheduler import Scheduler
 from scripts.agents.control_plane.state import State
 from scripts.agents.control_plane.supervisor import Supervisor
@@ -637,6 +638,54 @@ def test_development_throughput_is_truthful_local_read_model(client):
 def test_events_endpoint_includes_seeded_event(client):
     events = client.get("/api/events").json()
     assert any(e["message"] == "seed event" for e in events)
+    legacy = next(e for e in events if e["message"] == "seed event")
+    assert legacy["source"] == "legacy.record_event"
+    assert legacy["provenance"] == "UNKNOWN"
+    assert legacy["event_type"] == "NOT_REPORTED"
+
+
+def test_events_endpoint_strips_host_paths_from_legacy_rows(client, ctx):
+    # The literal must stay host-absolute so the stripper is genuinely exercised,
+    # but use scripts/ci/public_safety.py's sanctioned "/path/to/" placeholder
+    # marker so this fixture is not itself an operator-path publication blocker.
+    ctx.state.record_event(category="legacy", message="worker used /path/to/private/project/log.txt")
+    event = next(row for row in client.get("/api/events").json() if row["category"] == "legacy")
+    assert "/path/to/private" not in event["message"]
+    assert "[absolute path omitted]" in event["message"]
+
+
+def test_events_endpoint_serves_chronological_typed_timeline_and_safe_evidence(client, ctx, tmp_path):
+    run_dir = tmp_path / ".agent-output" / "task-1" / "worker" / "run-1"
+    run_dir.mkdir(parents=True)
+    summary = run_dir / "summary.md"
+    summary.write_text("safe evidence API_KEY=do-not-leak", encoding="utf-8")
+    pointer = summary.relative_to(tmp_path).as_posix()
+    for index in range(2):
+        ctx.state.record_run_event(
+            RunEvent(
+                run_id="run-1",
+                event_class="gate",
+                event_type="gate.finished",
+                source="test.gate",
+                provenance="MEASURED",
+                message=f"gate {index}",
+                data={"status": "PASS", "index": index},
+                evidence={"summary": pointer} if index == 1 else {},
+            ),
+            repo_root=tmp_path,
+        )
+
+    rows = client.get("/api/events", params={"run_id": "run-1", "chronological": True}).json()
+    assert [row["sequence"] for row in rows] == [1, 2]
+    assert all(row["display_group"] == "validation" for row in rows)
+    assert rows[1]["evidence"] == {"summary": pointer}
+    assert "/Users/" not in json.dumps(rows)
+
+    preview = client.get(f"/api/events/{rows[1]['id']}/evidence/summary")
+    assert preview.status_code == 200
+    assert preview.json()["path"] == pointer
+    assert "do-not-leak" not in preview.json()["content"]
+    assert "***REDACTED***" in preview.json()["content"]
 
 
 def test_attention_endpoint_shape(client):

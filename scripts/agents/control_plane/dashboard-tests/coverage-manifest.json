@@ -37,6 +37,7 @@
     "Open live output for Fixture blocked V#-# run",
     "Open live output for Fixture completed runbook",
     "Open live output for Fixture overnight run",
+    "Open summary",
     "Overnight duration in hours",
     "Overnight maximum accepted tasks",
     "PROVIDER_QUOTA_EXHAUSTED",
@@ -53,6 +54,12 @@
     "Start Development",
     "Stop",
     "Stop after current",
+    "Structured evidence",
+    "View detail for Fixture automatic fallback run",
+    "View detail for Fixture blocked V#-# run",
+    "View detail for Fixture completed runbook",
+    "View detail for Fixture draft runbook",
+    "View detail for Fixture overnight run",
     "View report",
     "Worktree",
     "e.g. Finish PR ## overnight",
@@ -198,8 +205,10 @@
     "Send"
   ],
   "view-history": [
-    "History category",
-    "Search development history"
+    "Event class",
+    "Open summary",
+    "Search execution events",
+    "Structured evidence"
   ],
   "view-worktrees": [
     "Adopt / Register",

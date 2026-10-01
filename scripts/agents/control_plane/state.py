@@ -26,6 +26,7 @@ from .models import (
     WorktreeRecord,
     utc_now_iso,
 )
+from .run_events import RunEvent, normalize_run_event
 
 STATE_DIRNAME = ".orchestrator-state"
 DB_FILENAME = "orchestrator.db"
@@ -92,7 +93,15 @@ CREATE TABLE IF NOT EXISTS events (
     task_id TEXT,
     provider TEXT,
     level TEXT NOT NULL DEFAULT 'info',
-    message TEXT NOT NULL
+    message TEXT NOT NULL,
+    run_id TEXT,
+    run_sequence INTEGER,
+    event_class TEXT,
+    event_type TEXT,
+    source TEXT,
+    provenance TEXT,
+    data TEXT NOT NULL DEFAULT '{}',
+    evidence TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS operations (
@@ -341,6 +350,16 @@ _WORKTREES_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
 _EXECUTION_LEASES_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("spawn_pending", "INTEGER NOT NULL DEFAULT 0"),
 )
+_EVENTS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("run_id", "TEXT"),
+    ("run_sequence", "INTEGER"),
+    ("event_class", "TEXT"),
+    ("event_type", "TEXT"),
+    ("source", "TEXT"),
+    ("provenance", "TEXT"),
+    ("data", "TEXT NOT NULL DEFAULT '{}'"),
+    ("evidence", "TEXT NOT NULL DEFAULT '{}'"),
+)
 _RUNBOOKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("codex_policy", "TEXT NOT NULL DEFAULT 'conserve'"),
     ("codex_auto_eligible", "INTEGER NOT NULL DEFAULT 0"),
@@ -458,6 +477,7 @@ class State:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
@@ -474,6 +494,7 @@ class State:
             self._migrate_runbooks_columns()
             self._migrate_execution_leases_columns()
             self._migrate_project_id_columns()
+            self._migrate_events_columns()
         except Exception:
             self._conn.rollback()
             raise
@@ -514,6 +535,28 @@ class State:
         for column, ddl in _EXECUTION_LEASES_MIGRATED_COLUMNS:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE execution_leases ADD COLUMN {column} {ddl}")
+
+    @_serialized
+    def _migrate_events_columns(self) -> None:
+        """Add ENG-PC-04's envelope beside the legacy event fields.
+
+        The partial expression index enforces one sequence position per
+        project/run while leaving every untyped legacy row untouched.
+        """
+
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
+        for column, ddl in _EVENTS_MIGRATED_COLUMNS:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE events ADD COLUMN {column} {ddl}")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_run_sequence "
+            "ON events (IFNULL(project_id, ''), run_id, run_sequence) "
+            "WHERE run_id IS NOT NULL AND run_sequence IS NOT NULL"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_run_order "
+            "ON events (project_id, run_id, run_sequence)"
+        )
 
     @_serialized
     def _migrate_project_id_columns(self) -> None:
@@ -960,6 +1003,55 @@ class State:
         self._conn.commit()
 
     @_serialized
+    def record_run_event(self, event: RunEvent, *, repo_root: Path | None = None) -> Event:
+        """Append one typed event and atomically allocate its per-run sequence.
+
+        ``BEGIN IMMEDIATE`` serializes sequence allocation across independent
+        :class:`State` instances/processes, not merely threads sharing this
+        object.  The existing unique index is the final invariant backstop.
+        """
+
+        row = normalize_run_event(event, repo_root=repo_root)
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            sequence_row = self._conn.execute(
+                "SELECT COALESCE(MAX(run_sequence), 0) + 1 AS next_sequence "
+                "FROM events WHERE run_id = ? AND project_id IS ?",
+                (row["run_id"], row["project_id"]),
+            ).fetchone()
+            sequence = int(sequence_row["next_sequence"])
+            cursor = self._conn.execute(
+                "INSERT INTO events "
+                "(ts, category, task_id, provider, level, message, project_id, run_id, run_sequence, "
+                "event_class, event_type, source, provenance, data, evidence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    utc_now_iso(),
+                    row["category"],
+                    row["task_id"],
+                    row["provider"],
+                    row["level"],
+                    row["message"],
+                    row["project_id"],
+                    row["run_id"],
+                    sequence,
+                    row["event_class"],
+                    row["event_type"],
+                    row["source"],
+                    row["provenance"],
+                    json.dumps(row["data"], sort_keys=True, separators=(",", ":")),
+                    json.dumps(row["evidence"], sort_keys=True, separators=(",", ":")),
+                ),
+            )
+            stored = self._conn.execute("SELECT * FROM events WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        return Event.from_row(dict(stored))
+
+    @_serialized
     def list_events(self, *, limit: int = 200, project_id: str | None = None) -> list[Event]:
         if project_id is not None:
             rows = self._conn.execute(
@@ -967,6 +1059,52 @@ class State:
             ).fetchall()
         else:
             rows = self._conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [Event.from_row(dict(row)) for row in rows]
+
+    @_serialized
+    def get_event(self, event_id: int, *, project_id: str | None = None) -> Event | None:
+        if project_id is not None:
+            row = self._conn.execute(
+                "SELECT * FROM events WHERE id = ? AND project_id = ?", (event_id, project_id)
+            ).fetchone()
+        else:
+            row = self._conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+        return Event.from_row(dict(row)) if row else None
+
+    @_serialized
+    def list_run_events(
+        self,
+        *,
+        limit: int = 200,
+        project_id: str | None = None,
+        run_id: str | None = None,
+        event_class: str | None = None,
+        ascending: bool = True,
+    ) -> list[Event]:
+        """Read the one events table as a chronological typed timeline.
+
+        Legacy events are intentionally included.  The API projects their
+        missing typed fields as honest UNKNOWN/NOT_REPORTED values rather than
+        backfilling facts that were never recorded.
+        """
+
+        clauses: list[str] = []
+        values: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            values.append(run_id)
+        if event_class is not None:
+            clauses.append("COALESCE(event_class, category) = ?")
+            values.append(event_class)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        direction = "ASC" if ascending else "DESC"
+        values.append(max(1, min(int(limit), 1_000)))
+        rows = self._conn.execute(
+            f"SELECT * FROM events{where} ORDER BY id {direction} LIMIT ?", values
+        ).fetchall()
         return [Event.from_row(dict(row)) for row in rows]
 
     # --------------------------------------------------------------- runbooks
