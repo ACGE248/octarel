@@ -25,6 +25,7 @@ from ..policy import compose_policy_bundle, validate_policy_preservation
 from ..redaction import redact_text
 from ..registry import Registry, RegistryError
 from ..validation import TASK_ID_RE, validate_task_id
+from . import usage_budgets
 from .acceptance import (
     advance_acceptance_pipeline,
     check_runtime_freshness,
@@ -35,6 +36,7 @@ from .advancement import advance_after_success
 from .advancement_lease import advancement_lease
 from .dispatch import managed_admit
 from .models import (
+    ADMISSION_BLOCKED,
     DEFAULT_SAFETY_PROFILE,
     DEFAULT_STOP_CONDITIONS,
     KIND_WRITE,
@@ -56,6 +58,7 @@ from .models import (
     RUNBOOK_STOPPING,
     RUNBOOK_SUCCEEDED,
     RUNBOOK_TERMINAL_STATES,
+    TASK_BLOCKED,
     TASK_CANCELLED,
     TASK_FAILED,
     TASK_PAUSED,
@@ -969,6 +972,7 @@ def start_runbook(
             "status": "RUNNING",
             "automatic": False,
             "pid": launched.pid,
+            "started_at": utc_now_iso(),
         }]
         if launch_worker.provider == "OpenAI" or launch_worker.name.startswith("codex"):
             usage["codex_invocations"] = int(usage["codex_invocations"]) + 1
@@ -1122,6 +1126,35 @@ def retry_runbook(
         acceptance_criteria=runbook.objective,
     ).manifest
     validate_policy_preservation(previous_policy, replacement_policy)
+
+    # A retry/fallback has passed the existing provider, billing, Codex and
+    # policy-preservation authorization above. The budget is evaluated only
+    # now, and can only stop the already-authorized replacement before any
+    # retry state, invocation reservation, or route attempt is written.
+    budget = usage_budgets.evaluate(
+        state,
+        registry=registry,
+        context=usage_budgets.BudgetContext(
+            project_id=task.project_id,
+            provider=worker.provider,
+            task_id=task.id,
+            task_ref=stable_session_task_ref(runbook),
+            run_id=runbook.id,
+            is_fallback=True,
+        ),
+    )
+    if not budget.allowed:
+        task.state = TASK_BLOCKED
+        task.admission_state = ADMISSION_BLOCKED
+        task.admission_reason = budget.reason
+        task.last_error = budget.reason
+        task.fallback_selected_worker = worker_name
+        task.fallback_automatic = automatic
+        task.selected_provider = worker.provider
+        state.upsert_task(task)
+        usage_budgets.emit_decision(state, task=task, decision=budget)
+        raise RunbookError(budget.reason)
+
     runbook.parent_worker = worker_name
     runbook.recovery_note = f"Previous attempt with {previous_worker} failed: {previous_reason}. Retrying with {worker_name}."
     runbook.status = RUNBOOK_RUNNING
@@ -1207,7 +1240,12 @@ def retry_runbook(
         raise RunbookError(f"could not retry runbook: {launched.last_error or launched.state}")
 
     route_history = list(usage.get("route_history", []))
-    route_history[-1] = {**route_history[-1], "status": "RUNNING", "pid": launched.pid}
+    route_history[-1] = {
+        **route_history[-1],
+        "status": "RUNNING",
+        "pid": launched.pid,
+        "started_at": utc_now_iso(),
+    }
     usage["route_history"] = route_history
     state.upsert_usage_governance(usage)
 

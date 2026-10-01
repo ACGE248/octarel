@@ -33,6 +33,8 @@ from ..runner import (
 )
 from . import execution_lease
 from .models import (
+    ADMISSION_ADMITTED,
+    ADMISSION_BLOCKED,
     KIND_WRITE,
     LAUNCH_SESSION,
     PERMISSION_STANDARD,
@@ -306,6 +308,27 @@ class Supervisor:
             self.state.upsert_task(task)
             self.state.record_event(category="supervisor", task_id=task.id, level="error", message=task.last_error)
             return task
+
+        # Defense in depth for legacy/direct callers that do not enter through
+        # managed_admit. Like the managed-dispatch check, this can only veto;
+        # it cannot make this or any paid route eligible.
+        from . import usage_budgets
+
+        budget = usage_budgets.evaluate(
+            self.state,
+            registry=self.registry,
+            context=usage_budgets.context_for_task(task, provider=worker.provider),
+        )
+        if not budget.allowed:
+            task.state = TASK_BLOCKED
+            task.admission_state = ADMISSION_BLOCKED
+            task.admission_reason = budget.reason
+            task.last_error = budget.reason
+            self.state.upsert_task(task)
+            usage_budgets.emit_decision(self.state, task=task, decision=budget)
+            return task
+        if budget.status == usage_budgets.STATUS_WARNING and task.admission_state != ADMISSION_ADMITTED:
+            usage_budgets.emit_decision(self.state, task=task, decision=budget)
 
         worktree = Path(task.worktree) if task.worktree else self.repo_root
         if worker.is_write_capable:

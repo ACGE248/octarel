@@ -279,6 +279,25 @@ CREATE TRIGGER IF NOT EXISTS usage_ledger_no_delete
     BEFORE DELETE ON usage_ledger
     BEGIN SELECT RAISE(ABORT, 'usage_ledger is append-only'); END;
 
+-- ENG-PC-05 scope B: mutable policy configuration, deliberately separate
+-- from the immutable accounting ledger above. ``project_id IS NULL`` means a
+-- genuinely Control-Plane-global budget; a non-NULL value limits the policy
+-- to one managed project. Scope hierarchy is resolved by usage_budgets.py.
+CREATE TABLE IF NOT EXISTS usage_budgets (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    scope_type TEXT NOT NULL,
+    scope_key TEXT,
+    constraint_type TEXT NOT NULL,
+    limit_value REAL NOT NULL,
+    warning_fraction REAL NOT NULL DEFAULT 0.8,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_budgets_resolution
+    ON usage_budgets (project_id, enabled, scope_type, scope_key, constraint_type);
+
 CREATE TABLE IF NOT EXISTS task_intake_claims (
     stable_task_id TEXT PRIMARY KEY,
     owner_ref TEXT NOT NULL,
@@ -563,6 +582,11 @@ _RUNBOOKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
 # a durable project identity so retained accounting remains attributable even
 # after its mutable runbook and governance rows are deleted.
 #
+# ``usage_budgets`` is intentionally omitted. Its nullable ``project_id`` is
+# part of the policy meaning: NULL is a truly global definition, while a value
+# makes the definition project-specific. Adopting NULL rows into one project
+# would silently narrow a global safety brake and is therefore forbidden.
+#
 # This is an explicit audit, not a blanket "add project_id to everything".
 _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
     "tasks",
@@ -590,8 +614,9 @@ PROJECT_SCOPED_SETTING_KEYS: frozenset[str] = frozenset(
 SCHEMA_VERSION_SETTING = "schema_version"
 # Bumped whenever a migration step below changes the on-disk shape. 1 is the
 # implicit pre-ENG-CP-03 single-project schema; 2 adds the project registry and
-# project scoping; 3 adds ENG-PC-05's immutable usage ledger.
-CURRENT_SCHEMA_VERSION = 3
+# project scoping; 3 adds ENG-PC-05's immutable usage ledger; 4 adds mutable
+# hierarchical usage-budget definitions.
+CURRENT_SCHEMA_VERSION = 4
 
 
 def project_scoped_setting_key(key: str, project_id: str | None) -> str:
@@ -665,6 +690,7 @@ class State:
             self._migrate_project_id_columns()
             self._migrate_events_columns()
             self._migrate_usage_ledger_trigger()
+            self._migrate_usage_budget_columns()
         except Exception:
             self._conn.rollback()
             raise
@@ -781,6 +807,26 @@ class State:
             BEGIN SELECT RAISE(ABORT, 'usage_ledger is append-only'); END
             """
         )
+
+    @_serialized
+    def _migrate_usage_budget_columns(self) -> None:
+        """Add scope-B columns without replacing mutable configuration."""
+
+        existing = {row["name"] for row in self._conn.execute("PRAGMA table_info(usage_budgets)").fetchall()}
+        columns = (
+            ("project_id", "TEXT"),
+            ("scope_type", "TEXT"),
+            ("scope_key", "TEXT"),
+            ("constraint_type", "TEXT"),
+            ("limit_value", "REAL"),
+            ("warning_fraction", "REAL NOT NULL DEFAULT 0.8"),
+            ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT"),
+        )
+        for column, ddl in columns:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE usage_budgets ADD COLUMN {column} {ddl}")
 
     @_serialized
     def _migrate_project_id_columns(self) -> None:
@@ -1510,6 +1556,83 @@ class State:
             f"SELECT * FROM usage_ledger{where} ORDER BY occurred_at DESC, id DESC", values
         ).fetchall()
         return [self._usage_ledger_from_row(row) for row in rows]
+
+    # --------------------------------------------------------- usage budgets
+
+    @_serialized
+    def upsert_usage_budget(self, budget: dict[str, Any]) -> dict[str, Any]:
+        """Create or replace one mutable budget definition."""
+
+        now = utc_now_iso()
+        existing = self._conn.execute(
+            "SELECT created_at FROM usage_budgets WHERE id = ?", (budget["id"],)
+        ).fetchone()
+        row = {
+            "id": str(budget["id"]),
+            "project_id": budget.get("project_id"),
+            "scope_type": str(budget["scope_type"]),
+            "scope_key": budget.get("scope_key"),
+            "constraint_type": str(budget["constraint_type"]),
+            "limit_value": float(budget["limit_value"]),
+            "warning_fraction": float(budget.get("warning_fraction", 0.8)),
+            "enabled": 1 if budget.get("enabled", True) else 0,
+            "created_at": existing["created_at"] if existing else now,
+            "updated_at": now,
+        }
+        self._conn.execute(
+            "INSERT INTO usage_budgets "
+            "(id, project_id, scope_type, scope_key, constraint_type, limit_value, "
+            "warning_fraction, enabled, created_at, updated_at) "
+            "VALUES (:id, :project_id, :scope_type, :scope_key, :constraint_type, :limit_value, "
+            ":warning_fraction, :enabled, :created_at, :updated_at) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "project_id=excluded.project_id, scope_type=excluded.scope_type, scope_key=excluded.scope_key, "
+            "constraint_type=excluded.constraint_type, limit_value=excluded.limit_value, "
+            "warning_fraction=excluded.warning_fraction, enabled=excluded.enabled, updated_at=excluded.updated_at",
+            row,
+        )
+        self._conn.commit()
+        return self.get_usage_budget(row["id"]) or row
+
+    @_serialized
+    def get_usage_budget(self, budget_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM usage_budgets WHERE id = ?", (budget_id,)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["enabled"] = bool(item["enabled"])
+        return item
+
+    @_serialized
+    def list_usage_budgets(
+        self, *, project_id: str | None = None, include_global: bool = True, enabled_only: bool = False
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if project_id is not None:
+            clauses.append("(project_id = ? OR project_id IS NULL)" if include_global else "project_id = ?")
+            values.append(project_id)
+        elif not include_global:
+            clauses.append("project_id IS NOT NULL")
+        if enabled_only:
+            clauses.append("enabled = 1")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM usage_budgets{where} ORDER BY scope_type, scope_key, constraint_type, id",
+            values,
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["enabled"] = bool(item["enabled"])
+            result.append(item)
+        return result
+
+    @_serialized
+    def delete_usage_budget(self, budget_id: str) -> bool:
+        cursor = self._conn.execute("DELETE FROM usage_budgets WHERE id = ?", (budget_id,))
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     # ------------------------------------------------------ managed dispatch
 

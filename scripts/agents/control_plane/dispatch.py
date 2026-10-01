@@ -13,6 +13,7 @@ from typing import Any
 from .. import model_catalog, native_models
 from ..policy import PolicyError, compose_policy_bundle, validate_policy_preservation
 from ..registry import PERMISSION_STANDARD, Registry
+from . import usage_budgets
 from .intake import IntakeCollision, check_and_claim
 from .models import (
     ADMISSION_ADMITTED,
@@ -335,6 +336,31 @@ def managed_admit(
             wave=fact.wave,
             scores=scores,
         )
+
+    # ENG-PC-05: this is a brake after the existing route authorization has
+    # selected an eligible worker. An allowed budget decision is deliberately
+    # a no-op; it never adds a candidate or changes any authorization fact.
+    budget = usage_budgets.evaluate(
+        state,
+        registry=registry,
+        context=usage_budgets.context_for_task(task, provider=registry.get(selected).provider),
+    )
+    if not budget.allowed:
+        blocked_admission = _persist_block(
+            state,
+            task,
+            intake.owner_ref,
+            budget.reason,
+            permanent=True,
+            selected_worker=selected,
+            alternatives=ordered,
+            wave=fact.wave,
+            scores=scores,
+        )
+        usage_budgets.emit_decision(state, task=task, decision=budget)
+        return blocked_admission
+    if budget.status == usage_budgets.STATUS_WARNING:
+        usage_budgets.emit_decision(state, task=task, decision=budget)
 
     task.admission_state = ADMISSION_ADMITTED
     task.admission_reason = fact.reason
