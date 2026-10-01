@@ -27,7 +27,11 @@ than re-implementing a second staleness authority.
 
 Acquisition never blocks and never spins: a conflict with a live, unproven-dead
 owner raises immediately. Reclaiming a lease whose owner is provably dead is the
-only recovery path -- never a timeout, and never a match on executable name.
+only recovery path -- never a timeout, and never a match on executable name. A
+lease whose owner died before a worker pid could ever be attached is a third,
+``ambiguous`` case (see ``_classify_owner``): never auto-reclaimed, and only ever
+resolved via ``resolve_ambiguous_lease``'s OS-checked proof of an absent worker --
+never a timeout, an executable-name match, or a bare operator override either.
 """
 
 from __future__ import annotations
@@ -35,10 +39,11 @@ from __future__ import annotations
 import os
 import socket
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .models import EXECUTION_LEASE_ACQUIRED, ExecutionLease
-from .recovery import pid_is_alive
+from .recovery import _AGENT_OUTPUT_DIRNAME, _WRITE_LOCK_NAME, _stale_write_lock_holder, pid_is_alive
 from .state import State
 
 
@@ -98,11 +103,13 @@ def _classify_owner(lease: ExecutionLease) -> tuple[str, str | None]:
       died, mirroring ``recovery.reconcile_tasks``'s use of the worker's own pid).
       Safe to free -- this is the only ``True`` case the old two-way ``_is_stale``
       used to return.
-    - ``ambiguous``: the recorded pid is dead while ``spawn_pending`` is still set.
-      A session-leader worker process may or may not exist and cannot be ruled out
-      from this row alone. Never auto-reclaimed by any caller; always surfaced
-      instead, exactly like the "never a timeout" philosophy this module already
-      applies to ordinary staleness.
+    - ``ambiguous``: the recorded pid is dead (or reused) while ``spawn_pending`` is
+      still set. A session-leader worker process may or may not exist and cannot be
+      ruled out from this row alone. Never auto-reclaimed by any caller; always
+      surfaced instead, exactly like the "never a timeout" philosophy this module
+      already applies to ordinary staleness. ``resolve_ambiguous_lease`` is the only
+      way out, and only once it finds OS-checked proof (an absent ``.write-lock``
+      holder) rather than inferring one.
     """
 
     if not lease.owner_pid:
@@ -111,6 +118,21 @@ def _classify_owner(lease: ExecutionLease) -> tuple[str, str | None]:
         if lease.owner_pid_create_time is not None:
             current = _process_create_time(lease.owner_pid)
             if current is not None and abs(current - lease.owner_pid_create_time) > 1:
+                # The recorded pid is proven dead (recycled by an unrelated live
+                # process) -- but while ``spawn_pending`` is set that pid was the
+                # *launching supervisor's* own pid, never the worker's. A reused
+                # supervisor pid proves the supervisor is gone; it proves nothing
+                # about a session-leader worker that may still be running under
+                # its own, never-recorded pid. Must fall through to the same
+                # ambiguous verdict the dead-pid branch below already gives that
+                # case, not a bare reclaim.
+                if lease.spawn_pending:
+                    return _OWNER_AMBIGUOUS, (
+                        f"launching supervisor pid {lease.owner_pid} was reused by a different "
+                        "process (create-time mismatch) while its spawn was still in flight (no "
+                        "worker pid was ever attached); a session-leader worker process may still "
+                        "be running and cannot be ruled out from this row alone"
+                    )
                 return _OWNER_RECLAIMABLE, f"pid {lease.owner_pid} was reused by a different process (create-time mismatch)"
         return _OWNER_LIVE, None
     if lease.spawn_pending:
@@ -243,6 +265,105 @@ def release_before_spawn(state: State, *, worktree: str, generation: int, reason
     )
 
 
+@dataclass(frozen=True)
+class LeaseResolution:
+    """Outcome of a :func:`resolve_ambiguous_lease` call -- never a bare boolean,
+    so a caller (an operator surface, a test) always has the concrete evidence
+    string on hand rather than having to re-derive why a resolution did or did
+    not happen."""
+
+    resolved: bool
+    reason: str
+
+
+def resolve_ambiguous_lease(state: State, *, worktree: str, generation: int) -> LeaseResolution:
+    """Operator-invoked resolution for an ``ambiguous`` lease (see ``_classify_owner``):
+    a dead launching-supervisor pid recorded while ``spawn_pending`` was still set, so
+    a session-leader worker process could not be ruled out from the row alone.
+
+    Never a timeout and never a bare operator override -- the server itself checks the
+    one piece of OS-enforced evidence available for "is a worker actually running
+    here": ``recovery._stale_write_lock_holder`` on the worktree's own ``.write-lock``
+    file. That file's ``pid=`` is written by the worker subprocess itself
+    (``runner.write_lock``) once it reaches the point in ``orchestrate.run_delegation``
+    where it takes checkout write ownership -- the same pid this lease would have
+    recorded via ``attach_pid`` had the supervisor lived long enough to call it.
+
+    What this proves: if ``.write-lock`` shows either no file, or a file whose
+    recorded pid is verifiably dead, then no worker process is currently past the
+    write-lock-acquisition point for this worktree. Combined with the recorded
+    supervisor pid already being proven dead (``_classify_owner`` already required
+    that to reach ``ambiguous`` at all), that is real, OS-checked evidence that no
+    worker is running -- not an inference from elapsed time or a name match. If a
+    live holder *is* found, this refuses outright and reports the lease still
+    ambiguous, so the only case this ever frees is the one where the OS itself shows
+    nothing running.
+
+    What this does NOT prove: a worker that was spawned and is still starting up
+    (interpreter boot, argument parsing, ``assert_write_safety``) and has not yet
+    reached ``runner.write_lock`` looks identical to "no worker exists" here -- both
+    show no lock file. That gap is real, is not closed by this check, and is spelled
+    out in the recorded reason rather than presented as closed.
+
+    This is never used for mutual exclusion -- ``.write-lock``'s own atomic
+    ``O_CREAT|O_EXCL`` create remains the actual backstop a genuine second writer
+    would still hit -- it is read here only as existing OS state to decide whether
+    the *execution lease row* is safe to free. The lease's own correctness never
+    depends on this file.
+
+    Refuses (``resolved=False``) rather than acting when: the row no longer matches
+    ``worktree``/``generation``/``ACQUIRED`` (nothing to resolve), the row is not
+    currently classified ``ambiguous`` (the ordinary ``acquire``/
+    ``reconcile_stale_leases`` paths already handle ``live``/``reclaimable``
+    correctly and must be used instead), a live write-lock holder is found, or the
+    row changed out from under this call between the fresh read and the CAS release.
+    """
+
+    current = state.get_execution_lease(worktree)
+    if current is None or current.status != EXECUTION_LEASE_ACQUIRED or current.generation != generation:
+        return LeaseResolution(
+            False,
+            f"no ACQUIRED execution lease for worktree {worktree!r} at generation {generation}; nothing to resolve",
+        )
+    classification, why = _classify_owner(current)
+    if classification != _OWNER_AMBIGUOUS:
+        return LeaseResolution(
+            False,
+            f"lease is not ambiguous (classified {classification!r}: {why}); use acquire's own "
+            "reclaim path or reconcile_stale_leases instead of this resolution",
+        )
+    lock_path = Path(worktree) / _AGENT_OUTPUT_DIRNAME / _WRITE_LOCK_NAME
+    holder, stale = _stale_write_lock_holder(lock_path)
+    if holder and not stale:
+        return LeaseResolution(
+            False,
+            f"still ambiguous: a live write-lock holder ({holder}) was found at {lock_path!s}, so a "
+            "worker process cannot be ruled out; not reclaiming",
+        )
+    evidence = (
+        f"no .write-lock file at {lock_path!s}"
+        if holder is None
+        else f"the .write-lock holder recorded there ({holder}) is dead"
+    )
+    reason = (
+        f"resolved ambiguous spawn-in-flight lease from dead supervisor pid {current.owner_pid}: "
+        f"{evidence}, proving no worker has reached write-lock acquisition for this worktree; this "
+        "cannot rule out a worker still starting up that has not yet acquired that lock"
+    )
+    if not state.force_release_execution_lease(worktree=worktree, expected_generation=generation, reason=reason):
+        return LeaseResolution(
+            False, f"lease for worktree {worktree!r} changed during resolution (lost the race); not reclaimed"
+        )
+    state.record_event(
+        category="execution_lease",
+        task_id=current.task_id,
+        level="warning",
+        message=f"worktree {worktree!r} {reason}",
+        project_id=current.project_id,
+    )
+    return LeaseResolution(True, reason)
+
+
 def reconcile_stale_leases(state: State, *, project_id: str | None = None) -> dict[str, int]:
     """Startup/periodic sweep: free only leases whose owner is proven dead.
 
@@ -257,9 +378,10 @@ def reconcile_stale_leases(state: State, *, project_id: str | None = None) -> di
     this sweep exists to prevent, not narrow. It counts toward ``left_held`` like any
     other live-or-unproven lease, but is logged at ``error`` (not ``warning``) so it
     is distinguishable in the event stream and stands out on the Attention surface
-    (``stale_leases`` below reports it explicitly) until an operator or a later
-    ``attach_pid``/``release_before_spawn`` call from the same acquisition resolves
-    it -- never a timeout.
+    (``stale_leases`` below reports it explicitly) until a later ``attach_pid``/
+    ``release_before_spawn`` call from the same acquisition resolves it, or an
+    operator invokes ``resolve_ambiguous_lease`` and its OS-checked proof of an
+    absent worker succeeds -- never a timeout.
     """
 
     reclaimed = 0

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,42 @@ def test_a_dead_owner_pid_with_spawn_still_pending_is_never_auto_reclaimed(disk_
     summary = lease.reconcile_stale_leases(disk_state)
     assert summary == {"reclaimed": 0, "left_held": 1}
     assert disk_state.get_execution_lease(str(tmp_path)).status == "ACQUIRED"
+
+
+def test_a_reused_supervisor_pid_with_spawn_still_pending_stays_ambiguous(disk_state, tmp_path, monkeypatch):
+    """Blocker regression (independent review, exact tree 5d3264e8): the reclaim
+    ordering previously contradicted its own docstring -- a create-time mismatch on
+    the recorded pid returned ``reclaimable`` *before* ``spawn_pending`` was ever
+    consulted. While that flag is set the recorded pid is the launching
+    supervisor's, never the worker's, so a reused supervisor pid proves only that
+    the supervisor is gone -- never that no worker is running.
+
+    Deliberately never calls ``update_execution_lease_pid`` (which would clear
+    ``spawn_pending``): the existing reuse test did exactly that, which is why it
+    could not see this bug. Instead the create-time recorded at real ``acquire``
+    time is pinned via ``_process_create_time`` itself so the flag stays set.
+    """
+
+    monkeypatch.setattr(lease, "_process_create_time", lambda pid: 123.0)
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    row = disk_state.get_execution_lease(str(tmp_path))
+    assert row.spawn_pending is True
+    assert row.owner_pid_create_time == 123.0
+
+    # The recorded pid is "alive" (reused by an unrelated process) with a
+    # mismatched create-time -- proof the *supervisor* is gone, nothing more.
+    monkeypatch.setattr(lease, "pid_is_alive", lambda pid: True)
+    monkeypatch.setattr(lease, "_process_create_time", lambda pid: 999.0)
+
+    with pytest.raises(lease.ExecutionLeaseConflict) as excinfo:
+        lease.acquire(disk_state, worktree=str(tmp_path), task_id="t2", worker="w")
+    assert "spawn in flight" in excinfo.value.reason
+
+    summary = lease.reconcile_stale_leases(disk_state)
+    assert summary == {"reclaimed": 0, "left_held": 1}
+    row = disk_state.get_execution_lease(str(tmp_path))
+    assert row.status == "ACQUIRED"
+    assert row.generation == grant.generation
 
 
 def test_reconcile_stale_leases_frees_only_provably_dead_owners(disk_state, tmp_path, monkeypatch):
@@ -341,6 +378,179 @@ def test_supervisor_death_before_attach_pid_never_frees_the_worktree_while_the_c
         if child_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(child_pid, signal.SIGKILL)
+
+
+# ------------------------------------------------------ resolving an ambiguous lease
+
+
+def test_resolve_ambiguous_lease_refuses_a_live_lease(disk_state, tmp_path):
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    lease.attach_pid(disk_state, worktree=str(tmp_path), generation=grant.generation, pid=os.getpid())
+    result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=grant.generation)
+    assert result.resolved is False
+    assert "not ambiguous" in result.reason
+    assert disk_state.get_execution_lease(str(tmp_path)).status == "ACQUIRED"
+
+
+def test_resolve_ambiguous_lease_refuses_a_reclaimable_lease(disk_state, tmp_path, monkeypatch):
+    """A plain reclaimable lease (``spawn_pending`` already clear) has its own
+    correct path (``acquire``/``reconcile_stale_leases``) -- this resolution must
+    not act on it either, so there is exactly one way to free each kind of lease.
+    """
+
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    lease.attach_pid(disk_state, worktree=str(tmp_path), generation=grant.generation, pid=os.getpid())
+    monkeypatch.setattr(lease, "pid_is_alive", lambda pid: False)
+    result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=grant.generation)
+    assert result.resolved is False
+    assert "not ambiguous" in result.reason
+    assert disk_state.get_execution_lease(str(tmp_path)).status == "ACQUIRED"
+
+
+def test_resolve_ambiguous_lease_refuses_a_mismatched_generation(disk_state, tmp_path, monkeypatch):
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    monkeypatch.setattr(lease, "pid_is_alive", lambda pid: False)
+    result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=grant.generation + 1)
+    assert result.resolved is False
+    assert "nothing to resolve" in result.reason
+
+
+def test_resolve_ambiguous_lease_frees_when_no_write_lock_file_exists(disk_state, tmp_path, monkeypatch):
+    """The common case: the dead supervisor's spawn never reached, or never will
+    reach, ``runner.write_lock`` -- there is no lock file at all, which is the
+    clearest OS-checked evidence available that nothing is running.
+    """
+
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    monkeypatch.setattr(lease, "pid_is_alive", lambda pid: False)
+    row = disk_state.get_execution_lease(str(tmp_path))
+    classification, _ = lease._classify_owner(row)
+    assert classification == lease._OWNER_AMBIGUOUS
+
+    result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=grant.generation)
+    assert result.resolved is True
+    assert "no .write-lock file" in result.reason
+    assert "cannot rule out a worker still starting up" in result.reason
+    assert disk_state.get_execution_lease(str(tmp_path)).status == "RELEASED"
+
+
+def test_resolve_ambiguous_lease_frees_when_the_write_lock_holder_is_also_dead(disk_state, tmp_path, monkeypatch):
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    monkeypatch.setattr(lease, "pid_is_alive", lambda pid: False)
+    lock_dir = tmp_path / ".agent-output"
+    lock_dir.mkdir(parents=True)
+    dead_pid = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead_pid.wait(timeout=10)
+    (lock_dir / ".write-lock").write_text(f"claude-code pid={dead_pid.pid} at=0", encoding="utf-8")
+
+    result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=grant.generation)
+    assert result.resolved is True
+    assert "is dead" in result.reason
+    assert disk_state.get_execution_lease(str(tmp_path)).status == "RELEASED"
+
+
+def test_resolve_ambiguous_lease_refuses_when_a_live_write_lock_holder_exists(disk_state, tmp_path, monkeypatch):
+    """The one case this must never free: an ``.write-lock`` file with a genuinely
+    live pid is real OS-enforced evidence a worker exists, even though the
+    execution-lease row alone was ambiguous.
+    """
+
+    grant = lease.acquire(disk_state, worktree=str(tmp_path), task_id="t1", worker="w")
+    monkeypatch.setattr(lease, "pid_is_alive", lambda pid: False)
+    lock_dir = tmp_path / ".agent-output"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / ".write-lock").write_text(f"claude-code pid={os.getpid()} at=0", encoding="utf-8")
+
+    result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=grant.generation)
+    assert result.resolved is False
+    assert "live write-lock holder" in result.reason
+    assert disk_state.get_execution_lease(str(tmp_path)).status == "ACQUIRED"
+
+
+# Real-process coverage, mirroring ``_ACQUIRE_SPAWN_AND_DIE_BEFORE_ATTACH`` above but
+# with the session-leader child also taking the real ``.write-lock`` (exactly what
+# ``runner.write_lock`` does once a worker actually starts running) before its
+# "supervisor" dies without ever calling ``attach_pid``. This is the one test that
+# can actually distinguish a correct implementation from one that merely trusts an
+# operator: it proves ``resolve_ambiguous_lease`` cannot be made to free the
+# worktree while that child is genuinely still alive and holding the lock.
+_ACQUIRE_SPAWN_HOLDING_WRITE_LOCK_AND_DIE_BEFORE_ATTACH = """
+    import subprocess, sys, time
+    from pathlib import Path
+    from scripts.agents.control_plane import execution_lease as lease
+    from scripts.agents.control_plane.state import State
+    state = State(sys.argv[1])
+    worktree = sys.argv[2]
+    lease.acquire(state, worktree=worktree, task_id="doomed-supervisor-task", worker="w")
+    lock_dir = Path(worktree) / ".agent-output"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".write-lock"
+    child_script = (
+        "import os, sys, time; "
+        "open(sys.argv[1], 'w').write('claude-code pid={} at=0'.format(os.getpid())); "
+        "time.sleep(600)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_script, str(lock_path)], start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    # Wait for the child to actually write its own lock before this 'supervisor'
+    # exits, so the outer test never races the child's own write.
+    deadline = time.monotonic() + 10
+    while not lock_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    print(f"READY {child.pid}", flush=True)
+"""
+
+
+def _spawn_then_die_before_attach_holding_write_lock(db_path: Path, worktree: Path) -> int:
+    proc = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_ACQUIRE_SPAWN_HOLDING_WRITE_LOCK_AND_DIE_BEFORE_ATTACH),
+         str(db_path), str(worktree)],
+        cwd=str(REPO_ROOT), stdout=subprocess.PIPE, text=True, check=True, timeout=30,
+    )
+    line = proc.stdout.strip().splitlines()[-1]
+    assert line.startswith("READY "), proc.stdout
+    return int(line.split()[1])
+
+
+def test_resolve_ambiguous_lease_never_frees_the_worktree_while_a_live_child_holds_the_write_lock(disk_state, tmp_path):
+    child_pid = None
+    try:
+        child_pid = _spawn_then_die_before_attach_holding_write_lock(disk_state.db_path, tmp_path)
+        assert lease.pid_is_alive(child_pid), "the spawned child must actually be running"
+
+        row = disk_state.get_execution_lease(str(tmp_path))
+        assert row.status == "ACQUIRED" and row.spawn_pending is True
+        assert not lease.pid_is_alive(row.owner_pid), "the recorded 'supervisor' pid has genuinely exited"
+
+        result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=row.generation)
+        assert result.resolved is False
+        assert "live write-lock holder" in result.reason
+        assert disk_state.get_execution_lease(str(tmp_path)).status == "ACQUIRED"
+
+        # Not resolved by this call and never stealable through the ordinary path either.
+        with pytest.raises(lease.ExecutionLeaseConflict):
+            lease.acquire(disk_state, worktree=str(tmp_path), task_id="second-writer", worker="w")
+        assert lease.pid_is_alive(child_pid)
+    finally:
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
+def test_resolve_ambiguous_lease_frees_once_that_same_child_is_actually_dead(disk_state, tmp_path):
+    child_pid = _spawn_then_die_before_attach_holding_write_lock(disk_state.db_path, tmp_path)
+    os.kill(child_pid, signal.SIGKILL)
+    deadline = time.monotonic() + 10
+    while lease.pid_is_alive(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not lease.pid_is_alive(child_pid), "the child must actually be dead before this proves anything"
+
+    row = disk_state.get_execution_lease(str(tmp_path))
+    result = lease.resolve_ambiguous_lease(disk_state, worktree=str(tmp_path), generation=row.generation)
+    assert result.resolved is True
+    assert disk_state.get_execution_lease(str(tmp_path)).status == "RELEASED"
 
 
 # --------------------------------------------------------------------------- misc
