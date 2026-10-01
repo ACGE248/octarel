@@ -786,6 +786,34 @@ class State:
         """
 
         columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(usage_ledger)")}
+        index = next(
+            (
+                row
+                for row in self._conn.execute("PRAGMA index_list(usage_ledger)")
+                if row["name"] == "idx_usage_ledger_run"
+            ),
+            None,
+        )
+        index_columns = (
+            [row["name"] for row in self._conn.execute("PRAGMA index_info(idx_usage_ledger_run)")]
+            if index is not None
+            else []
+        )
+        if (
+            "program_ref" in columns
+            and index is not None
+            and index["unique"] == 1
+            and index["partial"] == 0
+            and index_columns == ["run_id"]
+        ):
+            # This migration deliberately has no schema-version write of its
+            # own: the project-registry bootstrap owns that setting and may not
+            # have run yet. The actual ledger schema is the durable migration
+            # marker. Returning before any DROP/CREATE/ALTER is essential;
+            # even idempotent DDL takes SQLite's schema lock and can make a
+            # concurrent State opener fail with ``database is locked``.
+            return
+
         if "program_ref" not in columns:
             self._conn.execute("ALTER TABLE usage_ledger ADD COLUMN program_ref TEXT")
 

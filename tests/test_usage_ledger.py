@@ -357,7 +357,7 @@ def test_opening_old_database_collapses_project_keyed_duplicate_runs(tmp_path):
         "CREATE UNIQUE INDEX idx_usage_ledger_run ON usage_ledger (IFNULL(project_id, ''), run_id)"
     )
     payload = (
-        None,
+        "",
         None,
         "task-1",
         "rb-1",
@@ -383,7 +383,7 @@ def test_opening_old_database_collapses_project_keyed_duplicate_runs(tmp_path):
         "(project_id, program_ref, task_id, runbook_id, run_id, session_id, worker, provider, "
         "effective_model, occurred_at, source_record, source_attempt, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("project-a", *payload[1:]),
+        ("project-a", "ENG-PC", *payload[2:]),
     )
     state._conn.commit()
     state.close()
@@ -392,10 +392,38 @@ def test_opening_old_database_collapses_project_keyed_duplicate_runs(tmp_path):
         rows = reopened.list_usage_ledger()
         assert len(rows) == 1
         assert rows[0]["project_id"] == "project-a"
+        assert rows[0]["program_ref"] == "ENG-PC"
         index_sql = reopened._conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_ledger_run'"
         ).fetchone()["sql"]
         assert "project_id" not in index_sql
+
+
+def test_opening_migrated_database_runs_no_usage_ledger_ddl(tmp_path, monkeypatch):
+    database = tmp_path / "migrated.db"
+    with State(database):
+        pass
+
+    statements = []
+    migrate = State._migrate_usage_ledger
+
+    def trace_migration(state):
+        state._conn.set_trace_callback(statements.append)
+        try:
+            return migrate(state)
+        finally:
+            state._conn.set_trace_callback(None)
+
+    monkeypatch.setattr(State, "_migrate_usage_ledger", trace_migration)
+    with State(database):
+        pass
+
+    schema_ddl = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith(("ALTER ", "CREATE ", "DROP "))
+    ]
+    assert schema_ddl == []
 
 
 def test_rows_survive_state_store_restart(tmp_path):
