@@ -671,12 +671,19 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
         )
 
     # ENG-PC-05 scope C: exercise every truthful budget presentation path.
-    # The token budget is a warning, the task attempt budget is a hard block,
-    # the subscription cash budget has a measured zero, and quota reserve stays
-    # UNKNOWN because the fixture has no authoritative provider quota source.
+    # The run-scoped token budget contains only the successful attempt with
+    # trustworthy counts, so it honestly demonstrates WARNING.  The wider
+    # task-scoped token budget also contains the legacy failed attempt whose
+    # tokens are UNKNOWN; it must therefore stay UNKNOWN rather than present
+    # the successful attempt's partial sum as the task total.
     for budget in (
         {
-            "id": "fx-budget-token-warning", "scope_type": "task",
+            "id": "fx-budget-token-warning", "scope_type": "run",
+            "scope_key": "fx-rb-fallback:attempt:2", "constraint_type": "tokens",
+            "limit_value": 200_000, "warning_fraction": 0.75,
+        },
+        {
+            "id": "fx-budget-token-unknown", "scope_type": "task",
             "scope_key": "fx-rb-fallback-session", "constraint_type": "tokens",
             "limit_value": 200_000, "warning_fraction": 0.75,
         },
@@ -723,7 +730,7 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
     state.upsert_runbook(budget_rb)
 
     for status, event_type, level, budget_id, scope in (
-        ("WARNING", "usage.budget_warning", "warning", "fx-budget-token-warning", "task:fx-rb-fallback-session"),
+        ("WARNING", "usage.budget_warning", "warning", "fx-budget-token-warning", "run:fx-rb-fallback:attempt:2"),
         ("BLOCKED", "usage.budget_blocked", "error", "fx-budget-attempt-block", "task:fx-rb-fallback-session"),
     ):
         state.record_run_event(

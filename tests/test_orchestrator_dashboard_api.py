@@ -583,6 +583,18 @@ def test_usage_endpoint_is_cached_and_does_not_spawn_a_subprocess_on_every_call(
     assert len(calls) > first_call_count, "?refresh=true must force a fresh read"
 
 
+def test_usage_telemetry_contains_lazy_reconcile_failure(client, monkeypatch):
+    from scripts.agents.control_plane import usage_ledger
+
+    def fail_reconcile(*args, **kwargs):
+        raise RuntimeError("malformed legacy governance JSON")
+
+    monkeypatch.setattr(usage_ledger, "reconcile_usage_governance", fail_reconcile)
+
+    response = client.get("/api/usage-telemetry")
+    assert response.status_code == 200
+
+
 def test_usage_telemetry_filters_and_budget_progress_are_safe_and_truthful(client, ctx):
     leaked_identity = "/" + "private/operator/task"
     ctx.state.append_usage_ledger(

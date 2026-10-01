@@ -68,15 +68,22 @@ def _emit(state: State, row: dict[str, Any]) -> None:
         pass
 
 
-def _attempt_record(record: dict[str, Any], attempt: dict[str, Any]) -> dict[str, Any]:
+def _attempt_record(
+    record: dict[str, Any], attempt: dict[str, Any], *, inherit_record_usage: bool
+) -> dict[str, Any]:
     """Project attempt-scoped evidence into the unchanged telemetry contract."""
 
     return {
         "runbook_id": record.get("runbook_id"),
         "task_id": record.get("task_id"),
-        "telemetry_quality": attempt.get("telemetry_quality", record.get("telemetry_quality", "unknown")),
-        "input_tokens": attempt.get("input_tokens", record.get("input_tokens")),
-        "output_tokens": attempt.get("output_tokens", record.get("output_tokens")),
+        "telemetry_quality": attempt.get(
+            "telemetry_quality",
+            record.get("telemetry_quality", "unknown") if inherit_record_usage else "unknown",
+        ),
+        "input_tokens": attempt.get("input_tokens", record.get("input_tokens") if inherit_record_usage else None),
+        "output_tokens": attempt.get(
+            "output_tokens", record.get("output_tokens") if inherit_record_usage else None
+        ),
         "escalation_state": record.get("escalation_state"),
         "escalation_reason": record.get("escalation_reason"),
         "route_history": [attempt],
@@ -97,8 +104,8 @@ def record_usage_attempts(
     token fields.  For pre-ledger records, only the newest worker attempt may
     inherit the old runbook-level token fields; attributing those figures to
     earlier attempts would invent evidence the historical schema never kept.
-    The newest legacy attempt is still a real run when those fields are absent,
-    so it is recorded with UNKNOWN evidence rather than dropped.
+    Every worker entry nevertheless proves that a run happened, so earlier
+    legacy attempts are retained with UNKNOWN usage rather than dropped.
     """
 
     history = record.get("route_history") or []
@@ -111,13 +118,17 @@ def record_usage_attempts(
     runbook = state.get_runbook(str(record.get("runbook_id") or ""))
     if runbook is not None:
         project_id = runbook.project_id
-    if project_id is None and record.get("task_id"):
+    task = state.get_task(str(record["task_id"])) if record.get("task_id") else None
+    if project_id is None and task is not None:
         # Runbook deletion intentionally retains tasks and ledger history. The
         # durable task is therefore the attribution source when reconciliation
         # races with, or follows, deletion of the mutable runbook row.
-        task = state.get_task(str(record["task_id"]))
-        if task is not None:
-            project_id = task.project_id
+        project_id = task.project_id
+    task_ref_parts = str(getattr(task, "task_ref", "") or "").split(maxsplit=1)
+    stable_task_ref = task_ref_parts[0] if task_ref_parts else ""
+    program_ref = (
+        stable_task_ref.rsplit("-", 1)[0] if "-" in stable_task_ref else stable_task_ref or None
+    )
 
     inserted_count = 0
     for index in worker_indexes:
@@ -125,8 +136,6 @@ def record_usage_attempts(
         attempt_scoped = bool(attempt.get("usage_recorded")) or any(
             key in attempt for key in ("telemetry_quality", "input_tokens", "output_tokens")
         )
-        if not attempt_scoped and index != legacy_index:
-            continue
         if not attempt_scoped:
             # A run id marks the new writer. Until that attempt itself carries
             # ``usage_recorded``, the run is still live and must not be frozen
@@ -143,10 +152,15 @@ def record_usage_attempts(
             getattr(configured_worker, "effective_model", None)
             or getattr(configured_worker, "default_model", None)
         )
-        source_record = _attempt_record(record, attempt)
+        source_record = _attempt_record(
+            record,
+            attempt,
+            inherit_record_usage=not attempt_scoped and index == legacy_index,
+        )
         stored, inserted = state.append_usage_ledger(
             {
                 "project_id": project_id,
+                "program_ref": program_ref,
                 "task_id": record.get("task_id"),
                 "runbook_id": record["runbook_id"],
                 "run_id": run_id,
@@ -177,6 +191,20 @@ def reconcile_usage_governance(
         record_usage_attempts(state, record, project_id=project_id, registry=registry)
         for record in state.list_usage_governance()
     )
+
+
+def reconcile_usage_governance_safely(
+    state: State,
+    *,
+    project_id: str | None = None,
+    registry: Any = None,
+) -> int:
+    """Best-effort lazy reconciliation for read/daemon presentation paths."""
+
+    try:
+        return reconcile_usage_governance(state, project_id=project_id, registry=registry)
+    except Exception:  # noqa: BLE001 - malformed legacy evidence must not crash the caller
+        return 0
 
 
 def build_ledger_rows(
@@ -227,5 +255,6 @@ __all__ = [
     "build_ledger_rows",
     "new_run_id",
     "reconcile_usage_governance",
+    "reconcile_usage_governance_safely",
     "record_usage_attempts",
 ]

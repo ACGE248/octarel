@@ -59,6 +59,7 @@ class BudgetContext:
     runbook_id: str | None = None
     session_id: str | None = None
     is_fallback: bool = False
+    durable_program_ref: str | None = None
 
     @property
     def stable_task_ref(self) -> str | None:
@@ -66,6 +67,8 @@ class BudgetContext:
 
     @property
     def program_ref(self) -> str | None:
+        if self.durable_program_ref:
+            return self.durable_program_ref
         stable = self.stable_task_ref
         return stable.rsplit("-", 1)[0] if stable and "-" in stable else stable
 
@@ -124,8 +127,14 @@ def _scope_matches(definition: Mapping[str, Any], context: BudgetContext) -> boo
     return key in candidates
 
 
+def _source_attempt(entry: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    source_attempt = entry.get("source_attempt")
+    return source_attempt if isinstance(source_attempt, Mapping) else None
+
+
 def _entry_context(state, entry: Mapping[str, Any]) -> BudgetContext:
     task = state.get_task(str(entry.get("task_id") or "")) if entry.get("task_id") else None
+    source_attempt = _source_attempt(entry)
     return BudgetContext(
         project_id=entry.get("project_id"),
         provider=entry.get("provider"),
@@ -134,7 +143,8 @@ def _entry_context(state, entry: Mapping[str, Any]) -> BudgetContext:
         run_id=entry.get("run_id"),
         runbook_id=entry.get("runbook_id"),
         session_id=entry.get("session_id"),
-        is_fallback=bool(entry.get("source_attempt", {}).get("automatic")),
+        is_fallback=bool(source_attempt and source_attempt.get("automatic")),
+        durable_program_ref=entry.get("program_ref"),
     )
 
 
@@ -164,7 +174,9 @@ def _sum_metric(rows: list[dict[str, Any]], metric_name: str) -> tuple[float | N
 
 
 def _duration_seconds(entry: Mapping[str, Any]) -> float | None:
-    attempt = entry.get("source_attempt") or {}
+    attempt = _source_attempt(entry)
+    if attempt is None:
+        return None
     start, end = attempt.get("started_at"), attempt.get("ended_at")
     if not start or not end:
         return None
@@ -206,7 +218,7 @@ def _evidence(
     if constraint == CONSTRAINT_ATTEMPTS:
         return float(len(entries) + 1), CLASS_MEASURED, "ledger attempts + proposed launch"
     if constraint == CONSTRAINT_FALLBACKS:
-        used = sum(1 for entry in entries if entry.get("source_attempt", {}).get("automatic"))
+        used = sum(1 for entry in entries if (_source_attempt(entry) or {}).get("automatic"))
         return float(used + (1 if context.is_fallback else 0)), CLASS_MEASURED, (
             "ledger automatic fallbacks + proposed fallback"
         )
@@ -229,19 +241,61 @@ def evaluate(
 ) -> BudgetDecision:
     """Return a pure veto/no-op decision for every applicable definition."""
 
-    definitions = [
-        item
-        for item in state.list_usage_budgets(project_id=context.project_id, enabled_only=True)
-        if _scope_matches(item, context)
-    ]
-    if not definitions:
+    definitions: list[dict[str, Any]] = []
+    invalid: list[tuple[dict[str, Any], str]] = []
+    for item in state.list_usage_budgets(project_id=context.project_id, enabled_only=True):
+        try:
+            validate_definition(item)
+        except (KeyError, TypeError, ValueError) as exc:
+            # Stored configuration is untrusted input. Its intended scope cannot
+            # be proven once malformed, so enforcement fails closed for the
+            # selected project instead of letting the daemon path raise or pass.
+            invalid.append((item, str(exc)))
+            continue
+        if _scope_matches(item, context):
+            definitions.append(item)
+    if not definitions and not invalid:
         return BudgetDecision(True, STATUS_OK, "no applicable usage budget", None, None, CLASS_UNKNOWN, ())
     book = pricing_book or load_pricing_book()
     quota = quota_sources or {}
-    evaluations: list[dict[str, Any]] = []
+    evaluations: list[dict[str, Any]] = [
+        {
+            "budget_id": str(definition.get("id") or "UNKNOWN"),
+            "scope_type": str(definition.get("scope_type") or "invalid"),
+            "scope_key": definition.get("scope_key"),
+            "constraint_type": str(definition.get("constraint_type") or "invalid"),
+            "status": STATUS_UNKNOWN,
+            "value": None,
+            "limit": definition.get("limit_value"),
+            "remaining": None,
+            "evidence_class": CLASS_UNKNOWN,
+            "source": f"malformed stored budget definition: {reason}",
+            "basis": PROGRESS_BASIS,
+        }
+        for definition, reason in invalid
+    ]
     for definition in definitions:
-        validate_definition(definition)
         entries = _entries_for(state, definition)
+        malformed_entries = sum(1 for entry in entries if _source_attempt(entry) is None)
+        if malformed_entries:
+            evaluations.append(
+                {
+                    "budget_id": definition["id"],
+                    "scope_type": definition["scope_type"],
+                    "scope_key": definition.get("scope_key"),
+                    "constraint_type": definition["constraint_type"],
+                    "status": STATUS_UNKNOWN,
+                    "value": None,
+                    "limit": float(definition["limit_value"]),
+                    "remaining": None,
+                    "evidence_class": CLASS_UNKNOWN,
+                    "source": (
+                        f"{malformed_entries} matching ledger row(s) have malformed source_attempt JSON"
+                    ),
+                    "basis": PROGRESS_BASIS,
+                }
+            )
+            continue
         rows = _rows(entries, registry=registry, pricing_book=book)
         value, evidence_class, source = _evidence(
             definition, entries, rows, context=context, quota_sources=quota
@@ -253,9 +307,17 @@ def evaluate(
             remaining = None
         else:
             remaining = (value - limit) if constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE else (limit - value)
-            breached = value <= limit if constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE else value >= limit
-            if constraint in {CONSTRAINT_ATTEMPTS, CONSTRAINT_FALLBACKS}:
+            if constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE:
+                breached = value <= limit
+            elif constraint == CONSTRAINT_ATTEMPTS:
+                # Attempts includes the proposed launch, so that proposed unit
+                # breaches only above the limit. Incurred-only constraints use
+                # >= below; their next unit is not already present in ``value``.
                 breached = value > limit
+            else:
+                # Reaching an incurred-usage threshold exhausts it. In
+                # particular, zero metered cash means no paid work may start.
+                breached = value >= limit
             if breached:
                 status = STATUS_BLOCKED
             else:
@@ -284,7 +346,7 @@ def evaluate(
         key=lambda item: (
             severity[item["status"]],
             float("inf") if item["remaining"] is None else item["remaining"],
-            _SCOPE_RANK[item["scope_type"]],
+            _SCOPE_RANK.get(item["scope_type"], -1),
             item["budget_id"],
         )
     )
@@ -345,8 +407,52 @@ def progress(
     quota = quota_sources or {}
     rows: list[dict[str, Any]] = []
     for definition in state.list_usage_budgets(project_id=project_id, enabled_only=True):
-        validate_definition(definition)
+        try:
+            validate_definition(definition)
+        except (KeyError, TypeError, ValueError) as exc:
+            rows.append(
+                {
+                    "budget_id": str(definition.get("id") or "UNKNOWN"),
+                    "scope_type": str(definition.get("scope_type") or "invalid"),
+                    "scope_key": definition.get("scope_key"),
+                    "bounding_scope": "invalid",
+                    "constraint_type": str(definition.get("constraint_type") or "invalid"),
+                    "status": STATUS_UNKNOWN,
+                    "value": None,
+                    "limit": definition.get("limit_value"),
+                    "remaining": None,
+                    "progress_percent": None,
+                    "evidence_class": CLASS_UNKNOWN,
+                    "source": f"malformed stored budget definition: {exc}",
+                    "basis": PROGRESS_BASIS,
+                }
+            )
+            continue
         entries = _entries_for(state, definition)
+        malformed_entries = sum(1 for entry in entries if _source_attempt(entry) is None)
+        if malformed_entries:
+            rows.append(
+                {
+                    "budget_id": definition["id"],
+                    "scope_type": definition["scope_type"],
+                    "scope_key": definition.get("scope_key"),
+                    "bounding_scope": definition["scope_type"] + (
+                        f":{definition['scope_key']}" if definition.get("scope_key") is not None else ""
+                    ),
+                    "constraint_type": definition["constraint_type"],
+                    "status": STATUS_UNKNOWN,
+                    "value": None,
+                    "limit": float(definition["limit_value"]),
+                    "remaining": None,
+                    "progress_percent": None,
+                    "evidence_class": CLASS_UNKNOWN,
+                    "source": (
+                        f"{malformed_entries} matching ledger row(s) have malformed source_attempt JSON"
+                    ),
+                    "basis": PROGRESS_BASIS,
+                }
+            )
+            continue
         rendered = _rows(entries, registry=registry, pricing_book=book)
         constraint = definition["constraint_type"]
         if constraint == CONSTRAINT_ATTEMPTS:
@@ -355,7 +461,7 @@ def progress(
             )
         elif constraint == CONSTRAINT_FALLBACKS:
             value, evidence_class, source = (
-                float(sum(1 for entry in entries if entry.get("source_attempt", {}).get("automatic"))),
+                float(sum(1 for entry in entries if (_source_attempt(entry) or {}).get("automatic"))),
                 CLASS_MEASURED,
                 "count of matching automatic fallbacks in the append-only ledger",
             )
@@ -385,7 +491,7 @@ def progress(
             # percentage would invent the provider's full allowance.
         else:
             remaining = limit - value
-            breached = value > limit if constraint in {CONSTRAINT_ATTEMPTS, CONSTRAINT_FALLBACKS} else value >= limit
+            breached = value >= limit
             if breached:
                 status = STATUS_BLOCKED
             else:

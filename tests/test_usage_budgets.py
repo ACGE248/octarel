@@ -15,13 +15,17 @@ from scripts.agents.control_plane.models import (
 from scripts.agents.control_plane.pricing import ModelPricing, PricingLookup
 from scripts.agents.control_plane.scheduler import Scheduler
 from scripts.agents.control_plane.state import State
+from scripts.agents.control_plane.supervisor import Supervisor
 from scripts.agents.control_plane.usage_budgets import (
     CONSTRAINT_ATTEMPTS,
+    CONSTRAINT_FALLBACKS,
     CONSTRAINT_METERED_CASH,
     CONSTRAINT_PROVIDER_QUOTA_RESERVE,
     CONSTRAINT_TOKENS,
+    CONSTRAINT_WALL_CLOCK,
     PROGRESS_BASIS,
     SCOPE_GLOBAL,
+    SCOPE_PROGRAM,
     SCOPE_PROVIDER,
     SCOPE_TASK,
     STATUS_BLOCKED,
@@ -259,16 +263,25 @@ def test_narrower_scope_tightens_but_cannot_loosen_wider_scope():
     assert decision.bounding_scope == "task:ENG-PC-05"
 
 
-def test_unknown_usage_and_missing_quota_source_are_unknown_not_zero_or_unlimited():
+def test_one_unknown_row_makes_the_whole_budget_unknown_without_a_partial_sum():
     state = State(":memory:")
     worker = _worker()
-    unknown = _attempt(quality="unknown", tokens=(None, None))
-    _record(state, unknown)
+    _record(state, _attempt(run_id="known-run", tokens=(70, 10)))
+    _record(state, _attempt(run_id="unknown-run", quality="unknown", tokens=(None, None)))
     _budget(state, "token-budget", constraint=CONSTRAINT_TOKENS, limit=100)
     decision = evaluate(state, registry=_registry(worker), context=_context(), pricing_book=FixedBook())
     assert decision.allowed is False
     assert decision.status == STATUS_UNKNOWN
     assert decision.evidence_class == CLASS_UNKNOWN
+    assert decision.evaluations[0]["value"] is None
+    assert "1 matching ledger row(s) have no trustworthy total_tokens source" in decision.reason
+
+    [token_progress] = progress(
+        state, registry=_registry(worker), project_id="project-a", pricing_book=FixedBook()
+    )
+    assert token_progress["status"] == STATUS_UNKNOWN
+    assert token_progress["value"] is None
+    assert "1 matching ledger row(s) have no trustworthy total_tokens source" in token_progress["source"]
 
     state.delete_usage_budget("token-budget")
     _budget(
@@ -303,11 +316,152 @@ def test_api_equivalent_estimate_never_consumes_metered_cash_budget():
     assert decision.allowed is True
 
 
+def test_reaching_any_hard_limit_blocks_including_zero_measured_cash():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _record(state, _attempt(reported_cost=0.0))
+    _budget(state, "cash-zero", constraint=CONSTRAINT_METERED_CASH, limit=0)
+    cash = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert cash.status == STATUS_BLOCKED
+    assert cash.evaluations[0]["value"] == 0.0
+
+    state.delete_usage_budget("cash-zero")
+    _budget(state, "attempt-equality", limit=1)
+    attempts = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert attempts.status == STATUS_BLOCKED
+    assert attempts.evaluations[0]["value"] == 2.0
+
+
+def test_each_consumption_budget_allows_n_units_and_blocks_the_next():
+    cases = (
+        (CONSTRAINT_METERED_CASH, _attempt(tokens=(0, 0), reported_cost=1.0), 0.0, 1.0),
+        (CONSTRAINT_TOKENS, _attempt(tokens=(1, 0)), 0.0, 1.0),
+        (CONSTRAINT_WALL_CLOCK, _attempt(tokens=(0, 0)), 0.0, 1.0),
+        (CONSTRAINT_ATTEMPTS, _attempt(tokens=(0, 0)), 1.0, 2.0),
+        (CONSTRAINT_FALLBACKS, _attempt(tokens=(0, 0), automatic=True), 0.0, 1.0),
+    )
+    for constraint, incurred, nth_value, next_value in cases:
+        state = State(":memory:")
+        registry = _registry(_worker())
+        _budget(state, constraint, constraint=constraint, limit=1)
+
+        nth = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+        assert nth.allowed is True, constraint
+        assert nth.evaluations[0]["value"] == nth_value, constraint
+
+        if constraint == CONSTRAINT_WALL_CLOCK:
+            incurred["started_at"] = "2026-09-26T12:00:59+00:00"
+        _record(state, incurred)
+        next_attempt = evaluate(
+            state, registry=registry, context=_context(), pricing_book=FixedBook()
+        )
+        assert next_attempt.status == STATUS_BLOCKED, constraint
+        assert next_attempt.evaluations[0]["value"] == next_value, constraint
+
+
+def test_malformed_ledger_source_attempt_is_an_unknown_veto(tmp_path):
+    state, registry = _available_dispatch_state()
+    state.append_usage_ledger(
+        {
+            "project_id": "project-a",
+            "program_ref": "ENG-PC",
+            "task_id": "task-1",
+            "runbook_id": "runbook-1",
+            "run_id": "malformed-run",
+            "session_id": None,
+            "worker": "grok-build",
+            "provider": "xAI",
+            "effective_model": "grok-code-fast-1",
+            "occurred_at": "2026-09-26T12:01:00+00:00",
+            "source_record": {},
+            "source_attempt": "not-an-object",
+        }
+    )
+    _budget(state, "malformed-row", limit=100)
+
+    decision = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert decision.allowed is False
+    assert decision.status == STATUS_UNKNOWN
+    assert "malformed source_attempt JSON" in decision.reason
+
+    task = Task(
+        id="task-1",
+        task_ref="ENG-PC-05",
+        role="primary-implementation",
+        worker="grok-build",
+        project_id="project-a",
+    )
+    result, supervisor = _dispatch(state, registry, task, tmp_path)
+    assert result.launched is False
+    assert supervisor.launched == []
+    assert "malformed source_attempt JSON" in result.reason
+
+
+def test_program_budget_keeps_ledger_usage_after_task_deletion():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _record(state, _attempt())
+    _budget(state, "program", scope=SCOPE_PROGRAM, key="ENG-PC", limit=3)
+    before = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert before.evaluations[0]["value"] == 2.0
+    assert state.list_usage_ledger()[0]["program_ref"] == "ENG-PC"
+
+    state.delete_task("task-1")
+    after = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert after.evaluations[0]["value"] == before.evaluations[0]["value"]
+
+
+def test_malformed_stored_budget_fails_closed_without_raising(tmp_path):
+    state, registry = _available_dispatch_state()
+    state.upsert_usage_budget(
+        {
+            "id": "malformed",
+            "project_id": "project-a",
+            "scope_type": "not-a-scope",
+            "scope_key": None,
+            "constraint_type": CONSTRAINT_ATTEMPTS,
+            "limit_value": 1,
+            "warning_fraction": 0.8,
+        }
+    )
+
+    decision = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert decision.allowed is False
+    assert decision.status == STATUS_UNKNOWN
+    assert "malformed stored budget definition" in decision.reason
+
+    task = Task(
+        id="malformed-task",
+        task_ref="ENG-PC-05",
+        role="primary-implementation",
+        worker="grok-build",
+        project_id="project-a",
+    )
+    result, supervisor = _dispatch(state, registry, task, tmp_path)
+    assert result.launched is False
+    assert supervisor.launched == []
+    assert "malformed stored budget definition" in result.reason
+
+    direct = Task(
+        id="direct-malformed-task",
+        task_ref="ENG-PC-05",
+        role="primary-implementation",
+        worker="grok-build",
+        project_id="project-a",
+    )
+    state.upsert_task(direct)
+    contained = Supervisor(registry=registry, repo_root=tmp_path, state=state).launch_task(
+        direct, dry_run=True
+    )
+    assert contained.state == TASK_BLOCKED
+    assert "malformed stored budget definition" in str(contained.last_error)
+
+
 def test_warning_and_hard_block_are_distinct():
     state = State(":memory:")
     registry = _registry(_worker())
     _record(state, _attempt())
-    _budget(state, "warn", limit=2)
+    _budget(state, "warn", limit=2.5)
     warning = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
     assert warning.allowed is True and warning.status == STATUS_WARNING
     task = state.get_task("task-1")

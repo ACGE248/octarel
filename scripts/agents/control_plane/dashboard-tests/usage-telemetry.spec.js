@@ -9,6 +9,12 @@
 import { test, expect } from '@playwright/test';
 import { navTo } from './nav-helper.js';
 
+function fallbackWorkerRow(page, worker) {
+  return page
+    .locator('.usage-row', { hasText: 'fx-rb-fallback' })
+    .filter({ has: page.locator('.usage-row-identity', { hasText: worker }) });
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15000 });
@@ -18,7 +24,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('a run with real counts shows them as measured, with a derived total', async ({ page }) => {
-  const row = page.locator('.usage-row', { hasText: 'fx-rb-fallback' });
+  const row = fallbackWorkerRow(page, 'codex-build');
   await expect(row).toBeVisible();
 
   const input = row.locator('.usage-metric', { hasText: 'Input' }).first();
@@ -30,15 +36,29 @@ test('a run with real counts shows them as measured, with a derived total', asyn
   await expect(total).toContainText('DERIVED');
 });
 
-test('usage is attributed to the worker that actually ran, not a default', async ({ page }) => {
-  // This fixture run fell back from claude-code to codex-build.
-  const row = page.locator('.usage-row', { hasText: 'fx-rb-fallback' });
-  await expect(row.locator('.usage-row-identity')).toContainText('codex-build');
-  await expect(row.locator('.usage-row-identity')).not.toContainText('claude-code');
+test('fallback attempts remain separate with truthful worker and token attribution', async ({ page }) => {
+  // Seven governance records produce eight attempt rows because this runbook
+  // preserves both the failed first worker and its successful replacement.
+  const rows = page.locator('.usage-row');
+  const fallbackRows = rows.filter({ hasText: 'fx-rb-fallback' });
+  await expect(rows).toHaveCount(8);
+  await expect(fallbackRows).toHaveCount(2);
+
+  const earlier = fallbackWorkerRow(page, 'claude-code');
+  await expect(earlier.locator('.usage-row-identity')).toContainText('claude-code');
+  const earlierInput = earlier.locator('.usage-metric', { hasText: 'Input' }).first();
+  await expect(earlierInput).toContainText('UNKNOWN');
+  await expect(earlierInput).not.toContainText('MEASURED');
+
+  const later = fallbackWorkerRow(page, 'codex-build');
+  await expect(later.locator('.usage-row-identity')).toContainText('codex-build');
+  const laterInput = later.locator('.usage-metric', { hasText: 'Input' }).first();
+  await expect(laterInput).toContainText('142,800');
+  await expect(laterInput).toContainText('MEASURED');
 });
 
 test('cache and context metrics are labelled unavailable with a reason', async ({ page }) => {
-  const row = page.locator('.usage-row', { hasText: 'fx-rb-fallback' });
+  const row = fallbackWorkerRow(page, 'codex-build');
 
   for (const label of ['Fresh input', 'Cache reads', 'Cache hit rate', 'Context used']) {
     const cell = row.locator('.usage-metric', { hasText: label }).first();
@@ -120,7 +140,6 @@ test('the route pill does not borrow run-state styling', async ({ page }) => {
    (see serve_fixture's _fixture_pricing_book), so nothing here depends on the
    host's cached catalog and no provider is ever contacted. */
 
-const SUBSCRIPTION_ROW = { hasText: 'fx-rb-fallback' };
 const API_ROW = { hasText: 'fx-usage-api-billed' };
 const FREE_ROW = { hasText: 'fx-usage-free-route' };
 const UNCLASSIFIED_ROW = { hasText: 'fx-usage-unclassified' };
@@ -128,7 +147,7 @@ const UNCLASSIFIED_ROW = { hasText: 'fx-usage-unclassified' };
 test('subscription usage shows an equivalent value, included billing, and zero cost', async ({ page }) => {
   /* The headline requirement from issue #42, and the one most likely to be
      got wrong: the value is worth showing, and it is not spend. */
-  const row = page.locator('.usage-row', SUBSCRIPTION_ROW);
+  const row = fallbackWorkerRow(page, 'codex-build');
   const money = row.locator('.usage-money');
 
   const estimate = money.locator('.usage-money-cell.is-estimate');
@@ -320,7 +339,7 @@ test('an API-billed row is not told it was never billed', async ({ page }) => {
   await expect(estimate).toContainText('reported separately');
   await expect(estimate).not.toContainText('Not a charge and not billed');
 
-  const included = page.locator('.usage-row', SUBSCRIPTION_ROW).locator('.usage-money-cell.is-estimate');
+  const included = fallbackWorkerRow(page, 'codex-build').locator('.usage-money-cell.is-estimate');
   await expect(included).toContainText('Not a charge and not billed');
 });
 
@@ -362,7 +381,7 @@ test('the window breakdown counts unclassified runs instead of dropping them', a
      why. The fixture seeds one run whose billing cannot be established. */
   const count = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-window-count');
   await expect(count).toContainText('billing unknown');
-  await expect(count).toContainText('7 run(s)');
+  await expect(count).toContainText('8 run(s)');
 });
 
 test('runs counted in no window at all are stated, not silently dropped', async ({ page, request, baseURL }) => {

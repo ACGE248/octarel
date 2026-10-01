@@ -13,6 +13,7 @@ from scripts.agents.control_plane.pricing import ModelPricing, PricingLookup
 from scripts.agents.control_plane.state import State
 from scripts.agents.control_plane.usage_ledger import (
     build_ledger_rows,
+    reconcile_usage_governance,
     record_usage_attempts,
 )
 from scripts.agents.control_plane.usage_policy import finalize_route_attempt
@@ -170,6 +171,55 @@ def test_real_project_adoption_completes_attribution_and_makes_row_visible():
     state._conn.rollback()
 
 
+def test_reconcile_completes_project_attribution_without_duplicating_run():
+    state = State(":memory:")
+    record = governance(attempt("run-1", "worker-a", tokens=(10, 2), cost_class="metered-configured"))
+    state.upsert_usage_governance(record)
+
+    assert reconcile_usage_governance(state) == 1
+    assert state.list_usage_ledger()[0]["project_id"] is None
+    state.upsert_task(
+        Task(
+            id="task-1",
+            task_ref="ENG-PC-05",
+            role="primary-implementation",
+            worker="worker-a",
+            project_id="project-a",
+        )
+    )
+
+    assert reconcile_usage_governance(state) == 0
+    rows = state.list_usage_ledger()
+    assert len(rows) == 1
+    assert rows[0]["project_id"] == "project-a"
+
+
+def test_orphan_reconcile_under_two_selected_projects_keeps_one_run():
+    state = State(":memory:")
+    orphan = governance(
+        attempt("orphan-run", "worker-a", tokens=(10, 2), cost_class="metered-configured"),
+        task_id=None,
+    )
+    state.upsert_usage_governance(orphan)
+
+    assert reconcile_usage_governance(state, project_id="project-a") == 1
+    assert reconcile_usage_governance(state, project_id="project-b") == 0
+    rows = state.list_usage_ledger()
+    assert len(rows) == 1
+    assert rows[0]["project_id"] == "project-a"
+
+
+def test_empty_project_identity_is_normalized_and_cannot_complete_attribution():
+    state = State(":memory:")
+    record = governance(attempt("run-1", "worker-a", tokens=(10, 2), cost_class="metered-configured"))
+
+    assert record_usage_attempts(state, record, project_id="  ") == 1
+    assert state.list_usage_ledger()[0]["project_id"] is None
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        state._conn.execute("UPDATE usage_ledger SET project_id = ''")
+    state._conn.rollback()
+
+
 def test_deleted_runbook_resolves_project_from_task_and_retains_ledger():
     state = State(":memory:")
     record = governance(attempt("run-1", "worker-a", tokens=(10, 2), cost_class="metered-configured"))
@@ -272,6 +322,82 @@ def test_legacy_run_without_token_evidence_is_attributed_with_unknown_evidence()
     assert row["metrics"]["actual_cost_usd"]["class"] == CLASS_UNKNOWN
 
 
+def test_legacy_multiple_workers_keep_each_run_without_reusing_record_tokens():
+    state = State(":memory:")
+    record = {
+        "runbook_id": "rb-legacy-multiple",
+        "task_id": "task-legacy-multiple",
+        "telemetry_quality": "exact",
+        "input_tokens": 40,
+        "output_tokens": 2,
+        "route_history": [
+            {"worker": "worker-a", "provider": "Provider", "model": "model"},
+            {"worker": "worker-b", "provider": "Provider", "model": "model"},
+        ],
+        "updated_at": NOW.isoformat(),
+    }
+
+    assert record_usage_attempts(state, record, project_id="p") == 2
+    entries = {entry["worker"]: entry for entry in state.list_usage_ledger(project_id="p")}
+    assert set(entries) == {"worker-a", "worker-b"}
+    earlier = build_ledger_rows([entries["worker-a"]], registry=registry(), pricing_book=FixedBook())[0]
+    newest = build_ledger_rows([entries["worker-b"]], registry=registry(), pricing_book=FixedBook())[0]
+    assert earlier["metrics"]["input_tokens"]["class"] == CLASS_UNKNOWN
+    assert earlier["metrics"]["input_tokens"]["value"] is None
+    assert newest["metrics"]["input_tokens"]["value"] == 40
+
+
+def test_opening_old_database_collapses_project_keyed_duplicate_runs(tmp_path):
+    database = tmp_path / "duplicates.db"
+    state = State(database)
+    state._conn.execute("DROP TRIGGER usage_ledger_no_update")
+    state._conn.execute("DROP TRIGGER usage_ledger_no_delete")
+    state._conn.execute("DROP INDEX idx_usage_ledger_run")
+    state._conn.execute(
+        "CREATE UNIQUE INDEX idx_usage_ledger_run ON usage_ledger (IFNULL(project_id, ''), run_id)"
+    )
+    payload = (
+        None,
+        None,
+        "task-1",
+        "rb-1",
+        "run-1",
+        None,
+        "worker-a",
+        "Provider",
+        "model",
+        NOW.isoformat(),
+        "{}",
+        "{}",
+        NOW.isoformat(),
+    )
+    state._conn.execute(
+        "INSERT INTO usage_ledger "
+        "(project_id, program_ref, task_id, runbook_id, run_id, session_id, worker, provider, "
+        "effective_model, occurred_at, source_record, source_attempt, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        payload,
+    )
+    state._conn.execute(
+        "INSERT INTO usage_ledger "
+        "(project_id, program_ref, task_id, runbook_id, run_id, session_id, worker, provider, "
+        "effective_model, occurred_at, source_record, source_attempt, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("project-a", *payload[1:]),
+    )
+    state._conn.commit()
+    state.close()
+
+    with State(database) as reopened:
+        rows = reopened.list_usage_ledger()
+        assert len(rows) == 1
+        assert rows[0]["project_id"] == "project-a"
+        index_sql = reopened._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_ledger_run'"
+        ).fetchone()["sql"]
+        assert "project_id" not in index_sql
+
+
 def test_rows_survive_state_store_restart(tmp_path):
     db = tmp_path / "state.db"
     with State(db) as state:
@@ -296,6 +422,28 @@ def test_event_emit_failure_cannot_undo_committed_usage(monkeypatch):
 
     assert record_usage_attempts(state, record, project_id="p") == 1
     assert state.list_usage_ledger(project_id="p")[0]["run_id"] == "run-1"
+
+
+def test_ledger_failure_cannot_escape_route_finalization(monkeypatch):
+    state = State(":memory:")
+    current = attempt("run-1", "worker-a", tokens=(10, 2), cost_class="metered-configured")
+    current["status"] = "RUNNING"
+    state.upsert_usage_governance(governance(current))
+    task = Task(
+        id="task-1",
+        task_ref="ENG-PC-05",
+        role="primary-implementation",
+        worker="worker-a",
+        state=TASK_SUCCEEDED,
+        result="PASS",
+        runbook_id="rb-1",
+        project_id="p",
+    )
+
+    monkeypatch.setattr(state, "append_usage_ledger", lambda row: (_ for _ in ()).throw(RuntimeError("bad row")))
+
+    assert finalize_route_attempt(state, task) is True
+    assert state.get_usage_governance("rb-1")["route_history"][0]["status"] == TASK_SUCCEEDED
 
 
 def test_unknown_provenance_and_unclassified_cost_remain_unknown():

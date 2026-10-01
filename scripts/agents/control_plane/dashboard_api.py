@@ -960,7 +960,7 @@ def create_app(
     def current_budget_progress(*, pricing_book: Any | None = None) -> list[dict[str, Any]]:
         """Safe presentation rows for enabled budgets in the selected project."""
 
-        _usage_ledger.reconcile_usage_governance(
+        _usage_ledger.reconcile_usage_governance_safely(
             ctx.state,
             project_id=ctx.selected_project_id,
             registry=ctx.registry,
@@ -2379,7 +2379,7 @@ def create_app(
         if ctx.selected_project_id is not None and project not in {None, ctx.selected_project_id}:
             raise HTTPException(status_code=404, detail="usage project is outside the selected project scope")
         selected_project = project or ctx.selected_project_id
-        _usage_ledger.reconcile_usage_governance(
+        _usage_ledger.reconcile_usage_governance_safely(
             ctx.state,
             project_id=ctx.selected_project_id,
             registry=ctx.registry,

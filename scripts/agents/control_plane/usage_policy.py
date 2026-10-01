@@ -347,7 +347,10 @@ def finalize_route_attempt(state, task: Task) -> bool:
 
     if not task.runbook_id:
         return False
-    record = state.get_usage_governance(task.runbook_id)
+    try:
+        record = state.get_usage_governance(task.runbook_id)
+    except Exception:  # noqa: BLE001 - malformed legacy telemetry cannot stop the daemon
+        return False
     if not record:
         return False
     history = list(record.get("route_history", []))
@@ -377,10 +380,13 @@ def finalize_route_attempt(state, task: Task) -> bool:
         state.upsert_usage_governance(record)
         from .usage_ledger import record_usage_attempts
 
-        record_usage_attempts(
-            state,
-            state.get_usage_governance(task.runbook_id) or record,
-            project_id=task.project_id,
-        )
+        try:
+            record_usage_attempts(
+                state,
+                state.get_usage_governance(task.runbook_id) or record,
+                project_id=task.project_id,
+            )
+        except Exception:  # noqa: BLE001 - route outcome is durable; ledger repair is lazy/retryable
+            pass
         return True
     return False

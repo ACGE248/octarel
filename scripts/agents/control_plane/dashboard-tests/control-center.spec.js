@@ -144,8 +144,11 @@ test('usage filters, truthful budget progress, attention, and run events share t
     page.waitForResponse((response) => response.url().includes('task=fx-rb-fallback-session')),
     task.selectOption('fx-rb-fallback-session'),
   ]);
-  await expect(page.locator('.usage-row')).toHaveCount(1);
-  await expect(page.locator('.usage-row').first()).toContainText('fx-rb-fallback');
+  const fallbackRows = page.locator('.usage-row', { hasText: 'fx-rb-fallback' });
+  await expect(page.locator('.usage-row')).toHaveCount(2);
+  await expect(fallbackRows).toHaveCount(2);
+  await expect(fallbackRows.filter({ hasText: 'claude-code' })).toContainText('UNKNOWN');
+  await expect(fallbackRows.filter({ hasText: 'codex-build' })).toContainText('MEASURED');
 
   await task.selectOption('');
   await Promise.all([
@@ -162,17 +165,26 @@ test('usage filters, truthful budget progress, attention, and run events share t
   await expect(page.locator('.usage-row').first().locator('.usage-row-identity')).toContainText('grok-4.6');
 
   const measuredZero = page.locator('.usage-budget', { hasText: 'fx-budget-zero-cash' });
-  const unknown = page.locator('.usage-budget', { hasText: 'fx-budget-quota-unknown' });
+  const unknownQuota = page.locator('.usage-budget', { hasText: 'fx-budget-quota-unknown' });
+  const unknownTokens = page.locator('.usage-budget.is-unknown', { hasText: 'fx-budget-token-unknown' });
   await expect(measuredZero).toContainText('Used: $0.00');
   await expect(measuredZero.locator('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '0');
-  await expect(unknown).toContainText('UNKNOWN');
-  await expect(unknown).toContainText('Confidence: UNKNOWN');
-  await expect(unknown.locator('[role="progressbar"]')).toHaveCount(0);
+  await expect(unknownQuota).toContainText('UNKNOWN');
+  await expect(unknownQuota).toContainText('Confidence: UNKNOWN');
+  await expect(unknownQuota.locator('[role="progressbar"]')).toHaveCount(0);
+
+  // A wider scope containing one legacy attempt with UNKNOWN token evidence
+  // must not display the trustworthy attempt's 152,110 tokens as a complete total.
+  await expect(unknownTokens).toContainText('Used: UNKNOWN / 200,000');
+  await expect(unknownTokens).toContainText('1 matching ledger row(s) have no trustworthy total_tokens source');
+  await expect(unknownTokens).toContainText('Confidence: UNKNOWN');
+  await expect(unknownTokens).not.toContainText('152,110');
+  await expect(unknownTokens.locator('[role="progressbar"]')).toHaveCount(0);
 
   const warning = page.locator('.usage-budget.is-warning', { hasText: 'fx-budget-token-warning' });
   const blocked = page.locator('.usage-budget.is-blocked', { hasText: 'fx-budget-attempt-block' });
   await expect(warning).toContainText('WARNING');
-  await expect(warning).toContainText('scope task:fx-rb-fallback-session');
+  await expect(warning).toContainText('scope run:fx-rb-fallback:attempt:2');
   await expect(blocked).toContainText('HARD BLOCK');
   await expect(blocked).toContainText('scope task:fx-rb-fallback-session');
 
@@ -188,14 +200,14 @@ test('usage filters, truthful budget progress, attention, and run events share t
   await expect(page.locator('#view-providers')).toBeVisible();
 
   await navTo(page, 'view-history');
-  await expect(page.locator('#events-list .budget-event-warning')).toContainText('WARNING · scope task:fx-rb-fallback-session');
+  await expect(page.locator('#events-list .budget-event-warning')).toContainText('WARNING · scope run:fx-rb-fallback:attempt:2');
   await expect(page.locator('#events-list .budget-event-blocked')).toContainText('HARD BLOCK · scope task:fx-rb-fallback-session');
 
   await navTo(page, 'view-runs');
   await page.getByRole('button', { name: 'View detail for Fixture budget evidence run' }).click();
   await expect(page.locator('#run-detail')).toContainText('fx-rb-budget');
   await expect(page.locator('#run-detail')).toContainText('Usage & budget evidence');
-  await expect(page.locator('#run-detail .budget-event-warning')).toContainText('scope task:fx-rb-fallback-session');
+  await expect(page.locator('#run-detail .budget-event-warning')).toContainText('scope run:fx-rb-fallback:attempt:2');
   await expect(page.locator('#run-detail .budget-event-blocked')).toContainText('scope task:fx-rb-fallback-session');
 });
 

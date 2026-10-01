@@ -239,6 +239,7 @@ CREATE TABLE IF NOT EXISTS usage_governance (
 CREATE TABLE IF NOT EXISTS usage_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT,
+    program_ref TEXT,
     task_id TEXT,
     runbook_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
@@ -253,7 +254,7 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_ledger_run
-    ON usage_ledger (IFNULL(project_id, ''), run_id);
+    ON usage_ledger (run_id);
 CREATE INDEX IF NOT EXISTS idx_usage_ledger_filters
     ON usage_ledger (project_id, task_id, provider, effective_model, occurred_at);
 CREATE TRIGGER IF NOT EXISTS usage_ledger_no_update
@@ -261,7 +262,9 @@ CREATE TRIGGER IF NOT EXISTS usage_ledger_no_update
     WHEN NOT (
         OLD.project_id IS NULL
         AND NEW.project_id IS NOT NULL
+        AND LENGTH(TRIM(NEW.project_id)) > 0
         AND NEW.id IS OLD.id
+        AND NEW.program_ref IS OLD.program_ref
         AND NEW.task_id IS OLD.task_id
         AND NEW.runbook_id IS OLD.runbook_id
         AND NEW.run_id IS OLD.run_id
@@ -615,8 +618,9 @@ SCHEMA_VERSION_SETTING = "schema_version"
 # Bumped whenever a migration step below changes the on-disk shape. 1 is the
 # implicit pre-ENG-CP-03 single-project schema; 2 adds the project registry and
 # project scoping; 3 adds ENG-PC-05's immutable usage ledger; 4 adds mutable
-# hierarchical usage-budget definitions.
-CURRENT_SCHEMA_VERSION = 4
+# hierarchical usage-budget definitions; 5 makes run identity global and keeps
+# durable program attribution on each ledger row.
+CURRENT_SCHEMA_VERSION = 5
 
 
 def project_scoped_setting_key(key: str, project_id: str | None) -> str:
@@ -689,7 +693,7 @@ class State:
             self._migrate_agent_sessions_columns()
             self._migrate_project_id_columns()
             self._migrate_events_columns()
-            self._migrate_usage_ledger_trigger()
+            self._migrate_usage_ledger()
             self._migrate_usage_budget_columns()
         except Exception:
             self._conn.rollback()
@@ -762,8 +766,8 @@ class State:
         )
 
     @_serialized
-    def _migrate_usage_ledger_trigger(self) -> None:
-        """Allow identity completion without weakening financial immutability.
+    def _migrate_usage_ledger(self) -> None:
+        """Upgrade run identity, durable program scope, and attribution guard.
 
         A legacy governance record can predate project selection, so refusing
         all updates would strand its promoted ledger row forever. Completing
@@ -772,18 +776,66 @@ class State:
         NULL-safe ``IS`` operator; money/token evidence in the source JSON,
         worker/model attribution, and timestamps remain append-only.
 
-        Dropping first upgrades databases opened by the initial ENG-PC-05
-        implementation, whose unconditional update trigger blocked adoption.
+        ``run_id`` is globally unique: current writers generate a UUID per
+        concrete launch, while legacy ids combine the globally unique runbook
+        primary key with an attempt ordinal. Earlier ENG-PC-05 trees incorrectly
+        included ``project_id`` in the unique key, so a later attribution could
+        duplicate a run. During upgrade the oldest row remains canonical, gains
+        a usable attribution from a duplicate when necessary, and every duplicate
+        is removed before the run-only unique index is installed.
         """
 
-        current = self._conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'usage_ledger_no_update'"
-        ).fetchone()
-        current_sql = str(current["sql"] or "") if current else ""
-        if "OLD.project_id IS NULL" in current_sql and "NEW.source_attempt IS OLD.source_attempt" in current_sql:
-            return
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(usage_ledger)")}
+        if "program_ref" not in columns:
+            self._conn.execute("ALTER TABLE usage_ledger ADD COLUMN program_ref TEXT")
 
         self._conn.execute("DROP TRIGGER IF EXISTS usage_ledger_no_update")
+        self._conn.execute("DROP TRIGGER IF EXISTS usage_ledger_no_delete")
+        self._conn.execute("DROP INDEX IF EXISTS idx_usage_ledger_run")
+
+        # Empty text is not an identity. Normalize historical instances before
+        # the stricter trigger is restored.
+        self._conn.execute("UPDATE usage_ledger SET project_id = NULL WHERE TRIM(project_id) = ''")
+        duplicates = self._conn.execute(
+            "SELECT run_id FROM usage_ledger GROUP BY run_id HAVING COUNT(*) > 1"
+        ).fetchall()
+        for duplicate in duplicates:
+            rows = self._conn.execute(
+                "SELECT id, project_id, program_ref FROM usage_ledger WHERE run_id = ? ORDER BY id",
+                (duplicate["run_id"],),
+            ).fetchall()
+            canonical = rows[0]
+            project_id = canonical["project_id"]
+            program_ref = canonical["program_ref"]
+            if project_id is None:
+                project_id = next((row["project_id"] for row in rows if row["project_id"]), None)
+            if program_ref is None:
+                program_ref = next((row["program_ref"] for row in rows if row["program_ref"]), None)
+            self._conn.execute(
+                "UPDATE usage_ledger SET project_id = ?, program_ref = ? WHERE id = ?",
+                (project_id, program_ref, canonical["id"]),
+            )
+            self._conn.execute(
+                "DELETE FROM usage_ledger WHERE run_id = ? AND id <> ?",
+                (duplicate["run_id"], canonical["id"]),
+            )
+
+        # Best-effort backfill while the mutable task row still exists. New
+        # writes always persist this value, so later task deletion cannot loosen
+        # a program budget.
+        task_rows = self._conn.execute(
+            "SELECT usage_ledger.id, tasks.task_ref FROM usage_ledger "
+            "JOIN tasks ON tasks.id = usage_ledger.task_id WHERE usage_ledger.program_ref IS NULL"
+        ).fetchall()
+        for row in task_rows:
+            stable_ref = str(row["task_ref"] or "").split(maxsplit=1)[0]
+            program_ref = stable_ref.rsplit("-", 1)[0] if "-" in stable_ref else stable_ref
+            if program_ref:
+                self._conn.execute(
+                    "UPDATE usage_ledger SET program_ref = ? WHERE id = ?", (program_ref, row["id"])
+                )
+
+        self._conn.execute("CREATE UNIQUE INDEX idx_usage_ledger_run ON usage_ledger (run_id)")
         self._conn.execute(
             """
             CREATE TRIGGER usage_ledger_no_update
@@ -791,7 +843,9 @@ class State:
             WHEN NOT (
                 OLD.project_id IS NULL
                 AND NEW.project_id IS NOT NULL
+                AND LENGTH(TRIM(NEW.project_id)) > 0
                 AND NEW.id IS OLD.id
+                AND NEW.program_ref IS OLD.program_ref
                 AND NEW.task_id IS OLD.task_id
                 AND NEW.runbook_id IS OLD.runbook_id
                 AND NEW.run_id IS OLD.run_id
@@ -806,6 +860,10 @@ class State:
             )
             BEGIN SELECT RAISE(ABORT, 'usage_ledger is append-only'); END
             """
+        )
+        self._conn.execute(
+            "CREATE TRIGGER usage_ledger_no_delete BEFORE DELETE ON usage_ledger "
+            "BEGIN SELECT RAISE(ABORT, 'usage_ledger is append-only'); END"
         )
 
     @_serialized
@@ -909,6 +967,11 @@ class State:
     @_serialized
     def adopt_unscoped_rows(self, project_id: str) -> dict[str, int]:
         """Assign every legacy ``project_id IS NULL`` row to ``project_id``.
+
+        This is only the one-time migration of a pre-registry database, whose
+        rows all came from its single implicit managed project. It must not be
+        used as a general attribution mechanism for heterogeneous NULL rows;
+        current writers resolve or retain per-run identity instead.
 
         Idempotent by construction: a second run matches nothing because the
         first already set every previously-NULL row. Restart-safe for the same
@@ -1486,7 +1549,8 @@ class State:
         """
 
         payload = {
-            "project_id": row.get("project_id"),
+            "project_id": (str(row["project_id"]).strip() or None) if row.get("project_id") else None,
+            "program_ref": row.get("program_ref"),
             "task_id": row.get("task_id"),
             "runbook_id": row["runbook_id"],
             "run_id": row["run_id"],
@@ -1501,23 +1565,30 @@ class State:
         }
         try:
             cursor = self._conn.execute(
-                "INSERT OR IGNORE INTO usage_ledger "
-                "(project_id, task_id, runbook_id, run_id, session_id, worker, provider, "
+                "INSERT INTO usage_ledger "
+                "(project_id, program_ref, task_id, runbook_id, run_id, session_id, worker, provider, "
                 "effective_model, occurred_at, source_record, source_attempt, created_at) "
-                "VALUES (:project_id, :task_id, :runbook_id, :run_id, :session_id, :worker, "
-                ":provider, :effective_model, :occurred_at, :source_record, :source_attempt, :created_at)",
+                "VALUES (:project_id, :program_ref, :task_id, :runbook_id, :run_id, :session_id, :worker, "
+                ":provider, :effective_model, :occurred_at, :source_record, :source_attempt, :created_at) "
+                "ON CONFLICT(run_id) DO NOTHING",
                 payload,
             )
             inserted = cursor.rowcount == 1
             stored = self._conn.execute(
-                "SELECT * FROM usage_ledger WHERE run_id = ? AND project_id IS ?",
-                (payload["run_id"], payload["project_id"]),
+                "SELECT * FROM usage_ledger WHERE run_id = ?", (payload["run_id"],)
             ).fetchone()
+            if stored is not None and stored["project_id"] is None and payload["project_id"] is not None:
+                self._conn.execute(
+                    "UPDATE usage_ledger SET project_id = ? WHERE run_id = ?",
+                    (payload["project_id"], payload["run_id"]),
+                )
+                stored = self._conn.execute(
+                    "SELECT * FROM usage_ledger WHERE run_id = ?", (payload["run_id"],)
+                ).fetchone()
         except sqlite3.IntegrityError:
             self._conn.rollback()
             stored = self._conn.execute(
-                "SELECT * FROM usage_ledger WHERE run_id = ? AND project_id IS ?",
-                (payload["run_id"], payload["project_id"]),
+                "SELECT * FROM usage_ledger WHERE run_id = ?", (payload["run_id"],)
             ).fetchone()
             if stored is None:
                 raise
