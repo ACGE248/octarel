@@ -174,7 +174,7 @@ test('usage filters, truthful budget progress, attention, and run events share t
   await expect(warning).toContainText('WARNING');
   await expect(warning).toContainText('scope task:fx-rb-fallback-session');
   await expect(blocked).toContainText('HARD BLOCK');
-  await expect(blocked).toContainText('scope global');
+  await expect(blocked).toContainText('scope task:fx-rb-fallback-session');
 
   await navTo(page, 'view-overview');
   const warningAttention = page.locator('#overview-attention-list [data-attention-kind="budget_warning"]');
@@ -188,14 +188,15 @@ test('usage filters, truthful budget progress, attention, and run events share t
   await expect(page.locator('#view-providers')).toBeVisible();
 
   await navTo(page, 'view-history');
-  await expect(page.locator('.budget-event-warning')).toContainText('WARNING · scope task:fx-rb-fallback-session');
-  await expect(page.locator('.budget-event-blocked')).toContainText('HARD BLOCK · scope global');
+  await expect(page.locator('#events-list .budget-event-warning')).toContainText('WARNING · scope task:fx-rb-fallback-session');
+  await expect(page.locator('#events-list .budget-event-blocked')).toContainText('HARD BLOCK · scope task:fx-rb-fallback-session');
 
   await navTo(page, 'view-runs');
-  await page.locator('[data-runbook-id="fx-rb-running"]').click();
+  await page.getByRole('button', { name: 'View detail for Fixture budget evidence run' }).click();
+  await expect(page.locator('#run-detail')).toContainText('fx-rb-budget');
   await expect(page.locator('#run-detail')).toContainText('Usage & budget evidence');
   await expect(page.locator('#run-detail .budget-event-warning')).toContainText('scope task:fx-rb-fallback-session');
-  await expect(page.locator('#run-detail .budget-event-blocked')).toContainText('scope global');
+  await expect(page.locator('#run-detail .budget-event-blocked')).toContainText('scope task:fx-rb-fallback-session');
 });
 
 test('System shows selected-project Graphify operational health without a second page', async ({ page }) => {

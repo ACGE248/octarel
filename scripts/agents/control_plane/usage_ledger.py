@@ -91,12 +91,14 @@ def record_usage_attempts(
     project_id: str | None = None,
     registry: Any = None,
 ) -> int:
-    """Append every attributable attempt in ``record`` that has usage evidence.
+    """Append every attributable attempt in ``record`` without inventing usage.
 
     New writers mark each real run with ``usage_recorded`` and attempt-scoped
     token fields.  For pre-ledger records, only the newest worker attempt may
     inherit the old runbook-level token fields; attributing those figures to
     earlier attempts would invent evidence the historical schema never kept.
+    The newest legacy attempt is still a real run when those fields are absent,
+    so it is recorded with UNKNOWN evidence rather than dropped.
     """
 
     history = record.get("route_history") or []
@@ -132,11 +134,6 @@ def record_usage_attempts(
             # UNKNOWN placeholders. Only genuinely legacy attempts (no run id)
             # may inherit the old record-level evidence.
             if attempt.get("run_id"):
-                continue
-            quality = str(record.get("telemetry_quality") or "unknown").lower()
-            if quality not in {"exact", "estimated"} and record.get("input_tokens") is None and record.get(
-                "output_tokens"
-            ) is None:
                 continue
         run_id = str(attempt.get("run_id") or f"{record['runbook_id']}:attempt:{index + 1}")
         session_id = attempt.get("session_id")

@@ -240,6 +240,38 @@ def test_live_new_run_is_not_frozen_from_governance_unknown_placeholders():
     assert state.list_usage_ledger(project_id="p") == []
 
 
+def test_legacy_run_without_token_evidence_is_attributed_with_unknown_evidence():
+    state = State(":memory:")
+    record = {
+        "runbook_id": "rb-legacy-unknown",
+        "task_id": "task-legacy-unknown",
+        "telemetry_quality": "unknown",
+        "input_tokens": None,
+        "output_tokens": None,
+        "route_history": [
+            {
+                "worker": "worker-a",
+                "provider": "Provider",
+                "model": "model",
+                "reason": "legacy route did not expose token counts",
+            }
+        ],
+        "updated_at": NOW.isoformat(),
+    }
+
+    assert record_usage_attempts(state, record, project_id="p") == 1
+    entry = state.list_usage_ledger(project_id="p")[0]
+    assert entry["run_id"] == "rb-legacy-unknown:attempt:1"
+    assert entry["worker"] == "worker-a"
+    assert entry["source_attempt"]["reason"] == "legacy route did not expose token counts"
+
+    row = build_ledger_rows([entry], registry=registry(), pricing_book=FixedBook())[0]
+    assert row["metrics"]["input_tokens"]["class"] == CLASS_UNKNOWN
+    assert row["metrics"]["input_tokens"]["value"] is None
+    assert row["metrics"]["output_tokens"]["class"] == CLASS_UNKNOWN
+    assert row["metrics"]["actual_cost_usd"]["class"] == CLASS_UNKNOWN
+
+
 def test_rows_survive_state_store_restart(tmp_path):
     db = tmp_path / "state.db"
     with State(db) as state:

@@ -671,7 +671,7 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
         )
 
     # ENG-PC-05 scope C: exercise every truthful budget presentation path.
-    # The token budget is a warning, the global attempt budget is a hard block,
+    # The token budget is a warning, the task attempt budget is a hard block,
     # the subscription cash budget has a measured zero, and quota reserve stays
     # UNKNOWN because the fixture has no authoritative provider quota source.
     for budget in (
@@ -681,9 +681,9 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             "limit_value": 200_000, "warning_fraction": 0.75,
         },
         {
-            "id": "fx-budget-attempt-block", "scope_type": "global",
-            "scope_key": None, "constraint_type": "attempts",
-            "limit_value": 1, "warning_fraction": 0.8,
+            "id": "fx-budget-attempt-block", "scope_type": "task",
+            "scope_key": "fx-rb-fallback-session", "constraint_type": "attempts",
+            "limit_value": 0, "warning_fraction": 0.8,
         },
         {
             "id": "fx-budget-zero-cash", "scope_type": "task",
@@ -692,25 +692,49 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
         },
         {
             "id": "fx-budget-quota-unknown", "scope_type": "provider",
-            "scope_key": "xAI", "constraint_type": "provider_quota_reserve",
+            # Presentation-only provider scope: no configured route uses this
+            # fixture identity, so UNKNOWN progress cannot veto an unrelated
+            # dry-run admission while still exercising truthful UNKNOWN UI.
+            "scope_key": "Fixture Provider", "constraint_type": "provider_quota_reserve",
             "limit_value": 10, "warning_fraction": 0.8,
         },
     ):
         state.upsert_usage_budget(budget)
 
+    # Keep scope C's synthetic budget evidence off the ENG-PC-04 run whose
+    # event ordering and content are pinned independently.  This runbook is a
+    # presentation fixture only: it shares the budgeted task because the
+    # events describe that task, but owns its own run/event sequence.
+    budget_rb = Runbook(
+        id="fx-rb-budget",
+        name="Fixture budget evidence run",
+        preset="test-fix",
+        objective=test_fix_preset.objective_template.format(source_ref="ENG-PC-05"),
+        source_ref="ENG-PC-05",
+        branch=FIXTURE_BRANCH,
+        worktree=str(root),
+        parent_worker="codex-build",
+        max_duration_minutes=120,
+        phases=test_fix_preset.phases,
+        status="SUCCEEDED",
+        task_id="fx-rb-fallback-session",
+        report_markdown="# Budget evidence fixture\n",
+    )
+    state.upsert_runbook(budget_rb)
+
     for status, event_type, level, budget_id, scope in (
         ("WARNING", "usage.budget_warning", "warning", "fx-budget-token-warning", "task:fx-rb-fallback-session"),
-        ("BLOCKED", "usage.budget_blocked", "error", "fx-budget-attempt-block", "global"),
+        ("BLOCKED", "usage.budget_blocked", "error", "fx-budget-attempt-block", "task:fx-rb-fallback-session"),
     ):
         state.record_run_event(
             RunEvent(
-                run_id="fx-rb-running",
+                run_id=budget_rb.id,
                 event_class="usage",
                 event_type=event_type,
                 source="control_plane.usage_budgets",
                 provenance="MEASURED",
                 message=f"usage budget {budget_id} at {scope} is {status}",
-                task_id="fx-rb-running-session",
+                task_id=budget_rb.task_id,
                 level=level,
                 data={
                     "status": status,
