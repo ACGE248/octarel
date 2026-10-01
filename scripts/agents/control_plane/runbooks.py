@@ -1140,7 +1140,9 @@ def retry_runbook(
             task_id=task.id,
             task_ref=stable_session_task_ref(runbook),
             run_id=runbook.id,
-            is_fallback=True,
+            # Fallback budgets count automatically selected replacements only,
+            # matching the durable route-attempt ``automatic`` predicate.
+            is_fallback=automatic,
         ),
     )
     if not budget.allowed:

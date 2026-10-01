@@ -21,17 +21,22 @@ from scripts.agents.control_plane.usage_budgets import (
     CONSTRAINT_FALLBACKS,
     CONSTRAINT_METERED_CASH,
     CONSTRAINT_PROVIDER_QUOTA_RESERVE,
+    CONSTRAINT_SEMANTICS,
     CONSTRAINT_TOKENS,
+    CONSTRAINT_TYPES,
     CONSTRAINT_WALL_CLOCK,
     PROGRESS_BASIS,
     SCOPE_GLOBAL,
     SCOPE_PROGRAM,
     SCOPE_PROVIDER,
+    SCOPE_RUN,
+    SCOPE_SESSION,
     SCOPE_TASK,
     STATUS_BLOCKED,
     STATUS_UNKNOWN,
     STATUS_WARNING,
     BudgetContext,
+    context_for_task,
     emit_decision,
     evaluate,
     progress,
@@ -338,14 +343,19 @@ def test_each_consumption_budget_allows_n_units_and_blocks_the_next():
         (CONSTRAINT_TOKENS, _attempt(tokens=(1, 0)), 0.0, 1.0),
         (CONSTRAINT_WALL_CLOCK, _attempt(tokens=(0, 0)), 0.0, 1.0),
         (CONSTRAINT_ATTEMPTS, _attempt(tokens=(0, 0)), 1.0, 2.0),
-        (CONSTRAINT_FALLBACKS, _attempt(tokens=(0, 0), automatic=True), 0.0, 1.0),
+        (CONSTRAINT_FALLBACKS, _attempt(tokens=(0, 0), automatic=True), 1.0, 2.0),
     )
     for constraint, incurred, nth_value, next_value in cases:
         state = State(":memory:")
         registry = _registry(_worker())
         _budget(state, constraint, constraint=constraint, limit=1)
 
-        nth = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+        nth = evaluate(
+            state,
+            registry=registry,
+            context=_context(fallback=constraint == CONSTRAINT_FALLBACKS),
+            pricing_book=FixedBook(),
+        )
         assert nth.allowed is True, constraint
         assert nth.evaluations[0]["value"] == nth_value, constraint
 
@@ -353,10 +363,137 @@ def test_each_consumption_budget_allows_n_units_and_blocks_the_next():
             incurred["started_at"] = "2026-09-26T12:00:59+00:00"
         _record(state, incurred)
         next_attempt = evaluate(
-            state, registry=registry, context=_context(), pricing_book=FixedBook()
+            state,
+            registry=registry,
+            context=_context(fallback=constraint == CONSTRAINT_FALLBACKS),
+            pricing_book=FixedBook(),
         )
         assert next_attempt.status == STATUS_BLOCKED, constraint
         assert next_attempt.evaluations[0]["value"] == next_value, constraint
+
+
+def test_every_constraint_declares_whether_it_includes_the_proposed_unit():
+    assert set(CONSTRAINT_SEMANTICS) == CONSTRAINT_TYPES
+
+
+def test_fallback_budget_allows_the_first_automatic_fallback_and_blocks_the_second():
+    registry = _registry(_worker())
+
+    zero = State(":memory:")
+    _budget(zero, "none", constraint=CONSTRAINT_FALLBACKS, limit=0)
+    blocked_first = evaluate(
+        zero, registry=registry, context=_context(fallback=True), pricing_book=FixedBook()
+    )
+    assert blocked_first.status == STATUS_BLOCKED
+    assert blocked_first.evaluations[0]["value"] == 1.0
+
+    one = State(":memory:")
+    _budget(one, "one", constraint=CONSTRAINT_FALLBACKS, limit=1)
+    allowed_first = evaluate(
+        one, registry=registry, context=_context(fallback=True), pricing_book=FixedBook()
+    )
+    assert allowed_first.allowed is True
+    assert allowed_first.evaluations[0]["value"] == 1.0
+
+    _record(one, _attempt(automatic=True))
+    blocked_second = evaluate(
+        one, registry=registry, context=_context(fallback=True), pricing_book=FixedBook()
+    )
+    assert blocked_second.status == STATUS_BLOCKED
+    assert blocked_second.evaluations[0]["value"] == 2.0
+
+
+def test_only_an_accepted_automatic_fallback_contributes_to_fallback_usage():
+    rejected = Task(
+        id="task-1",
+        task_ref="ENG-PC-05",
+        role="primary-implementation",
+        worker="worker",
+        project_id="project-a",
+        fallback_automatic=False,
+    )
+    accepted = Task(
+        id="task-1",
+        task_ref="ENG-PC-05",
+        role="primary-implementation",
+        worker="worker",
+        project_id="project-a",
+        fallback_automatic=True,
+    )
+    assert context_for_task(rejected, provider="Provider").is_fallback is False
+    assert context_for_task(accepted, provider="Provider").is_fallback is True
+
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _record(state, _attempt(run_id="rejected", automatic=False))
+    _record(state, _attempt(run_id="accepted", automatic=True))
+    _budget(state, "fallbacks", constraint=CONSTRAINT_FALLBACKS, limit=10)
+
+    rejected_decision = evaluate(
+        state,
+        registry=registry,
+        context=context_for_task(rejected, provider="Provider"),
+        pricing_book=FixedBook(),
+    )
+    accepted_decision = evaluate(
+        state,
+        registry=registry,
+        context=context_for_task(accepted, provider="Provider"),
+        pricing_book=FixedBook(),
+    )
+    assert rejected_decision.evaluations[0]["value"] == 1.0
+    assert accepted_decision.evaluations[0]["value"] == 2.0
+
+
+def test_run_and_session_scopes_match_durable_aliases_without_native_ids():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _record(state, _attempt(run_id="ledger-run-uuid"))
+    task = state.get_task("task-1")
+    assert task is not None
+    task.runbook_id = "runbook-1"
+    context = context_for_task(task, provider="Provider")
+    assert context.run_id == "runbook-1"
+    assert context.session_id is None
+
+    for scope, key in ((SCOPE_RUN, "runbook-1"), (SCOPE_SESSION, "task-1")):
+        _budget(state, scope, scope=scope, key=key, limit=1)
+        decision = evaluate(state, registry=registry, context=context, pricing_book=FixedBook())
+        evaluation = next(item for item in decision.evaluations if item["budget_id"] == scope)
+        assert evaluation["value"] == 2.0
+        assert evaluation["status"] == STATUS_BLOCKED
+
+
+def test_provider_quota_reserve_allows_above_the_floor_and_blocks_at_it():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _budget(
+        state,
+        "quota",
+        scope=SCOPE_PROVIDER,
+        key="Provider",
+        constraint=CONSTRAINT_PROVIDER_QUOTA_RESERVE,
+        limit=10,
+    )
+    above = evaluate(
+        state,
+        registry=registry,
+        context=_context(),
+        pricing_book=FixedBook(),
+        quota_sources={"Provider": {"remaining": 11, "class": "MEASURED", "source": "test"}},
+    )
+    assert above.allowed is True
+    assert above.evaluations[0]["remaining"] == 1.0
+
+    at_floor = evaluate(
+        state,
+        registry=registry,
+        context=_context(),
+        pricing_book=FixedBook(),
+        quota_sources={"Provider": {"remaining": 10, "class": "MEASURED", "source": "test"}},
+    )
+    assert at_floor.status == STATUS_BLOCKED
+    assert at_floor.evaluations[0]["remaining"] == 0.0
 
 
 def test_malformed_ledger_source_attempt_is_an_unknown_veto(tmp_path):

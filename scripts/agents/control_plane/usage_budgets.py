@@ -43,6 +43,24 @@ CONSTRAINT_TYPES = frozenset(
     }
 )
 
+
+@dataclass(frozen=True)
+class ConstraintSemantics:
+    includes_proposed_unit: bool
+
+
+# Every constraint must declare whether enforcement evidence includes the unit
+# currently being proposed. This controls both evidence construction and the
+# hard-limit comparison; adding a constraint without choosing is a test failure.
+CONSTRAINT_SEMANTICS = {
+    CONSTRAINT_METERED_CASH: ConstraintSemantics(includes_proposed_unit=False),
+    CONSTRAINT_TOKENS: ConstraintSemantics(includes_proposed_unit=False),
+    CONSTRAINT_WALL_CLOCK: ConstraintSemantics(includes_proposed_unit=False),
+    CONSTRAINT_ATTEMPTS: ConstraintSemantics(includes_proposed_unit=True),
+    CONSTRAINT_FALLBACKS: ConstraintSemantics(includes_proposed_unit=True),
+    CONSTRAINT_PROVIDER_QUOTA_RESERVE: ConstraintSemantics(includes_proposed_unit=False),
+}
+
 STATUS_OK = "OK"
 STATUS_WARNING = "WARNING"
 STATUS_BLOCKED = "BLOCKED"
@@ -132,6 +150,16 @@ def _source_attempt(entry: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return source_attempt if isinstance(source_attempt, Mapping) else None
 
 
+def _is_automatic_fallback(value: Any) -> bool:
+    """True only when an automatic replacement was actually selected.
+
+    ``False`` means fallback was considered/claimed but no automatic replacement
+    was accepted, so it consumes neither proposed nor durable fallback budget.
+    """
+
+    return value is True
+
+
 def _entry_context(state, entry: Mapping[str, Any]) -> BudgetContext:
     task = state.get_task(str(entry.get("task_id") or "")) if entry.get("task_id") else None
     source_attempt = _source_attempt(entry)
@@ -143,7 +171,7 @@ def _entry_context(state, entry: Mapping[str, Any]) -> BudgetContext:
         run_id=entry.get("run_id"),
         runbook_id=entry.get("runbook_id"),
         session_id=entry.get("session_id"),
-        is_fallback=bool(source_attempt and source_attempt.get("automatic")),
+        is_fallback=_is_automatic_fallback(source_attempt.get("automatic") if source_attempt else None),
         durable_program_ref=entry.get("program_ref"),
     )
 
@@ -206,8 +234,11 @@ def _rows(entries: list[dict[str, Any]], *, registry: Any, pricing_book: Any) ->
 def _evidence(
     definition: Mapping[str, Any], entries: list[dict[str, Any]], rows: list[dict[str, Any]],
     *, context: BudgetContext, quota_sources: Mapping[str, Mapping[str, Any]],
+    include_proposed: bool,
 ) -> tuple[float | None, str, str]:
     constraint = definition["constraint_type"]
+    semantics = CONSTRAINT_SEMANTICS[constraint]
+    includes_proposed = include_proposed and semantics.includes_proposed_unit
     if constraint == CONSTRAINT_METERED_CASH:
         # The route-blind API-equivalent estimate is intentionally never read.
         return _sum_metric(rows, "actual_cost_usd")
@@ -216,12 +247,26 @@ def _evidence(
     if constraint == CONSTRAINT_WALL_CLOCK:
         return _sum_metric(rows, "duration_seconds")
     if constraint == CONSTRAINT_ATTEMPTS:
-        return float(len(entries) + 1), CLASS_MEASURED, "ledger attempts + proposed launch"
-    if constraint == CONSTRAINT_FALLBACKS:
-        used = sum(1 for entry in entries if (_source_attempt(entry) or {}).get("automatic"))
-        return float(used + (1 if context.is_fallback else 0)), CLASS_MEASURED, (
-            "ledger automatic fallbacks + proposed fallback"
+        proposed = 1 if includes_proposed else 0
+        source = (
+            "ledger attempts + proposed launch"
+            if proposed
+            else "count of matching append-only ledger attempts"
         )
+        return float(len(entries) + proposed), CLASS_MEASURED, source
+    if constraint == CONSTRAINT_FALLBACKS:
+        used = sum(
+            1
+            for entry in entries
+            if _is_automatic_fallback((_source_attempt(entry) or {}).get("automatic"))
+        )
+        proposed = 1 if includes_proposed and context.is_fallback else 0
+        source = (
+            "ledger automatic fallbacks + proposed automatic fallback"
+            if proposed
+            else "count of matching automatic fallbacks in the append-only ledger"
+        )
+        return float(used + proposed), CLASS_MEASURED, source
     source = quota_sources.get(context.provider or "")
     if not source or source.get("class") not in {CLASS_MEASURED, CLASS_DERIVED}:
         return None, CLASS_UNKNOWN, "no trustworthy local provider quota source exists"
@@ -298,10 +343,11 @@ def evaluate(
             continue
         rows = _rows(entries, registry=registry, pricing_book=book)
         value, evidence_class, source = _evidence(
-            definition, entries, rows, context=context, quota_sources=quota
+            definition, entries, rows, context=context, quota_sources=quota, include_proposed=True
         )
         limit = float(definition["limit_value"])
         constraint = definition["constraint_type"]
+        semantics = CONSTRAINT_SEMANTICS[constraint]
         if value is None:
             status = STATUS_UNKNOWN
             remaining = None
@@ -309,10 +355,9 @@ def evaluate(
             remaining = (value - limit) if constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE else (limit - value)
             if constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE:
                 breached = value <= limit
-            elif constraint == CONSTRAINT_ATTEMPTS:
-                # Attempts includes the proposed launch, so that proposed unit
-                # breaches only above the limit. Incurred-only constraints use
-                # >= below; their next unit is not already present in ``value``.
+            elif semantics.includes_proposed_unit:
+                # The proposed unit is already present in ``value``, so it is
+                # permitted when it exactly fills the configured allowance.
                 breached = value > limit
             else:
                 # Reaching an incurred-usage threshold exhausts it. In
@@ -385,6 +430,7 @@ PROGRESS_BASIS = (
     "usage already incurred; enforcement additionally counts the launch or fallback being proposed, "
     "so a budget with headroom here can still refuse the next launch"
 )
+INCURRED_PROGRESS_BASIS = "usage already incurred; enforcement compares this same incurred evidence"
 
 
 def progress(
@@ -455,25 +501,17 @@ def progress(
             continue
         rendered = _rows(entries, registry=registry, pricing_book=book)
         constraint = definition["constraint_type"]
-        if constraint == CONSTRAINT_ATTEMPTS:
-            value, evidence_class, source = (
-                float(len(entries)), CLASS_MEASURED, "count of matching append-only ledger attempts"
-            )
-        elif constraint == CONSTRAINT_FALLBACKS:
-            value, evidence_class, source = (
-                float(sum(1 for entry in entries if (_source_attempt(entry) or {}).get("automatic"))),
-                CLASS_MEASURED,
-                "count of matching automatic fallbacks in the append-only ledger",
-            )
-        else:
-            provider = definition.get("scope_key") if definition["scope_type"] == SCOPE_PROVIDER else None
-            value, evidence_class, source = _evidence(
-                definition,
-                entries,
-                rendered,
-                context=BudgetContext(project_id, provider, None, None, None),
-                quota_sources=quota,
-            )
+        semantics = CONSTRAINT_SEMANTICS[constraint]
+        provider = definition.get("scope_key") if definition["scope_type"] == SCOPE_PROVIDER else None
+        value, evidence_class, source = _evidence(
+            definition,
+            entries,
+            rendered,
+            context=BudgetContext(project_id, provider, None, None, None),
+            quota_sources=quota,
+            include_proposed=False,
+        )
+        basis = PROGRESS_BASIS if semantics.includes_proposed_unit else INCURRED_PROGRESS_BASIS
 
         limit = float(definition["limit_value"])
         remaining: float | None = None
@@ -516,7 +554,7 @@ def progress(
                 "progress_percent": progress_percent,
                 "evidence_class": evidence_class,
                 "source": source,
-                "basis": PROGRESS_BASIS,
+                "basis": basis,
             }
         )
     return rows
@@ -557,14 +595,15 @@ def context_for_task(task: Any, *, provider: str | None = None) -> BudgetContext
         task_ref=task.task_ref,
         run_id=task.runbook_id,
         runbook_id=task.runbook_id,
-        is_fallback=task.fallback_automatic is not None,
+        is_fallback=_is_automatic_fallback(task.fallback_automatic),
     )
 
 
 __all__ = [
     "BudgetContext", "BudgetDecision", "CONSTRAINT_ATTEMPTS", "CONSTRAINT_FALLBACKS",
     "CONSTRAINT_METERED_CASH", "CONSTRAINT_PROVIDER_QUOTA_RESERVE", "CONSTRAINT_TOKENS",
-    "CONSTRAINT_WALL_CLOCK", "SCOPE_GLOBAL", "SCOPE_PROGRAM", "SCOPE_PROVIDER", "SCOPE_RUN",
+    "CONSTRAINT_SEMANTICS", "CONSTRAINT_TYPES", "CONSTRAINT_WALL_CLOCK", "SCOPE_GLOBAL",
+    "SCOPE_PROGRAM", "SCOPE_PROVIDER", "SCOPE_RUN",
     "SCOPE_SESSION", "SCOPE_TASK", "STATUS_BLOCKED", "STATUS_OK", "STATUS_UNKNOWN",
     "STATUS_WARNING", "context_for_task", "emit_decision", "evaluate", "progress", "save_definition",
 ]

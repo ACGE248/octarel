@@ -1543,7 +1543,7 @@ class State:
     def append_usage_ledger(self, row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Append one run exactly once, returning ``(stored_row, inserted)``.
 
-        The expression unique index is the cross-process idempotency guard.
+        The plain unique index on ``run_id`` is the cross-process idempotency guard.
         A replay/conflict is an expected no-op and is contained here rather
         than leaking ``sqlite3.IntegrityError`` into the daemon.
         """
