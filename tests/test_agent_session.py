@@ -173,7 +173,18 @@ def test_each_identity_change_has_its_own_specific_reason(field, value, reason):
     assert changed.mode == agent_session.MODE_FRESH
     assert changed.session_id != first.session_id
     assert changed.reason.startswith(reason)
-    assert "stored=" in changed.reason and "current=" in changed.reason
+    if field in agent_session._VALUE_WITHHELD_COMPONENTS:
+        # Path-bearing component: the reason still names which component changed,
+        # but neither value appears, because this string is persisted on the row
+        # and read back by the dashboard API (see
+        # test_worktree_invalidation_reason_names_the_component_without_the_path).
+        assert "stored=" not in changed.reason and "current=" not in changed.reason
+        assert str(identity().worktree_path) not in changed.reason
+        assert value not in changed.reason
+    else:
+        # Every other component's values are safe and stay, so the reason is
+        # actionable rather than merely categorical.
+        assert "stored=" in changed.reason and "current=" in changed.reason
 
 
 def test_provider_fallback_starts_a_new_provider_session():

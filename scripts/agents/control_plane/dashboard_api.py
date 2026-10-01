@@ -44,7 +44,9 @@ from . import manager_chat as _manager_chat
 from . import pricing as _pricing
 from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
+from .agent_session import MODE_FRESH, age_seconds, request_forced_fresh
 from .commands import CommandContext, CommandError, apply_command
+from .models import utc_now_iso
 from .operations import (
     AppLifecycleManager,
     OperationError,
@@ -1883,7 +1885,7 @@ def create_app(
     def run_evidence(limit: int = 100) -> list[dict[str, Any]]:
         return delegation_evidence(ctx.repo_root, limit=max(1, min(limit, 100)))
 
-    def _authorized_task_id(task_id: str) -> None:
+    def _authorized_task_id(task_id: str) -> Any:
         # project/run/worker-scoped authorization only (OCTAREL-UI-01): the
         # requested task must be one THIS PROJECT's own state actually knows
         # about. An id that resolves to no task -- foreign, stale, or made up
@@ -1899,8 +1901,150 @@ def create_app(
         # wrong field and either 404 every legitimate request or (if a
         # task_ref ever collided with another task's internal id) authorize
         # the wrong task's evidence.
-        if not any(item.task_ref == task_id for item in scoped_tasks()):
+        task = next((item for item in scoped_tasks() if item.task_ref == task_id), None)
+        if task is None:
             raise HTTPException(status_code=404, detail=f"unknown task {task_id!r}")
+        return task
+
+    def _session_fact(
+        value: Any = None,
+        *,
+        klass: str = "NOT_REPORTED",
+        reason: str | None = None,
+        unit: str | None = None,
+    ) -> dict[str, Any]:
+        """One inspector fact and how it was established.
+
+        ``NOT_REPORTED`` is intentionally distinct from a measured false/zero
+        value. This small read model follows the dashboard's typed metric
+        convention without exposing the persistence row that backs it.
+        """
+
+        return {"value": value, "class": klass, "reason": reason, "unit": unit}
+
+    def _session_view(task_id: str, worker: str) -> dict[str, Any]:
+        # Authorization must precede the registry and persistence reads. In
+        # particular, an unknown/foreign task may not be used as an oracle for
+        # whether a worker or session row exists.
+        task = _authorized_task_id(task_id)
+        adapter = ctx.registry.workers.get(worker)
+        if adapter is None:
+            raise HTTPException(status_code=404, detail=f"unknown worker {worker!r}")
+        capabilities = capabilities_for(adapter)
+        project_id = task.project_id or ctx.selected_project_id
+        session = (
+            ctx.state.get_active_agent_session(project_id=project_id, task_id=task_id, worker=worker)
+            if project_id is not None
+            else None
+        )
+
+        if session is None:
+            mode = _session_fact(reason="no active session is recorded for this task and worker")
+            age = _session_fact(reason="no active session is recorded for this task and worker", unit="seconds")
+            continuation_count = _session_fact(reason="no active session is recorded for this task and worker")
+            last_activity = _session_fact(reason="no active session is recorded for this task and worker")
+            invalidation = _session_fact(reason="no active session decision is recorded")
+        else:
+            mode = _session_fact(session["last_mode"], klass="MEASURED")
+            session_age = age_seconds(str(session["created_at"]), utc_now_iso())
+            age = _session_fact(
+                session_age,
+                klass="MEASURED" if session_age is not None else "NOT_REPORTED",
+                reason=None if session_age is not None else "stored session timestamps could not be parsed",
+                unit="seconds",
+            )
+            continuation_count = _session_fact(int(session["continuation_count"]), klass="MEASURED")
+            last_activity = _session_fact(str(session["last_activity_at"]), klass="MEASURED")
+            # The stored reason is deliberately specific: agent_session's
+            # component-wise comparison names WHICH component invalidated resume
+            # rather than only that something changed. Path-bearing component
+            # values are withheld at the source (see
+            # agent_session._VALUE_WITHHELD_COMPONENTS), so the stored string is
+            # safe to surface here as-is. Note redact_text would NOT have made it
+            # safe: it redacts secrets, not filesystem paths -- the event timeline
+            # is clean because run_events scrubs host paths in its own envelope,
+            # a protection this endpoint does not pass through.
+            invalidation = (
+                _session_fact(str(session["reason"]), klass="MEASURED")
+                if session["last_mode"] == MODE_FRESH
+                else _session_fact(reason="the last session decision was not FRESH")
+            )
+
+        resume_reason = capabilities.resume_unavailable_reason
+        resume = _session_fact(
+            capabilities.can_resume_session,
+            klass="DERIVED",
+            reason=resume_reason,
+        )
+        if not capabilities.can_resume_session:
+            control_reason = resume_reason or "this worker does not support native resume"
+        elif session is None:
+            control_reason = "no active session is recorded for this task and worker"
+        elif session["force_fresh_next"]:
+            control_reason = "a fresh start is already requested for the next attempt"
+        else:
+            control_reason = None
+
+        # Deliberately return a projection assembled field-by-field. The raw
+        # row contains worktree_path and identity material, while its opaque
+        # continuation payload is excluded even from State's public row.
+        return {
+            "task": task_id,
+            "worker": worker,
+            "mode": mode,
+            "session_age_seconds": age,
+            "continuation_count": continuation_count,
+            "last_activity": last_activity,
+            "resume_capability": resume,
+            "invalidation_reason": invalidation,
+            "start_fresh_next_attempt": {
+                "enabled": control_reason is None,
+                "reason": control_reason,
+            },
+        }
+
+    @app.get("/api/agent-sessions/{task_id}/{worker}")
+    def agent_session_detail(task_id: str, worker: str) -> dict[str, Any]:
+        """Safe task-scoped session facts for the existing Run Detail panel."""
+
+        return _session_view(task_id, worker)
+
+    @app.post("/api/agent-sessions/{task_id}/{worker}/start-fresh")
+    def agent_session_start_fresh(task_id: str, worker: str, request: Request) -> dict[str, Any]:
+        """Force exactly this task/worker session's next attempt to start fresh."""
+
+        target = f"{task_id}/{worker}"
+        try:
+            view = _session_view(task_id, worker)
+            control = view["start_fresh_next_attempt"]
+            if not control["enabled"]:
+                raise HTTPException(status_code=409, detail=control["reason"])
+            task = _authorized_task_id(task_id)
+            project_id = task.project_id or ctx.selected_project_id
+            if project_id is None or not request_forced_fresh(
+                ctx.state,
+                project_id=project_id,
+                task_id=task_id,
+                worker=worker,
+            ):
+                raise HTTPException(status_code=409, detail="the active session changed before the request was applied")
+        except Exception as exc:
+            _record_remote_audit(
+                ctx,
+                request,
+                verb="agent_session_start_fresh",
+                target=target,
+                result=f"FAIL: {type(exc).__name__}",
+            )
+            raise
+        _record_remote_audit(
+            ctx,
+            request,
+            verb="agent_session_start_fresh",
+            target=target,
+            result="OK",
+        )
+        return {"status": "REQUESTED", "task": task_id, "worker": worker}
 
     @app.get("/api/agent-activity/{task_id}/{worker}")
     def agent_activity_attempts(task_id: str, worker: str) -> dict[str, Any]:

@@ -1278,6 +1278,11 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .run-detail-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 10px; margin: 0 0 16px; font-size: 12px; }
 .run-detail-facts dt { color: var(--muted); }
 .run-detail-facts dd { margin: 0; overflow-wrap: anywhere; }
+.session-fact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 7px; min-width: 0; }
+.session-fact-class { color: var(--muted); font-size: 10px; letter-spacing: 0.04em; }
+.run-detail-session-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: -4px 0 16px; min-width: 0; }
+.run-detail-session-control .hint { flex: 1 1 220px; margin: 0; overflow-wrap: anywhere; }
+.run-detail-session-control button { flex: 0 1 auto; max-width: 100%; white-space: normal; }
 .run-detail-events { max-height: 440px; }
 .events-list li.event-group-lifecycle { border-left: 3px solid var(--ok); padding-left: 8px; }
 .events-list li.event-group-model_tool { border-left: 3px solid var(--info); padding-left: 8px; }

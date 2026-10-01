@@ -4473,6 +4473,34 @@
     renderRunDetail(selected);
   }
 
+  function sessionAge(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value)) return "NOT_REPORTED";
+    if (value < 60) return `${Math.round(value)}s`;
+    if (value < 3600) return `${Math.round(value / 60)}m`;
+    if (value < 86400) return `${Math.round(value / 3600)}h`;
+    return `${Math.round(value / 86400)}d`;
+  }
+
+  function renderSessionFact(target, cell, formatter = (value) => String(value)) {
+    const fact = cell || { value: null, class: "NOT_REPORTED" };
+    const established = ["MEASURED", "DERIVED"].includes(fact.class)
+      && fact.value !== null && fact.value !== undefined;
+    target.innerHTML = "";
+    target.appendChild(el("span", {
+      class: "session-fact-value",
+      text: established ? formatter(fact.value) : "NOT_REPORTED",
+      title: fact.reason || "",
+    }));
+    if (established) {
+      target.appendChild(el("span", {
+        class: "session-fact-class",
+        text: fact.class,
+        title: fact.reason || "",
+      }));
+    }
+  }
+
   function renderRunDetail(run) {
     const root = document.getElementById("run-detail");
     if (!root) return;
@@ -4482,29 +4510,94 @@
       return;
     }
     root.setAttribute("tabindex", "-1");
+    root.dataset.runId = run.id;
     const linkedTask = (state.tasks || []).find((task) => task.id === run.task_id);
+    const taskRef = linkedTask?.task_ref || run.task_id || null;
+    const worker = linkedTask?.worker || run.parent_worker || null;
     const events = (state.events || []).filter((event) =>
       event.run_id === run.id
       || event.task_id === run.task_id
       || (linkedTask && [linkedTask.id, linkedTask.task_ref].includes(event.task_id))
     );
+    const facts = el("dl", { class: "run-detail-facts" }, [
+      el("dt", { text: "Run ID" }), el("dd", { text: run.id }),
+      el("dt", { text: "Task" }), el("dd", { text: linkedTask?.task_ref || run.task_id || "NOT_REPORTED" }),
+      el("dt", { text: "Worker" }), el("dd", { text: worker || "NOT_REPORTED" }),
+      el("dt", { text: "Started" }), el("dd", { text: run.started_at || "NOT_REPORTED" }),
+    ]);
+    const sessionTargets = {};
+    [
+      ["mode", "Fresh or resumed"],
+      ["session_age_seconds", "Session age"],
+      ["continuation_count", "Continuation count"],
+      ["last_activity", "Last activity"],
+      ["resume_capability", "Native resume"],
+      ["invalidation_reason", "Invalidation reason"],
+    ].forEach(([key, label]) => {
+      const value = el("dd", { class: "session-fact" });
+      renderSessionFact(value, null);
+      sessionTargets[key] = value;
+      facts.append(el("dt", { text: label }), value);
+    });
+    const freshButton = el("button", {
+      type: "button",
+      class: "btn-secondary",
+      text: "Start fresh next attempt",
+      disabled: "disabled",
+    });
+    const freshReason = el("p", {
+      class: "hint run-detail-session-reason",
+      text: taskRef && worker ? "Loading session capability…" : "Task or worker is NOT_REPORTED.",
+    });
+    const sessionControl = el("div", { class: "run-detail-session-control" }, [freshButton, freshReason]);
     root.append(
       el("header", { class: "run-detail-head" }, [
         el("div", {}, [el("span", { class: "eyebrow", text: "Run Detail" }), el("h3", { text: run.name })]),
         el("span", { class: `status-pill ${statusClass(run.status)}`, text: run.status }),
       ]),
-      el("dl", { class: "run-detail-facts" }, [
-        el("dt", { text: "Run ID" }), el("dd", { text: run.id }),
-        el("dt", { text: "Task" }), el("dd", { text: linkedTask?.task_ref || run.task_id || "NOT_REPORTED" }),
-        el("dt", { text: "Worker" }), el("dd", { text: run.parent_worker || "NOT_REPORTED" }),
-        el("dt", { text: "Started" }), el("dd", { text: run.started_at || "NOT_REPORTED" }),
-      ]),
+      facts,
+      sessionControl,
       el("h4", { text: "Execution timeline" })
     );
     const list = el("ul", { class: "events-list event-feed run-detail-events" });
     if (events.length) renderEventItems(list, events.slice().reverse(), true);
     else list.appendChild(el("li", { class: "event-empty" }, [el("span", { text: "No events are recorded for this run yet." })]));
     root.appendChild(list);
+
+    if (!taskRef || !worker) return;
+    const endpoint = `/api/agent-sessions/${encodeURIComponent(taskRef)}/${encodeURIComponent(worker)}`;
+    getJSON(endpoint).then((payload) => {
+      if (root.dataset.runId !== run.id) return;
+      renderSessionFact(sessionTargets.mode, payload.mode);
+      renderSessionFact(sessionTargets.session_age_seconds, payload.session_age_seconds, sessionAge);
+      renderSessionFact(sessionTargets.continuation_count, payload.continuation_count, (value) => String(value));
+      renderSessionFact(sessionTargets.last_activity, payload.last_activity, relativeTime);
+      renderSessionFact(
+        sessionTargets.resume_capability,
+        payload.resume_capability,
+        (value) => value ? "Supported" : "Unsupported"
+      );
+      renderSessionFact(sessionTargets.invalidation_reason, payload.invalidation_reason);
+      const control = payload.start_fresh_next_attempt || {};
+      freshButton.disabled = !control.enabled;
+      freshReason.textContent = control.reason || "Force only this session's next attempt to start fresh.";
+    }).catch(() => {
+      if (root.dataset.runId !== run.id) return;
+      freshButton.disabled = true;
+      freshReason.textContent = "Session facts are NOT_REPORTED because the read failed.";
+    });
+    freshButton.addEventListener("click", async () => {
+      freshButton.disabled = true;
+      freshReason.textContent = "Requesting a fresh start…";
+      const result = await postJSON(`${endpoint}/start-fresh`, {});
+      if (root.dataset.runId !== run.id) return;
+      if (result.ok) {
+        freshReason.textContent = "Fresh start requested for this session's next attempt.";
+      } else {
+        freshButton.disabled = false;
+        freshReason.textContent = result.body?.detail || "The fresh-start request failed.";
+      }
+    });
   }
 
   async function openRunbookReport(runbookId) {

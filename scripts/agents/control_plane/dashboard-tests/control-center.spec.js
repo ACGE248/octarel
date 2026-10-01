@@ -487,6 +487,14 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   const detail = page.locator('#run-detail');
   await expect(detail).toContainText('Run Detail');
   await expect(detail).toContainText('fx-rb-running');
+  await expect(detail).toContainText('Fresh or resumed');
+  await expect(detail).toContainText('Continuation count');
+  await expect(detail).toContainText('NOT_REPORTED');
+  await expect(detail).toContainText('Unsupported');
+  await expect(detail).toContainText('DERIVED');
+  const fresh = detail.getByRole('button', { name: 'Start fresh next attempt' });
+  await expect(fresh).toBeDisabled();
+  await expect(detail.locator('.run-detail-session-reason')).toContainText('--no-session-persistence');
   await expect(detail).toContainText('lease.acquired');
   await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
 });

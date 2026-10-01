@@ -97,6 +97,17 @@ _COMPONENT_REASONS: tuple[tuple[str, str], ...] = (
 )
 
 
+# ``worktree_path`` is the one identity component whose value is an operator
+# filesystem path. Its stored/current values are therefore withheld from the
+# reason string at the source, rather than scrubbed by whichever consumer
+# happens to remember to: the reason is persisted on the session row and read
+# back by the dashboard API, so a consumer-side regex would have to match every
+# path shape an operator machine can produce to be a real protection. Omitting
+# at the source is safe by construction and still names the component, which is
+# what an operator actually needs from an invalidation reason.
+_VALUE_WITHHELD_COMPONENTS = frozenset({"worktree_path"})
+
+
 def _invalidation_reason(stored: Mapping[str, Any], current: SessionIdentity) -> str | None:
     if stored.get("identity_fingerprint") == current.fingerprint:
         return None
@@ -105,13 +116,23 @@ def _invalidation_reason(stored: Mapping[str, Any], current: SessionIdentity) ->
         old = stored.get(field)
         new = values[field]
         if old != new:
+            if field in _VALUE_WITHHELD_COMPONENTS:
+                return f"{reason}: stored and current values withheld (operator filesystem path)"
             return f"{reason}: stored={old!r}, current={new!r}"
     # A fingerprint implementation/version change is not evidence that policy,
     # tree, or any other named component changed. Component equality wins.
     return None
 
 
-def _age_seconds(created_at: str, now: str) -> float | None:
+def age_seconds(created_at: str, now: str) -> float | None:
+    """Age in seconds, or ``None`` when either timestamp cannot be parsed.
+
+    Public because the dashboard read model needs the same arithmetic for a
+    stored row that :func:`resolve_session` applies to a live decision, and a
+    second copy of it there would be free to drift into reporting ``0.0`` for
+    an unparseable timestamp -- the exact defect this returns ``None`` to avoid.
+    """
+
     try:
         created = _dt.datetime.fromisoformat(created_at)
         current = _dt.datetime.fromisoformat(now)
@@ -125,7 +146,7 @@ def _decision(row: Mapping[str, Any], *, mode: str, reason: str, now: str) -> Se
         mode=mode,
         session_id=str(row["id"]),
         continuation_count=int(row["continuation_count"]),
-        session_age_seconds=_age_seconds(str(row["created_at"]), now),
+        session_age_seconds=age_seconds(str(row["created_at"]), now),
         last_activity_at=str(row["last_activity_at"]),
         reason=reason,
         identity_fingerprint=str(row["identity_fingerprint"]),

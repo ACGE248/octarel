@@ -23,7 +23,7 @@ system exists, and no static mock-up replaced a dynamic surface.
 | Manager Chat | `view-steering` (labelled **Manager**) | `/api/manager/route`, `/api/manager/message`, `/api/steering/*` |
 | Flow / Orchestrator Studio | `view-flow` | `/api/flow` |
 | Priority & Fallback Matrix | `view-priority` *(new)* | `/api/priority-matrix` |
-| Runs / Run Detail | `view-runs` | `/api/quickstart`, `/api/runbooks*` |
+| Runs / Run Detail | `view-runs` | `/api/quickstart`, `/api/runbooks*`, `/api/agent-sessions/{task_ref}/{worker}` |
 | Tasks | `view-tasks` | `/api/tasks` |
 | Agent Fleet | `view-agents` | `/api/models`, `/api/agent-activity/*` |
 | Providers | `view-providers` | `/api/providers`, `/api/opencode-models`, `/api/native-models`, `/api/usage-routing`, `/api/usage-telemetry` |
