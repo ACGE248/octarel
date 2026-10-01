@@ -102,13 +102,13 @@ def test_typed_event_redacts_secrets_and_omits_absolute_host_paths(tmp_path: Pat
         event_type="adapter.failed",
         source="test.adapter",
         provenance="UNKNOWN",
-        message="failed in /Users/private/repo with API_KEY=topsecretvalue",
-        data={"cwd": "/Users/private/repo", "detail": "log at /tmp/private.log token=topsecretvalue"},
+        message="failed in /path/to/private/repo with API_KEY=topsecretvalue",
+        data={"cwd": "/path/to/private/repo", "detail": "log at /path/to/private.log token=topsecretvalue"},
     )
     stored = state.record_run_event(event)
     rendered = f"{stored.message} {stored.data}"
-    assert "/Users/private" not in rendered
-    assert "/tmp/private.log" not in rendered
+    assert "/path/to/private" not in rendered
+    assert "/path/to/private.log" not in rendered
     assert "topsecretvalue" not in rendered
     assert "***REDACTED***" in rendered
 
