@@ -551,24 +551,33 @@ class Supervisor:
         # truncated tail, a re-read that found only the pointer) must not
         # demote that attempt to the derived path.
         reported = extract_reported_cost(payload)
-        if reported.usd is not None:
-            history = list(record.get("route_history") or [])
-            for index in range(len(history) - 1, -1, -1):
-                attempt = history[index]
-                # The newest still-live attempt for this worker: the same one
-                # finalize_route_attempt terminalizes, so the two can never
-                # disagree about which attempt a completing task belongs to.
-                if not isinstance(attempt, dict) or attempt.get("worker") != task.worker:
-                    continue
-                if attempt.get("status") not in {None, "STARTING", "RUNNING"}:
-                    continue
-                history[index] = {
-                    **attempt,
-                    "reported_cost_usd": reported.usd,
-                    "reported_cost_source": reported.source,
-                }
-                record["route_history"] = history
-                break
+        history = list(record.get("route_history") or [])
+        for index in range(len(history) - 1, -1, -1):
+            attempt = history[index]
+            # The newest still-live attempt for this worker: the same one
+            # finalize_route_attempt terminalizes, so the two can never
+            # disagree about which attempt a completing task belongs to.
+            if not isinstance(attempt, dict) or attempt.get("worker") != task.worker:
+                continue
+            if attempt.get("status") not in {None, "STARTING", "RUNNING"}:
+                continue
+            scoped = {
+                **attempt,
+                "usage_recorded": True,
+                "telemetry_quality": usage.mode.lower(),
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+            }
+            if reported.usd is not None:
+                scoped.update(
+                    {
+                        "reported_cost_usd": reported.usd,
+                        "reported_cost_source": reported.source,
+                    }
+                )
+            history[index] = scoped
+            record["route_history"] = history
+            break
         self.state.upsert_usage_governance(record)
 
     def _record_route_outcome(self, task: Task) -> None:

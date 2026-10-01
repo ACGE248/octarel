@@ -375,5 +375,12 @@ def finalize_route_attempt(state, task: Task) -> bool:
         history[index] = outcome
         record["route_history"] = history
         state.upsert_usage_governance(record)
+        from .usage_ledger import record_usage_attempts
+
+        record_usage_attempts(
+            state,
+            state.get_usage_governance(task.runbook_id) or record,
+            project_id=task.project_id,
+        )
         return True
     return False

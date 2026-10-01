@@ -71,6 +71,7 @@ from .models import (
 from .provider_state import failure_attribution
 from .recovery import discover_git_worktrees, pid_is_alive, reconcile_worktree_locks
 from .state import State
+from .usage_ledger import new_run_id
 from .usage_policy import (
     CODEX_POLICIES,
     build_context_manifest,
@@ -952,6 +953,7 @@ def start_runbook(
     runbook.task_id = launched.id
     if launched.state == TASK_RUNNING:
         usage["route_history"] = [{
+            "run_id": new_run_id(),
             "role": role,
             "worker": launch_worker.name,
             "provider": launch_worker.provider,
@@ -1153,6 +1155,7 @@ def retry_runbook(
         "from": previous_worker, "to": worker_name, "failure": failure_kind, "reason": previous_reason,
     }]
     usage["route_history"] = [*usage.get("route_history", []), {
+        "run_id": new_run_id(),
         "role": role,
         "worker": worker_name,
         "provider": worker.provider,
