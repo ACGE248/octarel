@@ -85,6 +85,39 @@ def state(tmp_path):
     return tmp_path / "native-models-state"
 
 
+@pytest.fixture(autouse=True)
+def pinned_read_clock(monkeypatch):
+    """Pin the clock reads use, not only the one writes use.
+
+    Every record in this module is written with ``now=NOW``, so ``checked_at``
+    is pinned. But the read path under test -- ``Worker.effective_model`` ->
+    ``native_models.effective_model`` -- takes no ``now`` and so used the real
+    clock, and ``effective_model`` returns the configured default once
+    ``age > READ_MAX_AGE_SECONDS`` (seven days). That made four advance tests
+    fail from ``NOW + 7 days`` onwards: the advance was real, the read discarded
+    it as expired, and the suite's correctness depended on how far the wall
+    clock had drifted from a hardcoded date.
+
+    Pinning both clocks is what makes the advance tests deterministic.
+
+    It does NOT remove this file's only expiry coverage:
+    ``test_the_dashboard_view_marks_an_expired_verification_stale`` already
+    pinned ``_now`` past the window deliberately, and still does -- its own
+    ``monkeypatch.setattr`` runs after this fixture's on the same
+    function-scoped ``monkeypatch``, so it wins, which is why a test here can
+    still choose a later clock. That override is load-bearing; do not make this
+    fixture session-scoped or apply it any other way that would stop a test
+    from replacing it.
+
+    What the accidental drift did cover, and nothing covered on purpose, is the
+    cache-only reader's behaviour exactly AT the window versus one second past
+    it. ``test_a_cache_past_the_read_window_is_ignored_by_cache_only_readers``
+    covers that boundary at an explicit clock.
+    """
+
+    monkeypatch.setattr(nm, "_now", lambda: NOW)
+
+
 # --------------------------------------------------------------------------- registry contract
 
 
@@ -319,6 +352,35 @@ def test_a_conflicting_later_value_for_a_guard_blocks_promotion(state, worker, e
     assert record["status"] == nm.STATUS_UNVERIFIED and worker in record["reason"]
     assert ("conflicting" in record["reason"] or "forbidden" in record["reason"])
     assert record["effective_model"] == "grok-4.6"
+
+
+def test_a_cache_past_the_read_window_is_ignored_by_cache_only_readers(state):
+    """The cache-only reader's window, asserted exactly at the boundary.
+
+    ``test_the_dashboard_view_marks_an_expired_verification_stale`` already
+    covers expiry five seconds past the window, through ``inventory()``'s
+    ``stale`` status and reason. This covers the adjacent thing nothing asserted
+    on purpose: that ``effective_model`` still honours a record at exactly
+    ``READ_MAX_AGE_SECONDS`` and stops one second later.
+
+    Asserted on both sides, so neither a reader that ignores the window nor one
+    that expires everything can pass.
+    """
+
+    registry = load_registry()
+    review = registry.get("grok-build-review")
+    shape = nm.shape_hash(nm.WorkerShape.of(review))
+    record = _refresh("grok", FakeCli.grok(grok_models("grok-4.7", "grok-4.6")), registry, state)
+    assert record["status"] == nm.STATUS_VERIFIED and record["candidate"]["native_id"] == "grok-4.7"
+
+    def read(now):
+        return nm.effective_model("grok", "grok-4.6", worker=review.name, shape=shape, directory=state, now=now)
+
+    just_inside = NOW + dt.timedelta(seconds=nm.READ_MAX_AGE_SECONDS)
+    just_past = NOW + dt.timedelta(seconds=nm.READ_MAX_AGE_SECONDS + 1)
+    assert read(NOW) == "grok-4.7"
+    assert read(just_inside) == "grok-4.7"
+    assert read(just_past) == "grok-4.6"  # expired: the configured default, never the stale candidate
 
 
 @pytest.mark.parametrize("worker,extra", [("codex-review", ("--sandbox", "workspace-write")),
