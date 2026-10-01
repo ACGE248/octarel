@@ -471,6 +471,145 @@ EXECUTION_LEASE_RELEASED = "RELEASED"
 EXECUTION_LEASE_STATES = frozenset({EXECUTION_LEASE_ACQUIRED, EXECUTION_LEASE_RELEASED})
 
 
+# ENG-PC-03 (issue #31): typed wake reasons, adapted from Paperclip's
+# heartbeat/wake-request protocol. These are the only reasons a wake may
+# carry; an unlisted string is rejected rather than silently accepted (see
+# ``wake_queue.enqueue``).
+WAKE_TASK_ELIGIBLE = "TASK_ELIGIBLE"
+WAKE_TASK_UNBLOCKED = "TASK_UNBLOCKED"
+WAKE_IMPLEMENTATION_FINISHED = "IMPLEMENTATION_FINISHED"
+WAKE_TEST_FINISHED = "TEST_FINISHED"
+WAKE_REVIEW_FINISHED = "REVIEW_FINISHED"
+WAKE_APPROVAL_RESOLVED = "APPROVAL_RESOLVED"
+WAKE_PROVIDER_RECOVERED = "PROVIDER_RECOVERED"
+WAKE_QUOTA_RESET = "QUOTA_RESET"
+WAKE_SCHEDULE = "SCHEDULE"
+WAKE_OVERNIGHT_TICK = "OVERNIGHT_TICK"
+WAKE_MANUAL = "MANUAL"
+WAKE_REASONS = frozenset(
+    {
+        WAKE_TASK_ELIGIBLE,
+        WAKE_TASK_UNBLOCKED,
+        WAKE_IMPLEMENTATION_FINISHED,
+        WAKE_TEST_FINISHED,
+        WAKE_REVIEW_FINISHED,
+        WAKE_APPROVAL_RESOLVED,
+        WAKE_PROVIDER_RECOVERED,
+        WAKE_QUOTA_RESET,
+        WAKE_SCHEDULE,
+        WAKE_OVERNIGHT_TICK,
+        WAKE_MANUAL,
+    }
+)
+
+WAKE_PENDING = "PENDING"
+WAKE_CLAIMED = "CLAIMED"
+WAKE_COMPLETED = "COMPLETED"
+WAKE_FAILED = "FAILED"
+# Explicit dead-letter state (issue #31's "poisoned/stuck state"): reached only
+# once ``attempts`` has exhausted ``max_attempts``, a typed count -- never a
+# timeout and never inferred from ``last_error`` text. Terminal: nothing ever
+# claims a ``POISONED`` row again; it is surfaced to Attention instead.
+WAKE_POISONED = "POISONED"
+WAKE_STATES = frozenset({WAKE_PENDING, WAKE_CLAIMED, WAKE_COMPLETED, WAKE_FAILED, WAKE_POISONED})
+WAKE_TERMINAL_STATES = frozenset({WAKE_COMPLETED, WAKE_POISONED})
+
+
+@dataclass
+class WakeRequest:
+    """ENG-PC-03 (issue #31): one durable, coalesced wake-queue row.
+
+    Keyed by (``project_id``, ``task_id``, ``stage``) while ``PENDING`` -- a
+    partial unique index on exactly that triple (see ``state.py``) is what
+    makes coalescing atomic: a second concurrent enqueue for the same key
+    becomes a single ``UPDATE ... coalesced_count = coalesced_count + 1``
+    against the same row rather than a second row, decided by SQLite's own
+    upsert, never a Python read-then-write. Once a row leaves ``PENDING``
+    (``CLAIMED``/terminal), a fresh enqueue for the same key starts a new row
+    rather than mutating the in-flight one, so a trigger that arrives while a
+    previous wake is already being handled is never silently dropped.
+
+    ``reason`` is the most recent contribution's reason for quick display;
+    every individual contribution (including duplicates) is preserved
+    separately and in order in ``wake_queue_contributions`` (see
+    ``state.list_wake_contributions``), which is how ``coalesced_count``
+    retains not just a number but which reasons and sources actually asked.
+
+    This table is the queue's current state, not a history -- lifecycle
+    transitions (enqueued/coalesced/claimed/completed/failed/poisoned) are
+    additionally emitted into the existing ENG-PC-04 ``RunEvent`` timeline
+    (``event_class="wake"``) by ``wake_queue.py``, so there is still only one
+    append-only history in this control plane.
+    """
+
+    id: int
+    project_id: str | None
+    task_id: str | None
+    stage: str | None
+    status: str
+    reason: str
+    coalesced_count: int
+    attempts: int
+    max_attempts: int
+    next_attempt_at: str | None
+    run_id: str | None
+    created_at: str
+    updated_at: str
+    claimed_at: str | None = None
+    claimed_by: str | None = None
+    completed_at: str | None = None
+    last_error: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "WakeRequest":
+        return cls(
+            id=row["id"],
+            project_id=row.get("project_id"),
+            task_id=row.get("task_id"),
+            stage=row.get("stage"),
+            status=row["status"],
+            reason=row["reason"],
+            coalesced_count=row["coalesced_count"],
+            attempts=row["attempts"],
+            max_attempts=row["max_attempts"],
+            next_attempt_at=row.get("next_attempt_at"),
+            run_id=row.get("run_id"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            claimed_at=row.get("claimed_at"),
+            claimed_by=row.get("claimed_by"),
+            completed_at=row.get("completed_at"),
+            last_error=row.get("last_error"),
+        )
+
+
+@dataclass
+class WakeContribution:
+    """One append-only, never-mutated record of a single trigger that asked
+    for a wake -- the actual provenance ledger ``WakeRequest.coalesced_count``
+    summarizes. Always insert-only (see ``state.enqueue_wake``), so recording
+    one is never subject to the same race a read-modify-write merge would be.
+    """
+
+    id: int
+    wake_id: int
+    reason: str
+    source: str | None
+    provenance: str
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "WakeContribution":
+        return cls(
+            id=row["id"],
+            wake_id=row["wake_id"],
+            reason=row["reason"],
+            source=row.get("source"),
+            provenance=row["provenance"],
+            created_at=row["created_at"],
+        )
+
+
 @dataclass
 class Event:
     id: int | None

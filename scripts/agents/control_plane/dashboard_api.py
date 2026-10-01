@@ -988,6 +988,7 @@ def create_app(
     @app.get("/api/overview")
     def overview() -> dict[str, Any]:
         from .models import task_projection
+        from .wake_queue import queue_depth as wake_queue_depth
 
         _runs, old_tasks = superseded()
         tasks = scoped_tasks()
@@ -1002,6 +1003,8 @@ def create_app(
             "configured_provider_count": sum(1 for p in providers if p.configured),
             "stop_after_current": ctx.stop_after_current,
             "octascene_app_status": probe_octascene_app(),
+            # ENG-PC-03 (issue #31): local state only, zero AI/provider calls.
+            "wake_queue": wake_queue_depth(ctx.state, project_id=ctx.selected_project_id).as_dict(),
         }
 
     @app.get("/api/cp-status")
@@ -1954,12 +1957,51 @@ def create_app(
         # one currently blocked on it; either way this is real evidence, never
         # inferred from a message string.
         troubled_leases = stale_leases(ctx.state, project_id=ctx.selected_project_id)
+        from .wake_queue import attention as wake_queue_attention
+
+        # ENG-PC-03 (issue #31): only the explicit POISONED dead-letter state is
+        # surfaced here -- never a time-based "this claimed wake looks stuck" guess,
+        # mirroring stale_leases's refusal to classify staleness from elapsed time.
+        troubled_wakes = wake_queue_attention(ctx.state, project_id=ctx.selected_project_id)
         return {
             "tasks": failed_or_blocked,
             "providers": troubled_providers,
             "runbooks": troubled_runbooks,
             "execution_leases": troubled_leases,
+            "wakes": troubled_wakes,
         }
+
+    @app.post("/api/wake-queue/manual")
+    def wake_queue_manual(request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Operator-triggered MANUAL wake (ENG-PC-03). Durable and coalesced exactly
+        like any other wake; the daemon's own drain loop marks it handled after its
+        next already-unconditional reconcile pass. This never itself schedules,
+        admits, or advances anything -- see ``wake_queue.drain_due``."""
+
+        from .wake_queue import enqueue as enqueue_wake
+
+        body = dict(payload or {})
+        task_id = body.get("task_id")
+        stage = body.get("stage")
+        task_id = str(task_id) if task_id else None
+        project_id = ctx.selected_project_id
+        try:
+            wake = enqueue_wake(
+                ctx.state,
+                reason="MANUAL",
+                source="dashboard.manual",
+                project_id=project_id,
+                task_id=task_id,
+                stage=str(stage) if stage else None,
+                run_id=task_id,
+            )
+        except Exception as exc:
+            _record_remote_audit(
+                ctx, request, verb="wake_queue_manual", target=task_id, result=f"FAIL: {type(exc).__name__}",
+            )
+            raise
+        _record_remote_audit(ctx, request, verb="wake_queue_manual", target=task_id, result=f"OK: {wake.status}")
+        return {"id": wake.id, "status": wake.status, "coalesced_count": wake.coalesced_count}
 
     @app.get("/api/roadmap")
     def roadmap() -> list[dict[str, Any]]:
