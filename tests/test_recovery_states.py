@@ -93,6 +93,39 @@ def test_worker_orphan_and_reboot_are_restart_safe(monkeypatch):
     assert state.get_task("task-1").state == TASK_QUEUED  # type: ignore[union-attr]
 
 
+def test_one_click_recovery_refuses_at_the_attempt_bound(monkeypatch):
+    state = State(":memory:")
+    task = _task(
+        state=TASK_RECOVERABLE_ORPHAN,
+        recovery_attempts=3,
+        recovery_max_attempts=3,
+    )
+    state.upsert_task(task)
+    monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: False)
+
+    recovered, proof, refusal = recovery.recover_orphan_task(state, task)
+
+    assert recovered is False
+    assert proof.verdict == recovery.OWNERSHIP_RECLAIMABLE
+    assert refusal == "the bounded recovery-attempt limit has been reached"
+    persisted = state.get_task("task-1")
+    assert persisted is not None and persisted.state == TASK_RECOVERABLE_ORPHAN
+    assert persisted.recovery_attempts == persisted.recovery_max_attempts == 3
+
+
+def test_automatic_dead_pid_requeue_is_not_subject_to_one_click_bound(monkeypatch):
+    state = State(":memory:")
+    state.upsert_task(_task(recovery_attempts=3, recovery_max_attempts=3))
+    monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: False)
+
+    assert recovery.reconcile_tasks(state) == {"reclaimed": 1, "left_running": 0}
+
+    task = state.get_task("task-1")
+    assert task is not None and task.state == TASK_QUEUED
+    assert task.recovery_attempts == 4
+    assert task.stale_recovered is True
+
+
 def test_provider_outage_becomes_waiting_provider_not_terminal():
     state = State(":memory:")
     runbook = _runbook({}, stage="PENDING")
@@ -205,3 +238,11 @@ def test_bounded_ambiguous_attempts_end_in_owner_action_required(monkeypatch):
     assert task is not None and task.state == TASK_OWNER_ACTION_REQUIRED
     assert task.recovery_attempts == 2
     assert task.pid == 4321
+    terminal_event = state.list_run_events(run_id="task-1")[-1]
+    assert terminal_event.data["state"] == TASK_OWNER_ACTION_REQUIRED
+    assert terminal_event.data["recovery_attempts"] == terminal_event.data["recovery_max_attempts"] == 2
+
+    # OWNER_ACTION_REQUIRED is outside the reconciliation candidate set, so
+    # further daemon passes cannot loop or consume another attempt.
+    recovery.reconcile_tasks(state)
+    assert state.get_task("task-1").recovery_attempts == 2  # type: ignore[union-attr]

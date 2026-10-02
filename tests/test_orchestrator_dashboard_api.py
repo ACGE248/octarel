@@ -264,6 +264,39 @@ def test_recovery_endpoint_reverifies_and_audits_success_and_refusal(
     assert any("recover_orphan" in message and "FAIL" in message for message in messages)
 
 
+def test_recovery_endpoint_audits_refusal_at_the_attempt_bound(client, ctx, monkeypatch):
+    from scripts.agents.control_plane import dashboard_api, recovery
+
+    ctx.state.upsert_task(Task(
+        id="recover-bound", task_ref="RECOVER-BOUND", role="primary-implementation",
+        worker="codex-build", state="RECOVERABLE_ORPHAN", pid=8201,
+        ownership_evidence_class="PID_ABSENT", recovery_attempts=3,
+        recovery_max_attempts=3,
+    ))
+    monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        dashboard_api,
+        "_remote_identity_of",
+        lambda _request: SimpleNamespace(email="operator@example.com"),
+    )
+
+    refused = client.post("/api/recovery/RECOVER-BOUND/recover", json={})
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "the bounded recovery-attempt limit has been reached"
+    task = ctx.state.get_task("recover-bound")
+    assert task is not None and task.state == "RECOVERABLE_ORPHAN"
+    assert task.recovery_attempts == task.recovery_max_attempts == 3
+    messages = [
+        event.message for event in ctx.state.list_events(limit=50)
+        if event.category == "remote_audit"
+    ]
+    assert any(
+        "recover_orphan(RECOVER-BOUND)" in message and "FAIL: HTTPException" in message
+        for message in messages
+    )
+
+
 def test_attention_keeps_each_recovery_wait_reason_and_next_action_distinct(
     client, ctx, monkeypatch
 ):

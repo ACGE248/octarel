@@ -433,6 +433,11 @@ def _recorded_at(task: Task) -> float | None:
 def ownership_proof_for_task(task: Task) -> OwnershipProof:
     """Observe the current owner using the canonical task identity evidence."""
 
+    # Only legacy rows lack the strong ``pid_create_time`` stamped at launch.
+    # Their ``updated_at`` fallback is deliberately conservative: if a PID was
+    # reused before a later row update, it can over-preserve that process as
+    # LIVE, but it cannot wrongly reclaim it. Such a legacy orphan may therefore
+    # require the bounded owner-action path instead of automatic recovery.
     return classify_process_owner(
         task.pid,
         recorded_create_time=task.pid_create_time,
