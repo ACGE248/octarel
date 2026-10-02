@@ -230,34 +230,39 @@ test('mobile: the session bar and bottom nav never cover content on any view', a
   const views = ['overview', 'runs', 'flow', 'priority', 'tasks', 'agents', 'providers', 'steering', 'history', 'worktrees', 'system', 'terminal', 'settings', 'roadmap'];
   for (const view of views) {
     await navTo(page, `view-${view}`);
-    /* Some views fetch their content when they become visible, so scrolling
-       immediately would scroll a short page and then measure a tall one.
-       Wait for the document height to stop changing before scrolling. */
-    await expect
-      .poll(async () => {
-        const h = await page.evaluate(() => document.documentElement.scrollHeight);
-        await page.waitForTimeout(120);
-        const again = await page.evaluate(() => document.documentElement.scrollHeight);
-        return h === again;
-      }, { timeout: 10_000 })
-      .toBe(true);
-    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-    await page.waitForTimeout(150);
-    const m = await page.evaluate(() => {
-      const bar = document.getElementById('sticky-controls');
-      const nav = document.getElementById('bottom-nav');
-      const main = document.querySelector('.view.active');
-      const barBox = bar.getBoundingClientRect();
-      const navBox = nav.getBoundingClientRect();
-      const mainBox = main.getBoundingClientRect();
-      return {
-        barTop: barBox.top, barHeight: barBox.height, barBottom: barBox.bottom, navTop: navBox.top,
-        navHeight: navBox.height, mainBottom: mainBox.bottom,
-        cssBar: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sticky-h')),
-        cssNav: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bottom-nav-h')),
-        viewport: window.innerHeight,
+    /* Polling can replace a tall view after two equal height samples. Wait for
+       the app's refresh boundary, then scroll and measure in one browser task
+       so no late render can land between those two operations. */
+    await expect(page.locator('body')).not.toHaveAttribute('aria-busy', 'true');
+    const m = await page.evaluate(() => new Promise((resolve) => {
+      const measureWhenIdle = () => {
+        if (document.body.hasAttribute('aria-busy')) {
+          requestAnimationFrame(measureWhenIdle);
+          return;
+        }
+        requestAnimationFrame(() => {
+          if (document.body.hasAttribute('aria-busy')) {
+            measureWhenIdle();
+            return;
+          }
+          window.scrollTo(0, document.documentElement.scrollHeight);
+          const bar = document.getElementById('sticky-controls');
+          const nav = document.getElementById('bottom-nav');
+          const main = document.querySelector('.view.active');
+          const barBox = bar.getBoundingClientRect();
+          const navBox = nav.getBoundingClientRect();
+          const mainBox = main.getBoundingClientRect();
+          resolve({
+            barTop: barBox.top, barHeight: barBox.height, barBottom: barBox.bottom, navTop: navBox.top,
+            navHeight: navBox.height, mainBottom: mainBox.bottom,
+            cssBar: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sticky-h')),
+            cssNav: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bottom-nav-h')),
+            viewport: window.innerHeight,
+          });
+        });
       };
-    });
+      measureWhenIdle();
+    }));
     expect(m.mainBottom, `${view}: last content must end above the session bar`).toBeLessThanOrEqual(m.barTop + 1);
     expect(Math.abs(m.barBottom - m.navTop), `${view}: bar sits flush on the nav`).toBeLessThanOrEqual(1);
     expect(Math.abs(m.cssBar - m.barHeight), `${view}: published bar height is the measured height`).toBeLessThanOrEqual(1);

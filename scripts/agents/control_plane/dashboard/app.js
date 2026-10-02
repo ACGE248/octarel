@@ -1540,7 +1540,19 @@
     document.querySelectorAll(".bn[data-view]").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.view === viewId);
     });
-    if (viewId !== "view-runs") state.focusRunbookId = null;
+    if (viewId !== "view-runs") {
+      // The focus marker is a transient navigation cue, not durable run
+      // selection. Clear both its state and the already-rendered projection
+      // immediately when Runs is left; waiting for the next polling render
+      // leaves a stale aria-current/focus ring when a refresh cycle is slow.
+      state.focusRunbookId = null;
+      document.querySelectorAll("#runbooks-cards .run-card.is-focused").forEach((card) => {
+        card.classList.remove("is-focused");
+        card.removeAttribute("aria-current");
+      });
+      const focusStatus = document.getElementById("runs-focus-status");
+      if (focusStatus) focusStatus.textContent = "";
+    }
     closeSidebar();
     closeSystemMenu();
     closeAttention();
