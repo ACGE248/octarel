@@ -19,7 +19,9 @@ database, scheduler, or task model is copied or depended on.
 `control_plane.runtime_services.RuntimeServiceManager` is the only managed-app
 supervisor. `AppLifecycleManager` is now a compatibility adapter over it, so the
 legacy app endpoints and the generic runtime endpoints cannot disagree about
-ownership or lifecycle state.
+ownership or lifecycle state. A single re-entrant supervisor boundary serializes
+threadpool reads/reconciliation with start, stop, restart, and shutdown, so an
+observation captured before launch cannot later overwrite the launched identity.
 
 The durable `runtime_services` row is scoped by `project_id` plus optional
 `worktree_path` and `runbook_id`. It records only:
@@ -47,7 +49,14 @@ validated against project-scoped durable state.
 - Launch waits for process identity to remain stable across a bounded
   post-spawn window. It preserves declared argv as intent and permits observed
   argv to differ only by an absolute argv[0] replacement (the macOS framework
-  Python normalization); every remaining argument must match exactly.
+  Python normalization); every remaining argument must match exactly. If
+  capture fails, the manager verifies and terminates only the new child's
+  dedicated process group, then waits/reaps within the shared eight-second
+  bound. The handle is removed only after confirmed exit; a timeout remains
+  tracked and fails closed without force-kill. Before a later launch may reuse
+  that service ID, the retained exact handle is checked: a live child blocks
+  the launch without another signal, while an exited child is waited/reaped and
+  removed before spawning its replacement.
 - Stop/restart/shutdown require a live, exact match for PID, create time, cwd,
   the captured process argv, and process-session id, with the PID also the
   session leader. After verified `SIGTERM`, `STOPPED` is persisted only after
@@ -57,7 +66,10 @@ validated against project-scoped durable state.
   timeouts fail closed; there is no force kill. Legacy rows without captured
   process argv fail closed.
 - PID reuse, incomplete identity, changed argv/cwd/session, or an external
-  listener is non-stoppable. There is no force-steal or executable-name path.
+  listener is non-stoppable. A terminal row whose historical PID has been
+  reused remains terminal evidence and cannot authorize a signal; when its
+  port is free it does not block a fresh safe launch. There is no force-steal
+  or executable-name path.
 - Crash reconciliation preserves identity, exit state and the same append-only
   log pointer, then permits a fresh launch only when the port is free.
 - Services and reads are filtered by selected project. Runbook scope must belong
@@ -77,6 +89,9 @@ validated against project-scoped durable state.
   confirmation, remote-identity, CSRF/origin, and audit boundaries.
 - `/api/app-status` and `/api/app-lifecycle/{action}` address the selected
   project's canonical runtime scope through the same manager.
+- Generic and legacy stop APIs return identity, PID-reuse, signal, and timeout
+  refusals unchanged. The legacy “no managed process” wording is used only when
+  the requested scope truly has no durable service record.
 - Run Detail and Worktree inspectors show health, ownership, PID/session,
   loopback preview metadata, log pointer, and the server-derived action set.
   External/unowned rows are informational; start/restart/stop/open-preview are

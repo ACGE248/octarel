@@ -208,7 +208,10 @@ adapters over that manager, not a second supervisor. Each service is scoped to
 a selected project and optionally to a server-validated project worktree and
 runbook. Its command and port come only from the managed project's explicit
 fixed-argv/loopback-port declaration. There is no arbitrary command, shell,
-public-bind, or implicit-cwd input.
+public-bind, or implicit-cwd input. One re-entrant supervisor boundary covers
+threadpool observation/reconciliation and every lifecycle mutation, preventing
+a stale poll from overwriting a newly launched identity without deadlocking
+nested restart or shutdown operations.
 
 Launch preserves the project's declared fixed argv as intent and separately
 captures the stable argv the OS reports after exec normalization. The only
@@ -217,9 +220,18 @@ remaining argument unchanged. Before stop, restart, or shutdown, the manager
 re-proves PID, process create time, exact cwd, that captured process argv, and
 process-session identity. Missing or changed evidence, PID reuse, and external
 listeners fail closed. A port collision is reported as `EXTERNAL_UNOWNED` and
-never signalled. Crash reconciliation keeps the durable identity, exit state,
-and append-only log pointer so an eligible scope can be restarted without
-discarding evidence.
+never signalled. A terminal row retains historical PID evidence but treats a
+now-reused PID as non-owned; if the declared port is free, that evidence does
+not block a fresh launch. Failed launch identity capture terminates only the
+verified new process group, then waits/reaps within the same bounded graceful
+shutdown window and retains a non-exited handle rather than force-killing it.
+A later launch for that service ID refuses while the retained exact child is
+alive, without signalling it again; once exited, the child is reaped and its
+stale handle removed before a replacement is spawned.
+Crash reconciliation keeps the durable identity, exit state, and append-only
+log pointer so an eligible scope can be restarted without discarding evidence.
+Both API families expose concrete identity/signal refusals; only a genuinely
+missing service receives the legacy “no managed process” message.
 
 `GET /api/runtime-services` is a local selected-project read model. Run Detail
 and Worktree inspectors show health, ownership, loopback preview metadata, log

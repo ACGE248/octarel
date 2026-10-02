@@ -18,9 +18,12 @@ import re
 import signal
 import socket
 import subprocess
+import threading
 import time
+from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from .models import utc_now_iso
 
@@ -28,15 +31,36 @@ RUNTIME_ACTIONS = frozenset({"start", "stop", "restart"})
 _FORBIDDEN_LAUNCHERS = frozenset({"sh", "bash", "zsh", "fish", "env", "sudo"})
 _SHELL_SYNTAX = frozenset({";", "|", "&", "<", ">", "`", "\n", "\r", "\x00"})
 _SENSITIVE_ARG = re.compile(r"(?i)(password|passwd|token|api[_-]?key|authorization|private[_-]?key|secret)")
-_PUBLIC_BIND_ARG = re.compile(r"(?i)(^|[=:])(0\.0\.0\.0|\[?::\]?)(?:$|[/])")
+_PUBLIC_BIND_ARG = re.compile(
+    r"(?ix)(?:^|[=:/])(?:0\.0\.0\.0|\[::\]|\*)(?=$|[:/])"
+    r"|(?:^|[=])::(?=$|[:/])"
+    r"|(?:^|=):\d+(?:$|/)"
+)
 _FACTS_NOT_SUPPLIED = object()
 _IDENTITY_CAPTURE_TIMEOUT_SECONDS = 1.0
 _IDENTITY_STABLE_SECONDS = 0.1
 _IDENTITY_POLL_SECONDS = 0.01
+_TERMINATION_TIMEOUT_SECONDS = 8.0
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _supervisor_locked(method: _F) -> _F:
+    """Serialize process observation and mutation through one supervisor."""
+
+    @wraps(method)
+    def wrapper(self: RuntimeServiceManager, *args: Any, **kwargs: Any) -> Any:
+        with self._supervisor_lock:
+            return method(self, *args, **kwargs)
+
+    return cast(_F, wrapper)
 
 
 class RuntimeServiceError(ValueError):
     """A safe, operator-actionable runtime-service refusal."""
+
+
+class RuntimeServiceMissingError(RuntimeServiceError):
+    """The requested service scope has no durable managed-process record."""
 
 
 class RuntimeServiceManager:
@@ -45,6 +69,11 @@ class RuntimeServiceManager:
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
         self._processes: dict[str, subprocess.Popen[str]] = {}
+        # FastAPI executes synchronous routes in a shared threadpool. One
+        # re-entrant boundary keeps a stale observation from being persisted
+        # after a lifecycle mutation, while allowing restart/shutdown to call
+        # the same locked helpers without deadlocking.
+        self._supervisor_lock = threading.RLock()
 
     # -------------------------------------------------------------- declaration
 
@@ -291,8 +320,59 @@ class RuntimeServiceManager:
                 elif stable_since is not None and now - stable_since >= _IDENTITY_STABLE_SECONDS:
                     return facts
             time.sleep(_IDENTITY_POLL_SECONDS)
-        process.terminate()
-        raise RuntimeServiceError(f"{failure_reason}; process was terminated")
+        raise RuntimeServiceError(failure_reason)
+
+    def _cleanup_failed_launch(
+        self,
+        process: subprocess.Popen[str],
+        row: dict[str, Any],
+        failure_reason: str,
+    ) -> None:
+        """Terminate and reap only the exact failed start-new-session child."""
+
+        if self._processes.get(row["id"]) is not process:
+            raise RuntimeServiceError(
+                f"{failure_reason}; launched child handle is no longer exact; "
+                "refusing an unverified cleanup signal"
+            )
+        if process.poll() is None:
+            try:
+                session_id = os.getsid(process.pid)
+            except ProcessLookupError:
+                # The child exited between poll and getsid; wait below is the
+                # authoritative reap/exit confirmation.
+                session_id = None
+            except OSError as exc:
+                raise RuntimeServiceError(
+                    f"{failure_reason}; launched child session could not be verified; "
+                    "the exact handle remains tracked and no signal was sent"
+                ) from exc
+            if session_id is not None:
+                if session_id != process.pid:
+                    raise RuntimeServiceError(
+                        f"{failure_reason}; launched child did not retain its dedicated process session; "
+                        "the exact handle remains tracked and no signal was sent"
+                    )
+                try:
+                    os.killpg(session_id, signal.SIGTERM)
+                except ProcessLookupError:
+                    # A natural exit raced the signal. Waiting still confirms
+                    # and reaps the exact direct child.
+                    pass
+                except OSError as exc:
+                    raise RuntimeServiceError(
+                        f"{failure_reason}; SIGTERM could not be sent to the verified process group; "
+                        "the exact handle remains tracked"
+                    ) from exc
+        try:
+            process.wait(timeout=_TERMINATION_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeServiceError(
+                f"{failure_reason}; launched process group did not exit after SIGTERM; "
+                "the exact handle remains tracked and Octarel refuses to force-kill it"
+            ) from exc
+        if self._processes.get(row["id"]) is process:
+            self._processes.pop(row["id"])
 
     def _ownership_proof(
         self,
@@ -326,6 +406,11 @@ class RuntimeServiceManager:
 
     def _public(self, row: dict[str, Any], *, port_active: bool | None = None) -> dict[str, Any]:
         body = dict(row)
+        terminal_health = (
+            body.get("health")
+            if body.get("health") in {"STOPPED", "EXITED", "CRASHED"}
+            else None
+        )
         facts = self._process_facts(int(body["pid"])) if body.get("pid") else None
         if body.get("pid"):
             proof, proof_reason = self._ownership_proof(body, facts)
@@ -340,9 +425,20 @@ class RuntimeServiceManager:
                 body["ownership"] = "OWNED_VERIFIED"
                 body["status_reason"] = proof_reason if port_active else "owned process is alive; loopback port is not ready"
             elif alive:
-                body["health"] = "UNVERIFIED"
-                body["ownership"] = "OWNERSHIP_UNPROVEN"
-                body["status_reason"] = proof_reason
+                if terminal_health is not None:
+                    # A terminal record retains historical PID evidence. If
+                    # that number now names a different process, it remains
+                    # non-stoppable but cannot permanently block a safe fresh
+                    # launch on a free port.
+                    body["health"] = terminal_health
+                    body["ownership"] = "OWNED_EXITED"
+                    body["status_reason"] = (
+                        f"{proof_reason}; terminal process evidence is preserved and the live PID is not owned"
+                    )
+                else:
+                    body["health"] = "UNVERIFIED"
+                    body["ownership"] = "OWNERSHIP_UNPROVEN"
+                    body["status_reason"] = proof_reason
             elif body.get("health") not in {"STOPPED", "EXITED"}:
                 process = self._processes.get(body["id"])
                 if process is not None:
@@ -365,6 +461,7 @@ class RuntimeServiceManager:
         body["preview_is_validation_evidence"] = False
         return body
 
+    @_supervisor_locked
     def _reconcile(self, row: dict[str, Any], *, port_active: bool | None = None) -> dict[str, Any]:
         observed = self._public(row, port_active=port_active)
         if observed["health"] != "EXTERNAL":
@@ -378,6 +475,7 @@ class RuntimeServiceManager:
             }
         return observed
 
+    @_supervisor_locked
     def list_services(self, *, include_scopes: bool = True) -> list[dict[str, Any]]:
         project = self._project
         if project is None:
@@ -427,6 +525,7 @@ class RuntimeServiceManager:
                 persisted[row["id"]] = self._public(row, port_active=observed_port(row))
         return sorted(persisted.values(), key=lambda row: (row.get("runbook_id") or "", row.get("cwd") or "", row["id"]))
 
+    @_supervisor_locked
     def status(self) -> dict[str, Any]:
         """Legacy selected-project canonical app status."""
 
@@ -513,6 +612,7 @@ class RuntimeServiceManager:
         child["HOST"] = "127.0.0.1"
         return child
 
+    @_supervisor_locked
     def action(
         self,
         action: str,
@@ -527,14 +627,16 @@ class RuntimeServiceManager:
         if action == "stop":
             project = self._project
             if project is None:
-                raise RuntimeServiceError("no managed project is selected")
+                raise RuntimeServiceMissingError("no managed project is selected")
             _cwd, worktree_path, runbook_id = self._scope(worktree_path, runbook_id)
             expected_id = self._service_id(project.project_id, worktree_path, runbook_id)
             if service_id is not None and service_id != expected_id:
                 raise RuntimeServiceError("runtime service id does not match the validated project scope")
             stored = self.ctx.state.get_runtime_service(expected_id, project_id=project.project_id)
             if stored is None:
-                raise RuntimeServiceError("runtime service stop refused: no durable owned service exists for this scope")
+                raise RuntimeServiceMissingError(
+                    "runtime service stop refused: no durable owned service exists for this scope"
+                )
             return self._stop(stored, actor)
         declared = self._declared_row(worktree_path, runbook_id)
         if service_id is not None and service_id != declared["id"]:
@@ -563,7 +665,20 @@ class RuntimeServiceManager:
                 candidate[field] = stored.get(field)
         return candidate
 
+    @_supervisor_locked
     def _start(self, row: dict[str, Any], actor: str) -> dict[str, Any]:
+        retained_process = self._processes.get(row["id"])
+        if retained_process is not None:
+            if retained_process.poll() is None:
+                raise RuntimeServiceError(
+                    "runtime service start refused: a previously launched child is still alive; "
+                    "the exact handle remains tracked and no signal was sent"
+                )
+            # poll() proved this exact child exited. wait() now reaps it before
+            # its ownership handle can be replaced by a subsequent launch.
+            retained_process.wait()
+            if self._processes.get(row["id"]) is retained_process:
+                self._processes.pop(row["id"])
         observed = self._public(row)
         if not observed["actions"]["start"]:
             raise RuntimeServiceError(f"runtime service start refused: {observed['status_reason']}")
@@ -588,7 +703,13 @@ class RuntimeServiceManager:
                 env=self._child_environment(),
             )
         self._processes[row["id"]] = process
-        facts = self._capture_process_identity(process, row)
+        try:
+            facts = self._capture_process_identity(process, row)
+        except RuntimeServiceError as exc:
+            self._cleanup_failed_launch(process, row, str(exc))
+            raise RuntimeServiceError(
+                f"{exc}; verified launched process group terminated and the exact child was reaped"
+            ) from None
         now = utc_now_iso()
         updated = dict(row)
         updated.update(
@@ -613,17 +734,25 @@ class RuntimeServiceManager:
         )
         return self._reconcile(stored)
 
+    @_supervisor_locked
     def _stop(self, row: dict[str, Any], actor: str) -> dict[str, Any]:
         verified, reason = self._ownership_proof(row)
         if not verified:
             raise RuntimeServiceError(f"runtime service stop refused: {reason}")
         pid = int(row["pid"])
         session_id = int(row["process_session_id"])
-        os.killpg(session_id, signal.SIGTERM)
+        try:
+            os.killpg(session_id, signal.SIGTERM)
+        except OSError as exc:
+            detail = exc.strerror or str(exc) or type(exc).__name__
+            raise RuntimeServiceError(
+                "runtime service stop refused: SIGTERM could not be sent to the "
+                f"verified owned process group: {detail}"
+            ) from exc
         process = self._processes.get(row["id"])
         if process is not None and process.pid != pid:
             process = None
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + _TERMINATION_TIMEOUT_SECONDS
         exit_code = row.get("exit_code")
         if process is not None:
             try:
@@ -669,6 +798,7 @@ class RuntimeServiceManager:
         )
         return self._public(stored)
 
+    @_supervisor_locked
     def shutdown_owned(self) -> bool:
         stopped = False
         # Project selection is a view concern. This manager can start service A,

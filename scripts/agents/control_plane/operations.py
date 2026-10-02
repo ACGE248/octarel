@@ -21,7 +21,11 @@ from scripts.ci.runtime_paths import has_non_runtime_changes
 from ..redaction import redact_text
 from .models import TASK_TERMINAL_STATES, WorktreeRecord, task_projection, utc_now_iso
 from .recovery import discover_git_worktrees, pid_is_alive, reconcile_worktree_locks
-from .runtime_services import RuntimeServiceError, RuntimeServiceManager
+from .runtime_services import (
+    RuntimeServiceError,
+    RuntimeServiceManager,
+    RuntimeServiceMissingError,
+)
 
 OP_STATES = frozenset({"IDLE", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED", "CONFLICT", "CANCELLED"})
 GIT_ACTIONS = frozenset({"fetch", "pull", "push", "prepare_merge", "merge", "refresh"})
@@ -634,9 +638,10 @@ class AppLifecycleManager(RuntimeServiceManager):
             return super().action(action, actor, **scope)
         except RuntimeServiceError as exc:
             # Existing command/API callers already translate OperationError to
-            # a 409. Preserve that contract while using the generic manager.
+            # a 409. Preserve the legacy missing-process wording only for that
+            # exact case; identity and signal refusals must remain truthful.
             legacy = "no Control-Center-managed development process is running"
-            message = legacy if action == "stop" else str(exc)
+            message = legacy if isinstance(exc, RuntimeServiceMissingError) else str(exc)
             raise OperationError(message) from None
 
     def shutdown_owned(self) -> bool:

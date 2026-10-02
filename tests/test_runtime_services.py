@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import signal
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -102,6 +104,40 @@ def test_declaration_rejects_shell_interpolation_and_secret_arguments(tmp_path: 
     manager = _manager(tmp_path, project)
     with pytest.raises(RuntimeServiceError):
         manager._declaration()
+
+
+@pytest.mark.parametrize(
+    "bind_arg",
+    [
+        "0.0.0.0:8765",
+        "--bind=0.0.0.0:8765",
+        "[::]:8765",
+        "--host=[::]:8765",
+        "--host=:::8765",
+        "--bind=:8765",
+        "tcp://0.0.0.0:8765",
+        "*:8765",
+    ],
+)
+def test_declaration_rejects_wildcard_hosts_with_ports(tmp_path: Path, bind_arg: str) -> None:
+    project = _project(
+        tmp_path,
+        runtime_service_argv=json.dumps(["python3", "server.py", bind_arg]),
+    )
+    with pytest.raises(RuntimeServiceError, match="public bind"):
+        _manager(tmp_path, project)._declaration()
+
+
+@pytest.mark.parametrize(
+    "bind_arg",
+    ["127.0.0.1:8765", "--bind=127.0.0.1:8765", "[::1]:8765", "--host=localhost:8765"],
+)
+def test_declaration_preserves_explicit_loopback_hosts(tmp_path: Path, bind_arg: str) -> None:
+    project = _project(
+        tmp_path,
+        runtime_service_argv=json.dumps(["python3", "server.py", bind_arg]),
+    )
+    assert _manager(tmp_path, project)._declaration()[0][-1] == bind_arg
 
 
 def test_declaration_requires_an_explicit_port(tmp_path: Path) -> None:
@@ -256,6 +292,186 @@ def test_start_persists_complete_identity_and_stop_signals_only_verified_session
     assert signalled and signalled[0][0] == 8123
     assert stopped["health"] == "STOPPED"
     assert stopped["exit_code"] == -15
+
+
+def test_failed_identity_capture_terminates_group_waits_reaps_and_forgets_handle(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = manager._declared_row()
+    waits: list[float] = []
+
+    class FailedCaptureProcess:
+        pid = 8234
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            waits.append(timeout)
+            return -signal.SIGTERM
+
+    monkeypatch.setattr(manager, "_port_active", lambda _port: False)
+    monkeypatch.setattr(
+        manager,
+        "_process_facts",
+        lambda _pid: {
+            "create_time": 456.0,
+            "cwd": str(tmp_path / "wrong-cwd"),
+            "argv": row["argv"],
+            "session_id": FailedCaptureProcess.pid,
+            "alive": True,
+        },
+    )
+    monkeypatch.setattr(manager, "_child_environment", lambda: {"PATH": "/usr/bin"})
+    process = FailedCaptureProcess()
+    monkeypatch.setattr("subprocess.Popen", lambda *_a, **_k: process)
+    monkeypatch.setattr("os.getsid", lambda pid: pid)
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr("os.killpg", lambda session, sig: signals.append((session, sig)))
+
+    with pytest.raises(RuntimeServiceError, match="terminated.*reaped"):
+        manager._start(row, "local")
+
+    assert signals == [(process.pid, signal.SIGTERM)]
+    assert len(waits) == 1 and 0 < waits[0] <= 8
+    assert row["id"] not in manager._processes
+
+
+def test_failed_identity_capture_that_will_not_exit_stays_tracked_without_force_kill(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = manager._declared_row()
+
+    class StuckCaptureProcess:
+        pid = 8235
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            raise subprocess.TimeoutExpired(cmd="fixture", timeout=timeout)
+
+    monkeypatch.setattr(manager, "_port_active", lambda _port: False)
+    monkeypatch.setattr(
+        manager,
+        "_process_facts",
+        lambda _pid: {
+            "create_time": 457.0,
+            "cwd": str(tmp_path / "wrong-cwd"),
+            "argv": row["argv"],
+            "session_id": StuckCaptureProcess.pid,
+            "alive": True,
+        },
+    )
+    monkeypatch.setattr(manager, "_child_environment", lambda: {"PATH": "/usr/bin"})
+    process = StuckCaptureProcess()
+    monkeypatch.setattr("subprocess.Popen", lambda *_a, **_k: process)
+    monkeypatch.setattr("os.getsid", lambda pid: pid)
+    monkeypatch.setattr("os.killpg", lambda *_args: None)
+
+    with pytest.raises(RuntimeServiceError, match="remains tracked.*refuses to force-kill"):
+        manager._start(row, "local")
+
+    assert manager._processes[row["id"]] is process
+
+
+def test_live_retained_failed_launch_handle_blocks_new_popen_without_signal(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = manager._declared_row()
+    polls = 0
+
+    class LiveRetainedProcess:
+        pid = 8236
+
+        @staticmethod
+        def poll() -> None:
+            nonlocal polls
+            polls += 1
+
+    process = LiveRetainedProcess()
+    manager._processes[row["id"]] = process
+    monkeypatch.setattr(
+        "subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("a live retained child must block Popen"),
+    )
+    monkeypatch.setattr(
+        "os.killpg",
+        lambda *_args: pytest.fail("a retained child must not be signalled by a later start"),
+    )
+
+    with pytest.raises(RuntimeServiceError, match="previously launched child is still alive"):
+        manager._start(row, "local")
+
+    assert polls == 1
+    assert manager._processes[row["id"]] is process
+
+
+def test_exited_retained_failed_launch_handle_is_reaped_before_new_popen(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = manager._declared_row()
+    events: list[str] = []
+
+    class ExitedRetainedProcess:
+        pid = 8237
+
+        @staticmethod
+        def poll() -> int:
+            events.append("poll-retained")
+            return -signal.SIGTERM
+
+        @staticmethod
+        def wait() -> int:
+            events.append("wait-retained")
+            return -signal.SIGTERM
+
+    class NewProcess:
+        pid = 8238
+
+    retained = ExitedRetainedProcess()
+    launched = NewProcess()
+    manager._processes[row["id"]] = retained
+    monkeypatch.setattr(manager, "_port_active", lambda _port: False)
+    monkeypatch.setattr(manager, "_child_environment", lambda: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(
+        manager,
+        "_capture_process_identity",
+        lambda _process, launch_row: {
+            "create_time": 458.0,
+            "cwd": launch_row["cwd"],
+            "argv": launch_row["argv"],
+            "session_id": launched.pid,
+            "alive": True,
+        },
+    )
+    monkeypatch.setattr(manager, "_reconcile", lambda stored: stored)
+
+    def popen(*_args, **_kwargs):
+        assert events == ["poll-retained", "wait-retained"]
+        assert row["id"] not in manager._processes
+        events.append("popen-new")
+        return launched
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    monkeypatch.setattr(
+        "os.killpg",
+        lambda *_args: pytest.fail("reaping an exited retained child must not signal it"),
+    )
+
+    started = manager._start(row, "local")
+
+    assert events == ["poll-retained", "wait-retained", "popen-new"]
+    assert manager._processes[row["id"]] is launched
+    assert started["pid"] == launched.pid
 
 
 def test_stop_waits_for_and_reaps_the_exact_child_before_persisting(monkeypatch, tmp_path: Path) -> None:
@@ -427,6 +643,51 @@ def test_live_but_uninspectable_process_fails_closed_without_becoming_crashed(mo
     assert observed["actions"] == {"start": False, "stop": False, "restart": False}
 
 
+def test_terminal_pid_reuse_preserves_evidence_but_allows_safe_fresh_start(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = _persisted(
+        manager,
+        health="STOPPED",
+        ownership="OWNED_EXITED",
+        stopped_at="2026-10-02T10:05:00+00:00",
+        exit_code=-15,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_process_facts",
+        lambda _pid: {
+            "create_time": 999.0,
+            "cwd": row["cwd"],
+            "argv": row["process_argv"],
+            "session_id": row["process_session_id"],
+            "alive": True,
+        },
+    )
+    monkeypatch.setattr(manager, "_port_active", lambda _port: False)
+    monkeypatch.setattr("os.killpg", lambda *_args: pytest.fail("a reused PID must never be signalled"))
+
+    observed = manager._reconcile(row)
+    assert observed["health"] == "STOPPED"
+    assert observed["ownership"] == "OWNED_EXITED"
+    assert observed["pid"] == row["pid"]
+    assert observed["process_create_time"] == row["process_create_time"]
+    assert observed["actions"] == {"start": True, "stop": False, "restart": False}
+    assert "PID create time changed" in observed["status_reason"]
+
+    launches: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        manager,
+        "_start",
+        lambda candidate, _actor: launches.append(candidate) or {"health": "STARTING"},
+    )
+    assert manager.action("start", "local") == {"health": "STARTING"}
+    assert launches[0]["pid"] is None
+    stored = manager.ctx.state.get_runtime_service(row["id"], project_id=row["project_id"])
+    assert stored is not None and stored["pid"] == row["pid"]
+
+
 def test_crashed_service_preserves_evidence_and_is_restart_eligible(monkeypatch, tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     row = _persisted(manager, log_pointer="runtime-services/preserved.log")
@@ -511,6 +772,74 @@ def test_shutdown_checks_owned_services_across_project_selection(monkeypatch, tm
     assert set(stopped) == {"one", "two"}
 
 
+def test_stale_poll_cannot_overwrite_identity_launched_by_concurrent_start(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    stale = manager.ctx.state.upsert_runtime_service(manager._declared_row())
+    poll_captured = threading.Event()
+    release_poll = threading.Event()
+    start_attempted = threading.Event()
+    launch_entered = threading.Event()
+    errors: list[Exception] = []
+    original_reconcile = manager._reconcile
+
+    def delayed_reconcile(row: dict[str, object], *, port_active: bool | None = None) -> dict[str, object]:
+        assert row["pid"] is None
+        poll_captured.set()
+        assert release_poll.wait(timeout=2)
+        return original_reconcile(row, port_active=port_active)
+
+    def launched(candidate: dict[str, object], actor: str) -> dict[str, object]:
+        launch_entered.set()
+        updated = dict(candidate)
+        updated.update(
+            pid=9345,
+            process_create_time=700.0,
+            process_session_id=9345,
+            process_argv=list(candidate["argv"]),
+            health="STARTING",
+            ownership="OWNED_VERIFIED",
+            owner=actor,
+        )
+        return manager.ctx.state.upsert_runtime_service(updated)
+
+    monkeypatch.setattr(manager, "_reconcile", delayed_reconcile)
+    monkeypatch.setattr(manager, "_start", launched)
+    monkeypatch.setattr(manager, "_port_active", lambda _port: False)
+
+    def poll() -> None:
+        try:
+            manager.list_services(include_scopes=False)
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def start() -> None:
+        start_attempted.set()
+        try:
+            manager.action("start", "threadpool-start", service_id=stale["id"])
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    poll_thread = threading.Thread(target=poll)
+    start_thread = threading.Thread(target=start)
+    poll_thread.start()
+    assert poll_captured.wait(timeout=2)
+    start_thread.start()
+    assert start_attempted.wait(timeout=2)
+    assert not launch_entered.wait(timeout=0.1), "start must wait for stale reconciliation to finish"
+    release_poll.set()
+    poll_thread.join(timeout=2)
+    start_thread.join(timeout=2)
+
+    assert not poll_thread.is_alive() and not start_thread.is_alive()
+    assert errors == []
+    assert launch_entered.is_set()
+    stored = manager.ctx.state.get_runtime_service(stale["id"], project_id=stale["project_id"])
+    assert stored is not None and stored["pid"] == 9345
+    assert stored["process_create_time"] == 700.0
+
+
 def test_historical_runbook_with_deleted_worktree_does_not_hide_canonical_service(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     manager.ctx.state.upsert_runbook(
@@ -564,3 +893,82 @@ def test_selected_project_runtime_api_exposes_server_derived_action_state(monkey
     )
     assert refused.status_code == 409
     assert "no Control-Center-managed" in refused.json()["detail"]
+    legacy_refused = client.post("/api/app-lifecycle/stop", json={"confirm": True})
+    assert legacy_refused.status_code == 409
+    assert "no Control-Center-managed" in legacy_refused.json()["detail"]
+
+
+def test_generic_and_legacy_stop_apis_preserve_identity_and_signal_refusal_reasons(
+    monkeypatch, tmp_path: Path
+) -> None:
+    state = State(tmp_path / "state.db")
+    project = _project(tmp_path)
+    state.upsert_project(contract_to_row(project))
+    state.set_control_setting("selected_project_id", project.project_id)
+    registry = load_registry()
+    ctx = CommandContext(
+        state=state,
+        registry=registry,
+        scheduler=Scheduler(),
+        supervisor=Supervisor(registry=registry, repo_root=tmp_path, state=state),
+        repo_root=tmp_path,
+    )
+    app = create_app(ctx, roadmap_path=tmp_path / "missing-roadmap.md")
+    manager = app.state.app_lifecycle
+    row = _persisted(manager)
+    monkeypatch.setattr(
+        manager,
+        "_process_facts",
+        lambda _pid: {
+            "create_time": 999.0,
+            "cwd": row["cwd"],
+            "argv": row["process_argv"],
+            "session_id": row["process_session_id"],
+            "alive": True,
+        },
+    )
+    monkeypatch.setattr("os.killpg", lambda *_args: pytest.fail("identity refusal must not signal"))
+    client = TestClient(app)
+
+    responses = [
+        client.post(
+            f"/api/runtime-services/{row['id']}/stop",
+            json={"confirm": True},
+        ),
+        client.post("/api/app-lifecycle/stop", json={"confirm": True}),
+    ]
+    assert all(response.status_code == 409 for response in responses)
+    for response in responses:
+        detail = response.json()["detail"]
+        assert "PID create time changed" in detail
+        assert "no Control-Center-managed" not in detail
+
+    monkeypatch.setattr(
+        manager,
+        "_process_facts",
+        lambda _pid: {
+            "create_time": row["process_create_time"],
+            "cwd": row["cwd"],
+            "argv": row["process_argv"],
+            "session_id": row["process_session_id"],
+            "alive": True,
+        },
+    )
+
+    def refuse_signal(*_args: object) -> None:
+        raise PermissionError(1, "fixture signal permission denied")
+
+    monkeypatch.setattr("os.killpg", refuse_signal)
+    signal_responses = [
+        client.post(
+            f"/api/runtime-services/{row['id']}/stop",
+            json={"confirm": True},
+        ),
+        client.post("/api/app-lifecycle/stop", json={"confirm": True}),
+    ]
+    assert all(response.status_code == 409 for response in signal_responses)
+    for response in signal_responses:
+        detail = response.json()["detail"]
+        assert "SIGTERM could not be sent" in detail
+        assert "fixture signal permission denied" in detail
+        assert "no Control-Center-managed" not in detail

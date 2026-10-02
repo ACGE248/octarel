@@ -28,6 +28,9 @@ row with no observed process argv is not backfilled from its declaration and
 cannot authorize a signal. Logs live under `<state dir>/runtime-services/`;
 the database stores the relative pointer, not a duplicate raw log. A dead or
 ambiguous process record is retained as evidence and cannot authorize a signal.
+If a terminal row's historical PID is later reused, observation preserves that
+row as non-stoppable terminal evidence; with a free declared port, it remains
+eligible for a fresh launch rather than being reclassified as a live owner.
 Runtime preview URLs are operational metadata, never test or acceptance
 evidence.
 
