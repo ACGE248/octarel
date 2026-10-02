@@ -49,6 +49,12 @@ from . import usage_telemetry as _usage_telemetry
 from .agent_activity import latest_subagents, list_attempts, read_attempt
 from .agent_session import MODE_FRESH, age_seconds, request_forced_fresh
 from .commands import CommandContext, CommandError, apply_command
+from .config_revisions import (
+    CONFIGURATION_OWNERSHIP,
+    ConfigurationRevisionError,
+    InvalidConfigurationError,
+    StaleConfigurationError,
+)
 from .context_cursor import (
     OUTCOME_DELIVERED,
     REASON_POLICY_DIGEST_CHANGED,
@@ -85,6 +91,7 @@ from .remote_access import (
 from .routing import MODE_SINGLE_PRIMARY, compute_routing
 from .run_events import sanitize_data, sanitize_text, validate_evidence_pointers
 from .runbooks import list_presets
+from .scheduler import ConcurrencyPolicy
 from .steering import (
     DESTRUCTIVE_VERBS,
     nl_ai_route_available,
@@ -937,6 +944,40 @@ def create_app(
                 )
             return [dict(row) for row in worktree_status_cache["rows"]]
 
+    def configuration_actor(request: Request) -> str:
+        identity = _remote_identity_of(request)
+        return f"remote:{identity.email}" if identity is not None else "local-operator"
+
+    def sync_scheduler_configuration(settings: dict[str, str]) -> None:
+        """Apply validated concurrency values to the live scheduler as well as SQLite."""
+
+        current = ctx.scheduler.policy
+
+        def configured(key: str, fallback: int) -> int:
+            return int(settings.get(key, str(fallback)))
+
+        ctx.scheduler.policy = ConcurrencyPolicy(
+            max_global_workers=configured("max_global_workers", current.max_global_workers),
+            max_write_workers=configured("max_write_workers", current.max_write_workers),
+            max_extra_read_workers=configured("max_read_workers", current.max_extra_read_workers),
+            max_heavy_jobs=configured("max_heavy_workers", current.max_heavy_jobs),
+            max_per_provider=configured("max_provider_workers", current.max_per_provider),
+            provider_limits=current.provider_limits,
+        )
+
+    def configuration_failure(
+        request: Request, *, verb: str, target: str, actor: str, exc: ConfigurationRevisionError
+    ) -> None:
+        # No request values are logged: validation failures may have been
+        # caused by a secret- or path-shaped value that must not become audit
+        # evidence either.
+        ctx.state.record_event(
+            category="configuration_audit",
+            level="warning",
+            message=f"{actor} refused {verb}({target}): {exc}",
+        )
+        _record_remote_audit(ctx, request, verb=verb, target=target, result=f"REFUSED: {exc}")
+
     # ENG-CP-03 (issue #165): every project-dependent read in this app goes
     # through one of these three helpers, so "which project am I looking at" is
     # resolved in exactly one place per record type rather than at ~25 call
@@ -1100,6 +1141,142 @@ def create_app(
                 "authorized to do; perform this action from the machine running the Control Plane"
             ),
         )
+
+    @app.get("/api/configuration")
+    def configuration_get() -> dict[str, Any]:
+        """Runtime snapshot plus explicit repository/runtime ownership facts."""
+
+        return {
+            "current_revision": sanitize_data(ctx.state.current_configuration_revision()),
+            "ownership": CONFIGURATION_OWNERSHIP,
+        }
+
+    @app.get("/api/configuration/revisions")
+    def configuration_revisions(limit: int = 100) -> dict[str, Any]:
+        return {
+            "revisions": [
+                sanitize_data(revision)
+                for revision in ctx.state.list_configuration_revisions(limit=limit)
+            ],
+            "ownership": CONFIGURATION_OWNERSHIP,
+        }
+
+    @app.post("/api/configuration/apply")
+    def configuration_apply(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        actor = configuration_actor(request)
+        target = "runtime-settings"
+        try:
+            changes = payload.get("changes")
+            predecessor_id = payload.get("predecessor_id")
+            reason = payload.get("reason")
+            if not isinstance(changes, dict):
+                raise InvalidConfigurationError("changes must be an object")
+            if isinstance(predecessor_id, bool) or not isinstance(predecessor_id, int):
+                raise InvalidConfigurationError("predecessor_id must be an integer")
+            if not isinstance(reason, str):
+                raise InvalidConfigurationError("reason must be a string")
+            revision = ctx.state.apply_configuration(
+                changes,
+                actor=actor,
+                reason=reason,
+                predecessor_id=predecessor_id,
+            )
+        except ConfigurationRevisionError as exc:
+            configuration_failure(request, verb="configuration_apply", target=target, actor=actor, exc=exc)
+            status = 409 if isinstance(exc, StaleConfigurationError) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from None
+        sync_scheduler_configuration(revision["settings"])
+        ctx.state.record_event(
+            category="configuration_audit",
+            message=f"{actor} applied configuration revision {revision['id']}",
+        )
+        _record_remote_audit(
+            ctx,
+            request,
+            verb="configuration_apply",
+            target=str(revision["id"]),
+            result="OK",
+        )
+        return {"revision": sanitize_data(revision), "ownership": CONFIGURATION_OWNERSHIP}
+
+    @app.post("/api/configuration/rollback/preview")
+    def configuration_rollback_preview(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run the exact rollback validation path without changing configuration."""
+
+        actor = configuration_actor(request)
+        target = str(payload.get("revision_id", "-"))
+        try:
+            revision_id = payload.get("revision_id")
+            predecessor_id = payload.get("predecessor_id")
+            reason = payload.get("reason")
+            if isinstance(revision_id, bool) or not isinstance(revision_id, int):
+                raise InvalidConfigurationError("revision_id must be an integer")
+            if isinstance(predecessor_id, bool) or not isinstance(predecessor_id, int):
+                raise InvalidConfigurationError("predecessor_id must be an integer")
+            if not isinstance(reason, str):
+                raise InvalidConfigurationError("reason must be a string")
+            preview = ctx.state.preview_configuration_rollback(
+                revision_id,
+                actor=actor,
+                reason=reason,
+                predecessor_id=predecessor_id,
+            )
+        except ConfigurationRevisionError as exc:
+            configuration_failure(
+                request,
+                verb="configuration_rollback_preview",
+                target=target,
+                actor=actor,
+                exc=exc,
+            )
+            status = 409 if isinstance(exc, StaleConfigurationError) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from None
+        _record_remote_audit(
+            ctx,
+            request,
+            verb="configuration_rollback_preview",
+            target=target,
+            result="VALID",
+        )
+        return sanitize_data({"preview": preview, "ownership": CONFIGURATION_OWNERSHIP})
+
+    @app.post("/api/configuration/rollback")
+    def configuration_rollback(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        actor = configuration_actor(request)
+        target = str(payload.get("revision_id", "-"))
+        try:
+            revision_id = payload.get("revision_id")
+            predecessor_id = payload.get("predecessor_id")
+            reason = payload.get("reason")
+            if isinstance(revision_id, bool) or not isinstance(revision_id, int):
+                raise InvalidConfigurationError("revision_id must be an integer")
+            if isinstance(predecessor_id, bool) or not isinstance(predecessor_id, int):
+                raise InvalidConfigurationError("predecessor_id must be an integer")
+            if not isinstance(reason, str):
+                raise InvalidConfigurationError("reason must be a string")
+            revision = ctx.state.rollback_configuration(
+                revision_id,
+                actor=actor,
+                reason=reason,
+                predecessor_id=predecessor_id,
+            )
+        except ConfigurationRevisionError as exc:
+            configuration_failure(request, verb="configuration_rollback", target=target, actor=actor, exc=exc)
+            status = 409 if isinstance(exc, StaleConfigurationError) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from None
+        sync_scheduler_configuration(revision["settings"])
+        ctx.state.record_event(
+            category="configuration_audit",
+            message=f"{actor} rolled configuration back to {target} as revision {revision['id']}",
+        )
+        _record_remote_audit(
+            ctx,
+            request,
+            verb="configuration_rollback",
+            target=target,
+            result=f"OK: revision {revision['id']}",
+        )
+        return {"revision": sanitize_data(revision), "ownership": CONFIGURATION_OWNERSHIP}
 
     @app.get("/api/projects")
     def projects_list() -> dict[str, Any]:

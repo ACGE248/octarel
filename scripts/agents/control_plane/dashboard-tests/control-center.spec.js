@@ -665,8 +665,39 @@ test('Execution Events filters typed classes and opens bounded evidence', async 
   await expect(timeline).toContainText('MEASURED');
   await timeline.locator('details.event-details summary').click();
   await expect(timeline).toContainText('.agent-output/ENG-AGENT-02-S5/claude-code/fixture-event/summary.md');
+
+  /** @type {() => void} */
+  let releaseEvidence = () => {};
+  const evidenceRelease = new Promise((resolve) => {
+    releaseEvidence = () => resolve();
+  });
+  await page.route('**/api/events/*/evidence/summary', async (route) => {
+    const response = await route.fetch();
+    await evidenceRelease;
+    await route.fulfill({ response });
+  });
+
   await timeline.getByRole('button', { name: 'Open summary' }).click();
+  const previewBeforeRefresh = await timeline.locator('.event-evidence-preview').elementHandle();
+  expect(previewBeforeRefresh).not.toBeNull();
+  if (!previewBeforeRefresh) throw new Error('Evidence preview was not rendered');
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/events?limit=100'));
+  // Filtering calls the same refreshEvents render path as the two-second poll,
+  // while the evidence response is deliberately held until the old node detaches.
+  await page.locator('#history-search').fill('Execution');
+  await refreshed;
+  await expect.poll(() => previewBeforeRefresh.evaluate((node) => node.isConnected)).toBe(false);
+
+  releaseEvidence();
+  const previewAfterRefresh = timeline.locator('.event-evidence-preview');
+  await expect(previewAfterRefresh).toContainText('Fixture measured lease evidence.');
+  await expect(previewAfterRefresh).toBeVisible();
+
+  const rerendered = page.waitForResponse((response) => response.url().endsWith('/api/events?limit=100'));
+  await page.locator('#history-search').fill('');
+  await rerendered;
   await expect(timeline.locator('.event-evidence-preview')).toContainText('Fixture measured lease evidence.');
+  await expect(timeline.locator('.event-evidence-preview')).toBeVisible();
 });
 
 test('Quick Start resolves the fixture ledger task and shows a ready Prepared Run', async ({ page, request, baseURL }) => {
@@ -908,6 +939,71 @@ test('dark mode is the default and light mode re-themes the same layout', async 
   await navTo(page, 'view-settings');
   await page.locator('#theme-select').selectOption('dark');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
+test('ENG-PC-08 Settings shows ownership, history, diffs, and validated rollback preview', async ({ page, request }) => {
+  await navTo(page, 'view-settings');
+
+  const runtime = page.locator('#configuration-runtime-values');
+  await expect(runtime.locator('.configuration-value')).toHaveCount(7);
+  await expect(runtime).toContainText('max_write_workers');
+  await expect(runtime).toContainText('Source: runtime revision #2 · Actor: fixture:operator');
+
+  const repository = page.locator('#configuration-repository-values');
+  await expect(repository).toContainText('scripts/agents/workers.json');
+  await expect(repository).toContainText('.agents/');
+  await expect(repository).toContainText('READ-ONLY');
+  await expect(repository.locator('input, select, textarea, button')).toHaveCount(0);
+
+  const history = page.locator('#configuration-history');
+  const initialRevisions = (await (await request.get('/api/configuration/revisions')).json()).revisions;
+  const initialCurrentId = initialRevisions[0].id;
+  await expect(history.locator(`[data-revision-id="${initialCurrentId}"]`))
+    .toContainText(`Revision #${initialCurrentId} — CURRENT`);
+  await expect(history.locator('h4', { hasText: '— CURRENT' })).toHaveCount(1);
+
+  const restored = history.locator('[data-revision-id="2"]');
+  await expect(restored).toContainText('Actor: fixture:operator');
+  await expect(restored).toContainText('Reason: restore valid runtime configuration');
+  await expect(restored.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('UNKNOWN — not set');
+  await expect(restored.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('4');
+
+  const legacy = history.locator('[data-revision-id="1"]');
+  const emptyDiff = legacy.locator('.configuration-diff', { hasText: 'held_task_ids' });
+  await expect(emptyDiff).toContainText('UNKNOWN — not set');
+  await expect(emptyDiff).toContainText('EMPTY — set explicitly');
+  await expect(emptyDiff).toContainText('Source: revision #1 · Actor: fixture:migration');
+
+  const selector = page.getByLabel('Rollback revision');
+  const preview = page.getByRole('button', { name: 'Preview rollback' });
+  const apply = page.getByRole('button', { name: 'Apply rollback' });
+  const result = page.locator('#configuration-rollback-preview-result');
+  await selector.selectOption('0');
+  const countBefore = (await (await request.get('/api/configuration/revisions')).json()).revisions.length;
+  await preview.click();
+  await expect(result).toContainText('PREVIEW ONLY — VALIDATION: VALID');
+  await expect(result).toContainText('Configuration and revision history are unchanged');
+  await expect(apply).toBeEnabled();
+  const countAfterPreview = (await (await request.get('/api/configuration/revisions')).json()).revisions.length;
+  expect(countAfterPreview).toBe(countBefore);
+
+  await selector.selectOption('1');
+  await preview.click();
+  await expect(result).toContainText('PREVIEW ONLY — VALIDATION: REFUSED');
+  await expect(result).toContainText('held_task_ids must be a JSON array of strings');
+  await expect(apply).toBeDisabled();
+
+  await selector.selectOption('0');
+  await preview.click();
+  await expect(apply).toBeEnabled();
+  await apply.click();
+  await expect(result).toContainText(/ROLLBACK APPLIED — NEW REVISION #\d+/);
+  const revisionsAfterApply = (await (await request.get('/api/configuration/revisions')).json()).revisions;
+  const appliedRevisionId = revisionsAfterApply[0].id;
+  await expect(result).toContainText(`ROLLBACK APPLIED — NEW REVISION #${appliedRevisionId}`);
+  await expect(history.locator(`[data-revision-id="${appliedRevisionId}"]`))
+    .toContainText(`Revision #${appliedRevisionId} — CURRENT`);
+  expect(revisionsAfterApply).toHaveLength(countBefore + 1);
 });
 
 test('mobile bottom navigation and vertical workflow render at phone width', async ({ page }) => {

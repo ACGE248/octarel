@@ -270,6 +270,51 @@ def _git_add_video_editor_fixture_worktree(root: Path) -> Path:
     return worktree
 
 
+def _seed_configuration_revisions(state: State, created_at: str) -> None:
+    """Seed valid current state plus an invalid historical rollback candidate.
+
+    The invalid legacy snapshot lets the browser prove preview-time refusal and
+    the distinct EMPTY versus UNKNOWN rendering without weakening Scope A's
+    write validation. Direct inserts are confined to this throwaway fixture.
+    """
+
+    state._conn.executemany(
+        "INSERT INTO configuration_revisions "
+        "(actor, created_at, reason, changed_fields, predecessor_id, settings) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "fixture:migration",
+                created_at,
+                "legacy empty value retained for rollback validation coverage",
+                json.dumps({"held_task_ids": {"before": None, "after": ""}}, sort_keys=True),
+                0,
+                json.dumps({"held_task_ids": ""}, sort_keys=True),
+            ),
+            (
+                "fixture:operator",
+                created_at,
+                "restore valid runtime configuration",
+                json.dumps(
+                    {
+                        "held_task_ids": {"before": "", "after": None},
+                        "max_write_workers": {"before": None, "after": "4"},
+                    },
+                    sort_keys=True,
+                ),
+                1,
+                json.dumps({"max_write_workers": "4"}, sort_keys=True),
+            ),
+        ],
+    )
+    state._conn.execute(
+        "INSERT INTO control_settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        ("max_write_workers", "4"),
+    )
+    state._conn.commit()
+
+
 def _git_add_review_fixture_worktree(root: Path) -> tuple[Path, str]:
     """A real detached worktree at the fixture repo's own HEAD, registered as
 
@@ -306,6 +351,7 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
     review_worktree, review_head_sha = _git_add_review_fixture_worktree(root)
     registry = load_registry()
     state = State(state_path or default_db_path(root))
+    _seed_configuration_revisions(state, current_ref_at)
     for provider in seed_provider_states(registry):
         state.upsert_provider_state(provider)
     state.upsert_worktree(WorktreeRecord(path=str(root), branch=FIXTURE_BRANCH, locked=False))

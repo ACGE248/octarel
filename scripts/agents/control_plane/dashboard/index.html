@@ -887,7 +887,7 @@
       <section class="view" id="view-settings" role="tabpanel" hidden>
         <div class="card wide settings-card">
           <h2>Settings</h2>
-          <p class="hint">Only what this dashboard supports. Appearance and notifications are stored in this browser; the worker cap is applied through the orchestrator command layer.</p>
+          <p class="hint">Only what this dashboard supports. Appearance and notifications are stored in this browser; runtime orchestration changes are revisioned and repository-owned inputs remain read-only.</p>
 
           <section class="settings-section" aria-labelledby="set-appearance-title">
             <div class="settings-section-head"><h3 id="set-appearance-title">Appearance</h3><p class="hint">Stored in this browser only.</p></div>
@@ -933,6 +933,35 @@
                 </div>
               </div>
             </div>
+          </section>
+
+          <section class="settings-section" aria-labelledby="set-config-title">
+            <div class="settings-section-head"><h3 id="set-config-title">Configuration ownership</h3><p class="hint">Ownership comes from the server contract. Repository-controlled inputs cannot be edited here.</p></div>
+            <div class="configuration-ownership-grid">
+              <div>
+                <h4>Runtime-editable values</h4>
+                <div id="configuration-runtime-values" class="configuration-value-list" aria-live="polite"></div>
+              </div>
+              <div>
+                <h4>Repository-controlled values — read-only</h4>
+                <div id="configuration-repository-values" class="configuration-value-list" aria-live="polite"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section" aria-labelledby="set-history-title">
+            <div class="settings-section-head"><h3 id="set-history-title">Change history and rollback</h3><p class="hint">Preview validates the current predecessor and historical values without applying anything. Apply creates a new immutable revision.</p></div>
+            <div class="configuration-rollback-controls">
+              <label for="configuration-rollback-revision">Rollback revision</label>
+              <select id="configuration-rollback-revision" aria-label="Rollback revision"></select>
+              <button id="configuration-rollback-preview" type="button">Preview rollback</button>
+              <button id="configuration-rollback-apply" type="button" disabled>Apply rollback</button>
+            </div>
+            <div id="configuration-rollback-preview-result" class="configuration-preview" role="status" aria-live="polite">
+              <strong>PREVIEW ONLY</strong>
+              <span>Select a revision and preview it. Nothing has been applied.</span>
+            </div>
+            <div id="configuration-history" class="configuration-history" aria-live="polite"></div>
           </section>
         </div>
       </section>
