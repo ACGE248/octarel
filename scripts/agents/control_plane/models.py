@@ -36,6 +36,11 @@ TASK_PENDING = "PENDING"
 TASK_QUEUED = "QUEUED"
 TASK_BLOCKED = "BLOCKED"
 TASK_RUNNING = "RUNNING"
+TASK_WAITING_EXTERNAL = "WAITING_EXTERNAL"
+TASK_WAITING_APPROVAL = "WAITING_APPROVAL"
+TASK_WAITING_PROVIDER = "WAITING_PROVIDER"
+TASK_OWNER_ACTION_REQUIRED = "OWNER_ACTION_REQUIRED"
+TASK_RECOVERABLE_ORPHAN = "RECOVERABLE_ORPHAN"
 TASK_PAUSED = "PAUSED"
 TASK_SUCCEEDED = "SUCCEEDED"
 TASK_READY_LOCAL = "READY_LOCAL"
@@ -49,6 +54,11 @@ TASK_STATES = frozenset(
         TASK_QUEUED,
         TASK_BLOCKED,
         TASK_RUNNING,
+        TASK_WAITING_EXTERNAL,
+        TASK_WAITING_APPROVAL,
+        TASK_WAITING_PROVIDER,
+        TASK_OWNER_ACTION_REQUIRED,
+        TASK_RECOVERABLE_ORPHAN,
         TASK_PAUSED,
         TASK_SUCCEEDED,
         TASK_READY_LOCAL,
@@ -66,7 +76,14 @@ DEPENDENCY_SATISFIED_STATES = frozenset({TASK_SUCCEEDED, TASK_READY_LOCAL, TASK_
 
 # States that no longer occupy a concurrency slot.
 TASK_TERMINAL_STATES = frozenset(
-    {TASK_SUCCEEDED, TASK_READY_LOCAL, TASK_READY_BUT_UNMERGED, TASK_FAILED, TASK_CANCELLED}
+    {
+        TASK_SUCCEEDED,
+        TASK_READY_LOCAL,
+        TASK_READY_BUT_UNMERGED,
+        TASK_FAILED,
+        TASK_CANCELLED,
+        TASK_OWNER_ACTION_REQUIRED,
+    }
 )
 
 # Canonical Control Center task projection.  These categories intentionally do
@@ -74,8 +91,12 @@ TASK_TERMINAL_STATES = frozenset(
 # Overview, Tasks, workers, and worktree ownership views.
 TASK_ACTIVE_STATES = frozenset({TASK_RUNNING})
 TASK_QUEUED_STATES = frozenset({TASK_PENDING, TASK_QUEUED})
-TASK_PAUSED_STATES = frozenset({TASK_PAUSED})
-TASK_ATTENTION_STATES = frozenset({TASK_BLOCKED, TASK_FAILED})
+TASK_PAUSED_STATES = frozenset(
+    {TASK_PAUSED, TASK_WAITING_EXTERNAL, TASK_WAITING_APPROVAL, TASK_WAITING_PROVIDER}
+)
+TASK_ATTENTION_STATES = frozenset(
+    {TASK_BLOCKED, TASK_FAILED, TASK_OWNER_ACTION_REQUIRED, TASK_RECOVERABLE_ORPHAN}
+)
 
 
 def task_projection(state: str) -> str:
@@ -143,6 +164,13 @@ class Task:
     fallback_selected_worker: str | None = None
     fallback_automatic: bool | None = None
     stale_recovered: bool = False
+    # ENG-PC-07: recovery metadata qualifies the authoritative ``state`` above;
+    # it is deliberately not a second status. The evidence class distinguishes
+    # pid-only observation from pid/create-time identity proof.
+    pid_create_time: float | None = None
+    ownership_evidence_class: str = "NOT_REPORTED"
+    recovery_attempts: int = 0
+    recovery_max_attempts: int = 3
     # ENG-AGENT-10 managed-dispatch facts. These are projections of the one
     # scheduler/registry path, not a second task or provider-state system.
     owner_ref: str | None = None
@@ -199,6 +227,10 @@ class Task:
             "fallback_selected_worker": self.fallback_selected_worker,
             "fallback_automatic": None if self.fallback_automatic is None else (1 if self.fallback_automatic else 0),
             "stale_recovered": 1 if self.stale_recovered else 0,
+            "pid_create_time": self.pid_create_time,
+            "ownership_evidence_class": self.ownership_evidence_class,
+            "recovery_attempts": self.recovery_attempts,
+            "recovery_max_attempts": self.recovery_max_attempts,
             "owner_ref": self.owner_ref,
             "required_capability": self.required_capability,
             "changed_paths": json.dumps(list(self.changed_paths)),
@@ -251,6 +283,16 @@ class Task:
             fallback_selected_worker=row["fallback_selected_worker"] if "fallback_selected_worker" in row.keys() else None,
             fallback_automatic=(bool(row["fallback_automatic"]) if row["fallback_automatic"] is not None else None) if "fallback_automatic" in row.keys() else None,
             stale_recovered=bool(row["stale_recovered"]) if "stale_recovered" in row.keys() else False,
+            pid_create_time=row["pid_create_time"] if "pid_create_time" in row.keys() else None,
+            ownership_evidence_class=(
+                row["ownership_evidence_class"]
+                if "ownership_evidence_class" in row.keys()
+                else "NOT_REPORTED"
+            ),
+            recovery_attempts=row["recovery_attempts"] if "recovery_attempts" in row.keys() else 0,
+            recovery_max_attempts=(
+                row["recovery_max_attempts"] if "recovery_max_attempts" in row.keys() else 3
+            ),
             owner_ref=row["owner_ref"] if "owner_ref" in row.keys() else None,
             required_capability=row["required_capability"] if "required_capability" in row.keys() else None,
             changed_paths=tuple(json.loads(row["changed_paths"] or "[]")) if "changed_paths" in row.keys() else (),
@@ -666,6 +708,10 @@ class Event:
 RUNBOOK_DRAFT = "DRAFT"
 RUNBOOK_QUEUED = "QUEUED"
 RUNBOOK_RUNNING = "RUNNING"
+RUNBOOK_WAITING_EXTERNAL = "WAITING_EXTERNAL"
+RUNBOOK_WAITING_APPROVAL = "WAITING_APPROVAL"
+RUNBOOK_WAITING_PROVIDER = "WAITING_PROVIDER"
+RUNBOOK_RECOVERABLE_ORPHAN = "RECOVERABLE_ORPHAN"
 RUNBOOK_PAUSED = "PAUSED"
 RUNBOOK_STOPPING = "STOPPING"
 # ENG-AGENT-13 (issue #138): truthful non-terminal states between a successful
@@ -692,6 +738,10 @@ RUNBOOK_STATES = frozenset(
         RUNBOOK_DRAFT,
         RUNBOOK_QUEUED,
         RUNBOOK_RUNNING,
+        RUNBOOK_WAITING_EXTERNAL,
+        RUNBOOK_WAITING_APPROVAL,
+        RUNBOOK_WAITING_PROVIDER,
+        RUNBOOK_RECOVERABLE_ORPHAN,
         RUNBOOK_PAUSED,
         RUNBOOK_STOPPING,
         RUNBOOK_IMPLEMENTATION_COMPLETE,
@@ -711,6 +761,10 @@ RUNBOOK_LAUNCHED_STATES = frozenset(
     {
         RUNBOOK_QUEUED,
         RUNBOOK_RUNNING,
+        RUNBOOK_WAITING_EXTERNAL,
+        RUNBOOK_WAITING_APPROVAL,
+        RUNBOOK_WAITING_PROVIDER,
+        RUNBOOK_RECOVERABLE_ORPHAN,
         RUNBOOK_PAUSED,
         RUNBOOK_STOPPING,
         RUNBOOK_IMPLEMENTATION_COMPLETE,

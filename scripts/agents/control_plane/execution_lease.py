@@ -73,16 +73,12 @@ class LeaseGrant:
     task_id: str | None
 
 
-def _process_create_time(pid: int) -> float | None:
-    """Best-effort process start time for PID-reuse detection (see ``operations.py``'s identical use)."""
+from .recovery import process_create_time
 
-    try:
-        import psutil
-
-        return psutil.Process(pid).create_time()
-    except Exception:  # pragma: no cover - psutil optional / platform-dependent / pid gone
-        return None
-
+# Backward-compatible private seam retained for deterministic lease tests and
+# callers that already monkeypatch the create-time observation. The canonical
+# implementation now lives in recovery so locks, tasks, and leases share it.
+_process_create_time = process_create_time
 
 _OWNER_LIVE = "live"
 _OWNER_RECLAIMABLE = "reclaimable"
@@ -454,6 +450,26 @@ def reconcile_stale_leases(state: State, *, project_id: str | None = None) -> di
                 message=f"reclaimed stale execution lease for worktree {lease.worktree!r}: {why}",
                 project_id=lease.project_id,
             )
+            run_id = lease.runbook_id or lease.stable_task_id or lease.task_id
+            if run_id:
+                try:
+                    state.record_run_event(
+                        RunEvent(
+                            run_id=run_id,
+                            event_class="lease",
+                            event_type="lease.recovered",
+                            category="recovery",
+                            source="control_plane.execution_lease",
+                            provenance="MEASURED",
+                            task_id=lease.task_id,
+                            project_id=lease.project_id,
+                            level="warning",
+                            message="Execution lease released after stale-owner proof",
+                            data={"generation": lease.generation, "reason": why or "owner absent"},
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - committed release survives timeline failure
+                    pass
     return {"reclaimed": reclaimed, "left_held": left_held}
 
 

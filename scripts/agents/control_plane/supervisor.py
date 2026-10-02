@@ -430,6 +430,7 @@ class Supervisor:
                 return task
         self._processes[task.id] = process
         task.pid = process.pid
+        task.pid_create_time = execution_lease.process_create_time(process.pid)
         task.worktree = str(worktree)
         task.state = TASK_RUNNING
         task.stale_recovered = False

@@ -325,6 +325,10 @@ def recover_on_restart(state: State, *, project_id: str | None = None) -> int:
     same rows via ``_recover_stranded_claims``.
     """
 
+    stranded = [
+        wake
+        for wake in state.list_wakes(project_id=project_id, status="CLAIMED")
+    ]
     try:
         outcome = state.recover_claimed_wakes(project_id=project_id)
     except Exception as exc:  # noqa: BLE001 - queue-state recovery must never block daemon startup
@@ -334,6 +338,20 @@ def recover_on_restart(state: State, *, project_id: str | None = None) -> int:
             project_id=project_id,
         )
         return 0
+    for prior in stranded:
+        current = state.get_wake(prior.id)
+        recovered = current or prior
+        _emit(
+            state,
+            recovered,
+            event_type="wake.recovered",
+            level="warning",
+            message=(
+                f"Wake recovered after daemon restart: {prior.reason} "
+                f"({'reset to PENDING' if current is not None else 'merged into pending sibling'})"
+            ),
+            extra={"recovery_outcome": "RESET" if current is not None else "MERGED"},
+        )
     if outcome.reset:
         _safe_record_event(
             state, category="wake_queue", level="warning",

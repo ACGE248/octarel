@@ -368,6 +368,16 @@ table, and `overnight` events in the ordinary event log.
   native model versions (ENG-AO-04) apply inside the normal runbooks exactly as without a session.
 - **macOS.** Octarel does not change power settings. Keep the Mac awake (for example `caffeinate -i` started by you)
   for uninterrupted execution; if the daemon or machine restarts, restart `octarel run` and recovery continues safely.
+
+Startup recovery uses the task's existing lifecycle state for `RUNNING`, `WAITING_EXTERNAL`,
+`WAITING_APPROVAL`, `WAITING_PROVIDER`, `RECOVERABLE_ORPHAN`, `OWNER_ACTION_REQUIRED`, and terminal outcomes;
+there is no parallel recovery-status field. A live PID is ownership proof only when its observed create time matches
+the launch record or predates the recorded lock write. PID-only evidence is `AMBIGUOUS` and never reclaimed; repeated
+ambiguous observations are bounded by attempt count and end in `OWNER_ACTION_REQUIRED`. Recovery preserves completed
+acceptance evidence only for its exact candidate tree, resumes the minimum remaining stage, and routes lease/wake
+recovery through their existing ownership modules. Every committed recovery transition is best-effort mirrored into
+the run-event timeline, but an event-write failure cannot roll back the state change.
+
 - **Unattended daemon launch (ENG-AO-06).** Start the daemon with `octarel daemon start` (also `daemon status` /
   `daemon stop`), never `nohup octarel run &` from an interactive terminal: a terminal-attached daemon can be
   suspended by shell job control (state `T`) and then silently stops advancing every session. `daemon start` runs
