@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.agents.control_plane import context_cursor
 from scripts.agents.control_plane.context_cursor import (
     OUTCOME_DELIVERED,
     OUTCOME_SIZE_LIMIT_EXCEEDED,
@@ -120,9 +121,7 @@ def test_stale_cursor_names_the_specific_changed_component(field: str, value: st
     )
 
     assert changed.invalidation_reason is not None
-    assert changed.invalidation_reason.startswith(reason)
-    assert "stored=" in changed.invalidation_reason
-    assert "current=" in changed.invalidation_reason
+    assert changed.invalidation_reason == reason
 
 
 def test_changed_preserved_policy_identity_has_its_own_reason() -> None:
@@ -150,8 +149,10 @@ def test_cursor_never_omits_or_changes_mandatory_policy() -> None:
     assert second.manifest["preserved_policy_identity"] == original.manifest["preserved_policy_identity"]
     assert _incremental(second.prompt)["authoritative"] == {
         "ancestry": None,
+        "event_window": {"limit": 1000, "truncated": False, "truncation_reason": None},
         "events": [],
         "invalidation_reason": None,
+        "newly_relevant_tasks": [],
         "task_changes": [],
     }
 
@@ -211,6 +212,102 @@ def test_size_bound_is_enforced_and_failure_is_durable_and_truthful() -> None:
     assert "authoritative_changes_delivered\":false" in delivery.prompt
     assert delivery.cursor.last_outcome == OUTCOME_SIZE_LIMIT_EXCEEDED
     assert delivery.cursor.last_event_id == 0
+    assert delivery.cursor.delivered_event_positions == {}
+    assert delivery.cursor.bundle_identity["event_references"] == []
+    assert delivery.cursor.inspection_summary["task_additions"] == 0
+    assert delivery.cursor.inspection_summary["event_additions"] == 0
+    assert delivery.cursor.inspection_summary["ancestry_additions"] == 0
+
+    retried = build_incremental_context(
+        state,
+        identity=_identity(),
+        policy_bundle=_policy(),
+    )
+    assert _incremental(retried.prompt)["authoritative"]["events"][0]["message"] == "x" * 2_000
+    assert retried.cursor.bundle_identity["event_references"] == [1]
+
+
+def test_newly_relevant_task_receives_earlier_event_once_and_then_advances() -> None:
+    state = State(":memory:")
+    state.upsert_task(Task(
+        id="task-a", task_ref="A-TASK", role="implementation", worker="fixture",
+        project_id="project-a",
+    ))
+    state.upsert_task(Task(
+        id="dep-a", task_ref="A-DEPENDENCY", role="implementation", worker="fixture",
+        project_id="project-a",
+    ))
+    _record(state, project_id="project-a", task_id="dep-a", message="EARLIER DEPENDENCY HISTORY")
+    _record(state, project_id="project-a", task_id="task-a", message="NEWER PRIMARY HISTORY")
+
+    first = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    assert [event["message"] for event in _incremental(first.prompt)["authoritative"]["events"]] == [
+        "NEWER PRIMARY HISTORY"
+    ]
+
+    state.upsert_task(Task(
+        id="task-a", task_ref="A-TASK", role="implementation", worker="fixture",
+        project_id="project-a", dependencies=("dep-a",),
+    ))
+    second = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    second_authoritative = _incremental(second.prompt)["authoritative"]
+    assert [event["message"] for event in second_authoritative["events"]] == [
+        "EARLIER DEPENDENCY HISTORY"
+    ]
+    assert second_authoritative["newly_relevant_tasks"] == [{
+        "task_id": "dep-a", "reason": "entered bounded task ancestry"
+    }]
+
+    third = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    assert _incremental(third.prompt)["authoritative"]["events"] == []
+    assert third.cursor.delivered_event_positions == {"dep-a": 1, "task-a": 2}
+
+
+def test_invalidation_reason_never_echoes_an_absolute_path_into_provider_prompt() -> None:
+    state = State(":memory:")
+    _seed(state)
+    build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+
+    delivered = build_incremental_context(
+        state,
+        identity=_identity(task_contract_digest="/private/operator/secret-contract"),
+        policy_bundle=_policy(),
+    )
+
+    assert delivered.invalidation_reason == REASON_TASK_CONTRACT_CHANGED
+    assert "/private/operator/secret-contract" not in delivered.prompt
+
+
+def test_event_window_reports_truncation_and_subsequent_complete_window(monkeypatch) -> None:
+    monkeypatch.setattr(context_cursor, "MAX_EVENT_READ", 2)
+    state = State(":memory:")
+    _seed(state)
+    for message in ("event one", "event two", "event three"):
+        _record(state, project_id="project-a", task_id="task-a", message=message)
+
+    first = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    first_authoritative = _incremental(first.prompt)["authoritative"]
+    assert [event["message"] for event in first_authoritative["events"]] == [
+        "event one", "event two"
+    ]
+    assert first_authoritative["event_window"] == {
+        "limit": 2,
+        "truncated": True,
+        "truncation_reason": "event read limit reached",
+    }
+    assert first.cursor.inspection_summary["events_truncated"] is True
+    assert first.cursor.bundle_identity["event_references"] == [1, 2]
+
+    second = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    second_authoritative = _incremental(second.prompt)["authoritative"]
+    assert [event["message"] for event in second_authoritative["events"]] == ["event three"]
+    assert second_authoritative["event_window"] == {
+        "limit": 2,
+        "truncated": False,
+        "truncation_reason": None,
+    }
+    assert second.cursor.inspection_summary["events_truncated"] is False
+    assert second.cursor.bundle_identity["event_references"] == [3]
 
 
 def test_multi_project_cursor_events_and_ancestry_are_isolated() -> None:

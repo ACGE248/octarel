@@ -4636,6 +4636,7 @@
       ...contextFact("Incremental size", payload.incremental_characters, (value) => `${value} characters`),
       ...contextFact("Task additions", payload.task_additions),
       ...contextFact("Event additions", payload.event_additions),
+      ...contextFact("Event window truncated", payload.events_truncated, (value) => value ? "Yes" : "No"),
       ...contextFact("Ancestry additions", payload.ancestry_additions),
       ...contextFact("Invalidated component", payload.invalidation_component),
       ...contextFact("Graphify supplied", payload.graphify_supplied, (value) => value ? "Yes" : "No"),
@@ -4656,6 +4657,23 @@
         text: "Graphify is advisory and never substitutes for authoritative policy or task contracts.",
       }),
     );
+    const newlyRelevant = payload.newly_relevant_tasks || [];
+    const admissionWrap = el("div", { class: "context-ancestry" }, [
+      el("h5", { text: "Newly relevant tasks" }),
+    ]);
+    if (!newlyRelevant.length) {
+      admissionWrap.appendChild(el("p", { class: "hint", text: "Measured 0 newly relevant tasks." }));
+    } else {
+      const list = el("ul", { class: "context-ancestry-list" });
+      newlyRelevant.forEach((item) => {
+        list.appendChild(el("li", {}, [
+          el("span", { class: "context-reference-kind", text: item.task_id }),
+          el("span", { text: item.reason }),
+        ]));
+      });
+      admissionWrap.appendChild(list);
+    }
+    target.appendChild(admissionWrap);
     const ancestry = payload.ancestry || {};
     const ancestryWrap = el("div", { class: "context-ancestry" }, [
       el("h5", { text: "Ancestry & source references" }),

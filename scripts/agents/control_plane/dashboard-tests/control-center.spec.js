@@ -584,6 +584,8 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   await expect(detail).toContainText('Context inspector');
   await expect(context).toContainText('Authoritative bundle size');
   await expect(context).toContainText('Incremental size');
+  await expect(context).toContainText('Event window truncated');
+  await expect(context).toContainText('Measured 0 newly relevant tasks.');
   const measuredZero = context.locator('dt', { hasText: 'Task additions' }).locator('xpath=following-sibling::dd[1]');
   const unknownInvalidation = context.locator('dt', { hasText: 'Invalidated component' }).locator('xpath=following-sibling::dd[1]');
   await expect(measuredZero).toContainText('0');

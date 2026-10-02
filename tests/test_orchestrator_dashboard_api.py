@@ -223,6 +223,8 @@ def test_context_inspector_projects_safe_recorded_facts_and_derived_formula(clie
 
     assert body["task_additions"] == {"value": 0, "class": "MEASURED", "reason": None, "unit": None}
     assert body["event_additions"]["value"] == 0
+    assert body["events_truncated"]["value"] is False
+    assert body["newly_relevant_tasks"] == []
     assert body["ancestry_additions"]["value"] == 0
     assert body["context_savings_characters"]["class"] == "DERIVED"
     assert body["context_savings_characters"]["formula"] == (
@@ -241,6 +243,30 @@ def test_context_inspector_projects_safe_recorded_facts_and_derived_formula(clie
         project_id="project-context", task_id="context-task", consumer_id="codex-build"
     )
     assert "token=" not in json.dumps(stored)
+
+
+def test_context_inspector_exposes_newly_admitted_task_and_reason(client, ctx):
+    ctx.state.upsert_task(Task(
+        id="context-parent", task_ref="ENG-PC-06-parent", role="primary-implementation",
+        worker="codex-build", project_id="project-context", dependencies=("context-dependency",),
+    ))
+    ctx.state.upsert_task(Task(
+        id="context-dependency", task_ref="ENG-PC-06-dependency", role="implementation",
+        worker="codex-build", project_id="project-context",
+    ))
+    build_incremental_context(
+        ctx.state,
+        identity=_context_identity("context-parent", "codex-build"),
+        policy_bundle=_context_policy(),
+    )
+
+    response = client.get("/api/context-inspector/ENG-PC-06-parent/codex-build")
+
+    assert response.status_code == 200
+    assert response.json()["newly_relevant_tasks"] == [
+        {"task_id": "context-dependency", "reason": "initial context delivery"},
+        {"task_id": "context-parent", "reason": "initial context delivery"},
+    ]
 
 
 def test_context_inspector_names_invalidation_component_without_identity_values_or_paths(client, ctx):

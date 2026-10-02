@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from ..policy import PolicyBundle, validate_policy_preservation
 from ..redaction import redact_text
 from .models import Event, Task
+from .run_events import sanitize_text
 from .state import State
 
 OUTCOME_DELIVERED = "DELIVERED"
@@ -77,6 +78,7 @@ class ContextCursor:
     bundle_identity: Mapping[str, Any]
     preserved_policy_identity: Mapping[str, Any]
     delivered_task_identities: Mapping[str, str]
+    delivered_event_positions: Mapping[str, int]
     delivered_ancestry_identity: str
     last_event_id: int
     last_outcome: str
@@ -98,6 +100,10 @@ class ContextCursor:
             bundle_identity=dict(row["bundle_identity"]),
             preserved_policy_identity=dict(row["preserved_policy_identity"]),
             delivered_task_identities=dict(row["delivered_task_identities"]),
+            delivered_event_positions={
+                str(task_id): max(0, int(event_id))
+                for task_id, event_id in dict(row.get("delivered_event_positions") or {}).items()
+            },
             delivered_ancestry_identity=str(row["delivered_ancestry_identity"]),
             last_event_id=int(row["last_event_id"]),
             last_outcome=str(row["last_outcome"]),
@@ -138,7 +144,11 @@ def _invalidation_reason(
         old = getattr(cursor.identity, field)
         new = getattr(current, field)
         if old != new:
-            return f"{reason}: stored={old!r}, current={new!r}"
+            # Identity values may be supplied by an external task contract and
+            # are not safe prompt material (for example, a malformed digest
+            # can contain a host-absolute path). The component is sufficient
+            # to explain the invalidation without echoing either value.
+            return reason
     if dict(cursor.preserved_policy_identity) != dict(preserved_policy_identity):
         return REASON_PRESERVED_POLICY_CHANGED
     return None
@@ -216,35 +226,84 @@ def _event_context(event: Event) -> dict[str, object]:
     }
 
 
-def _inspection_ancestry(nodes: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Retain safe reference identities for UI projection, never host paths or URL queries."""
+def context_reference(value: object, kind: object) -> dict[str, object]:
+    """Project one ancestry identity without leaking a host path or URL secret."""
 
-    safe_nodes: list[dict[str, str]] = []
-    for node in nodes:
-        raw = str(node.get("reference") or "").strip()
+    raw = str(value or "").strip()
+    try:
         parsed = urlparse(raw)
-        if (
-            parsed.scheme in {"http", "https"}
-            and parsed.netloc
-            and not parsed.username
-            and re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc)
-        ):
-            reference = f"{parsed.scheme}://{parsed.netloc}{redact_text(parsed.path)}"
-            if parsed.fragment:
-                reference += f"#{redact_text(parsed.fragment)}"
-        elif (
-            parsed.scheme
-            or not raw
-            or raw.startswith(("/", "~", "\\"))
-            or "\\" in raw
-            or ".." in PurePosixPath(raw).parts
-            or re.match(r"^[A-Za-z]:", raw)
-        ):
-            reference = "WITHHELD_UNSAFE_REFERENCE"
-        else:
-            reference = redact_text(raw)
-        safe_nodes.append({"kind": str(node.get("kind") or "reference"), "reference": reference})
-    return safe_nodes
+    except ValueError:
+        parsed = urlparse("")
+    href = None
+    if (
+        parsed.scheme in {"http", "https"}
+        and parsed.netloc
+        and not parsed.username
+        and re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc)
+    ):
+        reference = f"{parsed.scheme}://{parsed.netloc}{redact_text(parsed.path)}"
+        if parsed.fragment:
+            reference += f"#{redact_text(parsed.fragment)}"
+        href = reference
+    elif (
+        parsed.scheme
+        or not raw
+        or raw.startswith(("/", "~", "\\"))
+        or "\\" in raw
+        or ".." in PurePosixPath(raw).parts
+        or re.match(r"^[A-Za-z]:", raw)
+    ):
+        reference = "WITHHELD_UNSAFE_REFERENCE"
+    else:
+        reference = sanitize_text(raw)
+    return {
+        "kind": sanitize_text(str(kind or "reference")),
+        "reference": reference,
+        "href": href,
+    }
+
+
+def _incremental_events(
+    state: State,
+    *,
+    project_id: str,
+    relevant_task_ids: set[str],
+    event_positions: Mapping[str, int],
+) -> tuple[list[Event], bool]:
+    """Return the earliest bounded union after each task's own durable position."""
+
+    candidates: list[Event] = []
+    for task_id in sorted(relevant_task_ids):
+        candidates.extend(
+            event
+            for event in state.list_run_events(
+                project_id=project_id,
+                after_id=event_positions.get(task_id, 0),
+                task_ids=(task_id,),
+                limit=MAX_EVENT_READ,
+                ascending=True,
+            )
+            if event.id is not None
+        )
+    candidates.sort(key=lambda event: int(event.id or 0))
+    events = candidates[:MAX_EVENT_READ]
+    if len(candidates) > MAX_EVENT_READ:
+        return events, True
+    if len(events) < MAX_EVENT_READ:
+        return events, False
+
+    last_delivered = int(events[-1].id or 0)
+    truncated = any(
+        state.list_run_events(
+            project_id=project_id,
+            after_id=max(event_positions.get(task_id, 0), last_delivered),
+            task_ids=(task_id,),
+            limit=1,
+            ascending=True,
+        )
+        for task_id in sorted(relevant_task_ids)
+    )
+    return events, truncated
 
 
 def _graph_payload(supplier: Callable[[], object] | None) -> tuple[dict[str, object], str]:
@@ -278,6 +337,7 @@ def _cursor_row(
     bundle_identity: Mapping[str, Any],
     preserved_policy_identity: Mapping[str, Any],
     task_identities: Mapping[str, str],
+    event_positions: Mapping[str, int],
     ancestry_identity: str,
     last_event_id: int,
     outcome: str,
@@ -290,6 +350,7 @@ def _cursor_row(
         "bundle_identity": dict(bundle_identity),
         "preserved_policy_identity": dict(preserved_policy_identity),
         "delivered_task_identities": dict(task_identities),
+        "delivered_event_positions": dict(event_positions),
         "delivered_ancestry_identity": ancestry_identity,
         "last_event_id": last_event_id,
         "last_outcome": outcome,
@@ -354,25 +415,50 @@ def build_incremental_context(
         if previous_tasks.get(task_id) != digest
     ]
 
-    previous_event_id = 0 if reset or stored is None else stored.last_event_id
-    events = [
-        event
-        for event in state.list_run_events(
-            project_id=identity.project_id,
-            after_id=previous_event_id,
-            task_ids=sorted(relevant_task_ids),
-            limit=MAX_EVENT_READ,
-            ascending=True,
-        )
-        if event.id is not None
+    if reset or stored is None:
+        previous_event_positions: dict[str, int] = {}
+    elif stored.delivered_event_positions:
+        previous_event_positions = dict(stored.delivered_event_positions)
+    else:
+        # Compatibility for cursors written before per-task positions existed:
+        # known delivered tasks inherit the old scalar watermark, while a task
+        # newly entering the relevant set starts at zero and receives history.
+        previous_event_positions = {
+            task_id: stored.last_event_id for task_id in stored.delivered_task_identities
+        }
+
+    previous_relevant_task_ids = set(previous_tasks)
+    newly_relevant_task_ids = sorted(relevant_task_ids - previous_relevant_task_ids)
+    admission_reason = (
+        f"cursor invalidated: {invalidation}"
+        if reset
+        else "initial context delivery"
+        if stored is None
+        else "entered bounded task ancestry"
+    )
+    newly_relevant_tasks = [
+        {"task_id": task_id, "reason": admission_reason}
+        for task_id in newly_relevant_task_ids
     ]
-    last_event_id = max((int(event.id) for event in events if event.id is not None), default=previous_event_id)
+    events, events_truncated = _incremental_events(
+        state,
+        project_id=identity.project_id,
+        relevant_task_ids=relevant_task_ids,
+        event_positions=previous_event_positions,
+    )
+    event_window = {
+        "limit": MAX_EVENT_READ,
+        "truncated": events_truncated,
+        "truncation_reason": "event read limit reached" if events_truncated else None,
+    }
     include_ancestry = reset or stored is None or stored.delivered_ancestry_identity != ancestry_identity
 
     authoritative = {
         "invalidation_reason": invalidation,
         "task_changes": changed_tasks,
         "events": [_event_context(event) for event in events],
+        "event_window": event_window,
+        "newly_relevant_tasks": newly_relevant_tasks,
         "ancestry": ancestry_record if include_ancestry else None,
     }
     graph_record, graph_text = _graph_payload(graph_context_supplier)
@@ -405,6 +491,16 @@ def build_incremental_context(
                 _task_context(tasks[task_id]) for task_id in sorted(current_task_identities)
             ],
             "events": [_event_context(event) for event in full_events],
+            "event_window": {
+                "limit": MAX_EVENT_READ,
+                "truncated": len(full_events) == MAX_EVENT_READ,
+                "truncation_reason": (
+                    "event read limit may have been reached"
+                    if len(full_events) == MAX_EVENT_READ
+                    else None
+                ),
+            },
+            "newly_relevant_tasks": newly_relevant_tasks,
             "ancestry": ancestry_record,
         },
         "graphify": graph_record,
@@ -427,15 +523,80 @@ def build_incremental_context(
         rendered = "\n--- INCREMENTAL TASK CONTEXT ---\n" + _canonical(payload) + "\n"
 
     required = len(rendered)
-    base_bundle_identity = {
+    if required > max_incremental_characters:
+        outcome = OUTCOME_SIZE_LIMIT_EXCEEDED
+        marker = {
+            "outcome": outcome,
+            "required_characters": required,
+            "max_incremental_characters": max_incremental_characters,
+            "authoritative_changes_delivered": False,
+        }
+        rendered = "\n--- INCREMENTAL TASK CONTEXT OUTCOME ---\n" + _canonical(marker) + "\n"
+        retained_tasks = {} if reset or stored is None else stored.delivered_task_identities
+        retained_event_positions = (
+            {} if reset or stored is None else stored.delivered_event_positions
+        )
+        retained_ancestry = "" if reset or stored is None else stored.delivered_ancestry_identity
+        retained_event = 0 if reset or stored is None else stored.last_event_id
+        delivered_event_references: list[int] = []
+        delivered_task_additions = 0
+        delivered_event_additions = 0
+        delivered_ancestry_additions = 0
+        delivered_newly_relevant_tasks: list[dict[str, str]] = []
+        delivered_ancestry_nodes = (
+            []
+            if reset or stored is None
+            else list(stored.inspection_summary.get("ancestry_nodes") or [])
+        )
+        delivered_ancestry_truncated = (
+            False
+            if reset or stored is None
+            else bool(stored.inspection_summary.get("ancestry_truncated", False))
+        )
+        delivered_events_truncated = False
+        delivered_graph_supplied = False
+        delivered_graph_status = "NOT_SUPPLIED_SIZE_BOUND"
+        stored_payload_digest = _digest(marker)
+    else:
+        outcome = OUTCOME_DELIVERED
+        retained_tasks = current_task_identities
+        retained_event_positions = dict(previous_event_positions)
+        for task_id in relevant_task_ids:
+            retained_event_positions.setdefault(task_id, 0)
+        for event in events:
+            if event.task_id is not None and event.id is not None:
+                retained_event_positions[event.task_id] = max(
+                    retained_event_positions.get(event.task_id, 0), int(event.id)
+                )
+        retained_ancestry = ancestry_identity
+        retained_event = max(retained_event_positions.values(), default=0)
+        delivered_event_references = [int(event.id) for event in events if event.id is not None]
+        delivered_task_additions = len(changed_tasks)
+        delivered_event_additions = len(events)
+        delivered_ancestry_additions = len(ancestry_nodes) if include_ancestry else 0
+        delivered_newly_relevant_tasks = newly_relevant_tasks
+        delivered_ancestry_nodes = [
+            context_reference(node.get("reference"), node.get("kind")) for node in ancestry_nodes
+        ]
+        delivered_ancestry_truncated = ancestry_truncated
+        delivered_events_truncated = events_truncated
+        delivered_graph_supplied = bool(payload["graphify"].get("supplied"))  # type: ignore[union-attr]
+        raw_graph_status = str(payload["graphify"].get("status", ""))  # type: ignore[union-attr]
+        delivered_graph_status = (
+            raw_graph_status if re.fullmatch(r"[A-Z][A-Z0-9_]*", raw_graph_status) else "UNKNOWN"
+        )
+        stored_payload_digest = _digest(payload)
+
+    stored_bundle = {
         "context_identity": asdict(identity),
         "preserved_policy_identity_digest": _digest(dict(preserved)),
-        "task_identities": current_task_identities,
-        "ancestry_identity": ancestry_identity,
-        "event_references": [event.id for event in events],
-        "incremental_payload_digest": _digest(payload),
+        "task_identities": dict(retained_tasks),
+        "event_positions": dict(retained_event_positions),
+        "ancestry_identity": retained_ancestry,
+        "event_references": delivered_event_references,
+        "incremental_payload_digest": stored_payload_digest,
     }
-    bundle_digest = _digest(base_bundle_identity)
+    bundle_digest = _digest(stored_bundle)
     delivery_manifest = dict(policy_bundle.manifest)
     delivery_manifest["context_cursor"] = {
         "identity_fingerprint": identity.fingerprint,
@@ -454,42 +615,18 @@ def build_incremental_context(
         "required_incremental_characters": required,
         "max_incremental_characters": max_incremental_characters,
         "full_refresh_characters": full_refresh_characters,
-        "task_additions": len(changed_tasks),
-        "event_additions": len(events),
-        "ancestry_additions": len(ancestry_nodes) if include_ancestry else 0,
-        "ancestry_nodes": _inspection_ancestry(ancestry_nodes),
-        "ancestry_truncated": ancestry_truncated,
-        "invalidation_component": invalidation.split(":", 1)[0] if invalidation else None,
-        "graphify_supplied": bool(payload["graphify"].get("supplied")),  # type: ignore[union-attr]
-        "graphify_status": (
-            str(payload["graphify"].get("status"))  # type: ignore[union-attr]
-            if re.fullmatch(r"[A-Z][A-Z0-9_]*", str(payload["graphify"].get("status", "")))  # type: ignore[union-attr]
-            else "UNKNOWN"
-        ),
+        "task_additions": delivered_task_additions,
+        "event_additions": delivered_event_additions,
+        "ancestry_additions": delivered_ancestry_additions,
+        "newly_relevant_tasks": delivered_newly_relevant_tasks,
+        "ancestry_nodes": delivered_ancestry_nodes,
+        "ancestry_truncated": delivered_ancestry_truncated,
+        "events_truncated": delivered_events_truncated,
+        "invalidation_component": invalidation,
+        "graphify_supplied": delivered_graph_supplied,
+        "graphify_status": delivered_graph_status,
+        "savings_available": outcome == OUTCOME_DELIVERED,
     }
-
-    if required > max_incremental_characters:
-        outcome = OUTCOME_SIZE_LIMIT_EXCEEDED
-        marker = {
-            "outcome": outcome,
-            "required_characters": required,
-            "max_incremental_characters": max_incremental_characters,
-            "authoritative_changes_delivered": False,
-        }
-        rendered = "\n--- INCREMENTAL TASK CONTEXT OUTCOME ---\n" + _canonical(marker) + "\n"
-        retained_tasks = {} if reset or stored is None else stored.delivered_task_identities
-        retained_ancestry = "" if reset or stored is None else stored.delivered_ancestry_identity
-        retained_event = 0 if reset or stored is None else stored.last_event_id
-        stored_bundle = base_bundle_identity
-        inspection_summary["incremental_characters"] = len(rendered)
-        inspection_summary["savings_available"] = False
-    else:
-        outcome = OUTCOME_DELIVERED
-        retained_tasks = current_task_identities
-        retained_ancestry = ancestry_identity
-        retained_event = last_event_id
-        stored_bundle = base_bundle_identity
-        inspection_summary["savings_available"] = True
 
     row = state.upsert_context_cursor(
         _cursor_row(
@@ -497,6 +634,7 @@ def build_incremental_context(
             bundle_identity=stored_bundle,
             preserved_policy_identity=preserved,
             task_identities=retained_tasks,
+            event_positions=retained_event_positions,
             ancestry_identity=retained_ancestry,
             last_event_id=retained_event,
             outcome=outcome,
@@ -505,7 +643,6 @@ def build_incremental_context(
         )
     )
     cursor = ContextCursor.from_row(row)
-    graph_supplied = bool(payload["graphify"].get("supplied"))  # type: ignore[union-attr]
     return ContextDelivery(
         prompt=policy_bundle.prompt + rendered,
         manifest=delivery_manifest,
@@ -515,6 +652,6 @@ def build_incremental_context(
         incremental_characters=len(rendered),
         required_characters=required,
         ancestry_truncated=ancestry_truncated,
-        graphify_supplied=graph_supplied,
+        graphify_supplied=delivered_graph_supplied,
         cursor=cursor,
     )

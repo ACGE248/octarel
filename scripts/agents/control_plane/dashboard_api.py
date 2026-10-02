@@ -54,6 +54,7 @@ from .context_cursor import (
     REASON_PRESERVED_POLICY_CHANGED,
     REASON_TASK_CONTRACT_CHANGED,
     REASON_TREE_CHANGED,
+    context_reference,
 )
 from .models import utc_now_iso
 from .operations import (
@@ -1949,38 +1950,6 @@ def create_app(
 
         return {"value": value, "class": klass, "reason": reason, "unit": unit}
 
-    def _context_reference(value: Any, kind: Any) -> dict[str, Any]:
-        """Project one ancestry identity without leaking a host path or URL secret."""
-
-        raw = str(value or "").strip()
-        parsed = urlparse(raw)
-        href = None
-        safe = raw
-        if (
-            parsed.scheme in {"http", "https"}
-            and parsed.netloc
-            and not parsed.username
-            and re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", parsed.netloc)
-        ):
-            # Query strings can carry credentials. The source identity needs
-            # only the public path/fragment, never query parameters.
-            safe = f"{parsed.scheme}://{parsed.netloc}{redact_text(parsed.path)}"
-            if parsed.fragment:
-                safe += f"#{redact_text(parsed.fragment)}"
-            href = safe
-        elif (
-            parsed.scheme
-            or not raw
-            or raw.startswith(("/", "~", "\\"))
-            or "\\" in raw
-            or ".." in Path(raw).parts
-            or re.match(r"^[A-Za-z]:", raw)
-        ):
-            safe = "WITHHELD_UNSAFE_REFERENCE"
-        else:
-            safe = sanitize_text(raw)
-        return {"kind": sanitize_text(str(kind or "reference")), "reference": safe, "href": href}
-
     def _context_inspector_view(task_id: str, consumer_id: str) -> dict[str, Any]:
         task = _authorized_task_id(task_id)
         if consumer_id not in ctx.registry.workers:
@@ -2007,6 +1976,8 @@ def create_app(
                 "task_additions": unknown,
                 "event_additions": unknown,
                 "ancestry_additions": unknown,
+                "events_truncated": unknown,
+                "newly_relevant_tasks": [],
                 "context_savings_characters": {
                     **unknown,
                     "formula": "full_refresh_characters - required_incremental_characters",
@@ -2070,13 +2041,23 @@ def create_app(
         )
         raw_nodes = summary.get("ancestry_nodes")
         nodes = [
-            _context_reference(item.get("reference"), item.get("kind"))
+            context_reference(item.get("reference"), item.get("kind"))
             for item in raw_nodes[:32]
             if isinstance(item, dict)
         ] if isinstance(raw_nodes, list) else []
         ancestry_recorded = isinstance(raw_nodes, list) and isinstance(summary.get("ancestry_truncated"), bool)
         graph_supplied = summary.get("graphify_supplied")
         graph_status = summary.get("graphify_status")
+        raw_newly_relevant = summary.get("newly_relevant_tasks")
+        newly_relevant_tasks = [
+            {
+                "task_id": sanitize_text(str(item.get("task_id") or "UNKNOWN")),
+                "reason": sanitize_text(str(item.get("reason") or "UNKNOWN")),
+            }
+            for item in raw_newly_relevant[:32]
+            if isinstance(item, dict)
+        ] if isinstance(raw_newly_relevant, list) else []
+        events_truncated = summary.get("events_truncated")
         return {
             "task": sanitize_text(task_id),
             "consumer": sanitize_text(consumer_id),
@@ -2087,6 +2068,12 @@ def create_app(
             "task_additions": measured_int("task_additions"),
             "event_additions": measured_int("event_additions"),
             "ancestry_additions": measured_int("ancestry_additions"),
+            "events_truncated": (
+                _session_fact(events_truncated, klass="MEASURED")
+                if isinstance(events_truncated, bool)
+                else _session_fact(klass="UNKNOWN", reason="event truncation was not recorded")
+            ),
+            "newly_relevant_tasks": newly_relevant_tasks,
             "context_savings_characters": savings,
             "invalidation_component": component_fact,
             "ancestry": {
