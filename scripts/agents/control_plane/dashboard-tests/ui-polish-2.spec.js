@@ -94,7 +94,17 @@ test('run cards show stage, agent and elapsed first; objective and budget are un
 
 // 2 ------------------------------------------------------------------ View Active Run
 
-test('View Active Run lands on the run: selected, focused and its details open', async ({ page }) => {
+test('View Active Run lands on the run: selected, focused and its details open', async ({ page, request, baseURL }) => {
+  const runbooks = await (await request.get(`${baseURL}/api/runbooks`)).json();
+  let releaseRunbookRefresh;
+  const heldRunbookRefresh = new Promise((resolve) => { releaseRunbookRefresh = resolve; });
+  let markRunbookRefreshRequested;
+  const runbookRefreshRequested = new Promise((resolve) => { markRunbookRefreshRequested = resolve; });
+  await page.route('**/api/runbooks', async (route) => {
+    markRunbookRefreshRequested();
+    await heldRunbookRefresh;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runbooks) });
+  });
   const btn = page.locator('#overview-continue-btn');
   await expect(btn).toHaveText('View Active Run', { timeout: 15000 });
   await btn.click();
@@ -106,6 +116,26 @@ test('View Active Run lands on the run: selected, focused and its details open',
   await expect(card).toBeInViewport();
   await expect.poll(() => page.evaluate(() => document.activeElement && document.activeElement.classList.contains('run-card'))).toBe(true);
   await expect(page.locator('#runs-focus-status')).toContainText('Showing run');
+  // Complete a held polling response so renderRunbookCards replaces the
+  // focused DOM node. The replacement keeps the intentional focus and the
+  // existing state-backed selection/disclosure.
+  const originalCard = await card.elementHandle();
+  await runbookRefreshRequested;
+  releaseRunbookRefresh();
+  await page.waitForFunction((node) => !node.isConnected, originalCard);
+  await expect(card).toHaveCount(1);
+  await expect(card).toHaveAttribute('aria-current', 'true');
+  await expect(card.locator('.entity-more')).toHaveAttribute('open', '');
+  await expect(card).toBeInViewport();
+  await expect(card).toBeFocused();
+
+  // A later poll must not steal focus from an unrelated control.
+  const replacementCard = await card.elementHandle();
+  const moreTab = page.locator('#more-tab');
+  await expect(moreTab).toBeVisible();
+  await moreTab.focus();
+  await page.waitForFunction((node) => !node.isConnected, replacementCard);
+  await expect(moreTab).toBeFocused();
   // Leaving Runs clears the selection.
   await navTo(page, 'view-tasks');
   await navTo(page, 'view-runs');

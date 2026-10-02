@@ -4571,6 +4571,14 @@
 
   function renderRunbookCards(runbooks) {
     const root = document.getElementById("runbooks-cards");
+    // Polling rebuilds every card. Preserve focus only when the card itself was
+    // intentionally focused (for example, by "View Active Run"). Checking the
+    // active element before replacement avoids pulling focus back from another
+    // control or view merely because a run remains selected.
+    const activeCard = root.contains(document.activeElement) && document.activeElement.classList.contains("run-card")
+      ? document.activeElement
+      : null;
+    const focusedRunbookId = activeCard?.dataset.runbookId || null;
     root.innerHTML = "";
     runbooks.forEach((r) => {
       const card = el("article", {
@@ -4792,6 +4800,11 @@
       || runbooks[0];
     state.selectedRunId = selected.id;
     renderRunDetail(selected);
+    if (focusedRunbookId && state.focusRunbookId === focusedRunbookId) {
+      const replacement = [...root.querySelectorAll(".run-card")]
+        .find((card) => card.dataset.runbookId === focusedRunbookId);
+      replacement?.focus({ preventScroll: true });
+    }
   }
 
   function sessionAge(seconds) {
