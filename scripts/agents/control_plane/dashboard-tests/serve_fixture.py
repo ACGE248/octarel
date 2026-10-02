@@ -60,7 +60,6 @@ from scripts.agents.control_plane.octascene_project import (  # noqa: E402
     OCTASCENE_PROJECT_ID,
 )
 from scripts.agents.control_plane.project import ProjectContract  # noqa: E402
-from scripts.agents.control_plane.runtime_services import RuntimeServiceManager  # noqa: E402
 from scripts.agents.control_plane.project_registry import (  # noqa: E402
     contract_to_row,
     migrate_legacy_state_to_project,
@@ -80,6 +79,9 @@ from scripts.agents.control_plane.remote_access import (  # noqa: E402
 )
 from scripts.agents.control_plane.run_events import RunEvent  # noqa: E402
 from scripts.agents.control_plane.runbooks import PRESETS  # noqa: E402
+from scripts.agents.control_plane.runtime_services import (
+    RuntimeServiceManager,  # noqa: E402
+)
 from scripts.agents.control_plane.scheduler import (  # noqa: E402
     ConcurrencyPolicy,
     Scheduler,
