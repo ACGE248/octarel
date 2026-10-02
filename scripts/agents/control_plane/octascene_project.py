@@ -46,6 +46,13 @@ OCTASCENE_CAPABILITIES: dict[str, str] = {
     "validation_authority": "repository-owned-exact-tree-local-gate",
     "app_lifecycle_command": "make run",
     "app_lifecycle_port": "8765",
+    # ENG-PC-09: the generic runtime-service declaration is fixed argv plus a
+    # loopback-only port. The app_lifecycle keys remain during the compatibility
+    # window for older Control Center versions; current code prefers these.
+    "runtime_service_argv": '["make", "run"]',
+    "runtime_service_port": "8765",
+    "runtime_service_host": "127.0.0.1",
+    "runtime_service_name": "OctaScene development app",
     "policy_missing_worktree_fallback": "controller-checkout",
 }
 

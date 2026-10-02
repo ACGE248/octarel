@@ -1182,6 +1182,13 @@ def test_app_status_endpoint(client):
     assert body["status"] in {"RUNNING", "STOPPED", "UNKNOWN"}
 
 
+def test_runtime_service_api_fails_closed_without_a_selected_project(client):
+    assert client.get("/api/runtime-services").json() == []
+    response = client.post("/api/runtime-services/not-a-service/start", json={})
+    assert response.status_code == 409
+    assert "no managed project is selected" in response.json()["detail"]
+
+
 def test_identity_endpoint_returns_honest_local_operator(client):
     body = client.get("/api/identity").json()
     assert body["role"] == "Developer"
@@ -1505,6 +1512,7 @@ def test_zero_ai_calls_across_a_simulated_multi_refresh_loop(client, monkeypatch
         "/api/roadmap",
         "/api/resources",
         "/api/app-status",
+        "/api/runtime-services",
         "/api/telemetry",
         "/api/steering/ai-route",
     ]

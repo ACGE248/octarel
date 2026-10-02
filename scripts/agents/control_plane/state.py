@@ -165,6 +165,47 @@ CREATE TABLE IF NOT EXISTS control_settings (
     value TEXT NOT NULL
 );
 
+-- ENG-PC-09 (issue #37): durable operational services launched from a
+-- managed project's explicit fixed-argv declaration.  This is the generic
+-- persistence contract behind the legacy AppLifecycleManager endpoints; it
+-- is not a second process supervisor.  Process identity is intentionally
+-- redundant (pid/create-time/cwd/argv/session) because every destructive
+-- action must prove all of it again before signalling a process group.
+CREATE TABLE IF NOT EXISTS runtime_services (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    worktree_path TEXT,
+    runbook_id TEXT,
+    argv TEXT NOT NULL,
+    process_argv TEXT,
+    cwd TEXT NOT NULL,
+    pid INTEGER,
+    process_create_time REAL,
+    process_session_id INTEGER,
+    port INTEGER NOT NULL,
+    preview_url TEXT NOT NULL,
+    health TEXT NOT NULL,
+    ownership TEXT NOT NULL,
+    owner TEXT,
+    log_pointer TEXT NOT NULL,
+    status_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    last_health_at TEXT,
+    stopped_at TEXT,
+    exit_code INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_services_scope
+    ON runtime_services (
+        project_id,
+        IFNULL(worktree_path, ''),
+        IFNULL(runbook_id, '')
+    );
+CREATE INDEX IF NOT EXISTS idx_runtime_services_project
+    ON runtime_services (project_id, updated_at DESC);
+
 -- ENG-CP-03 (issue #165): the durable managed-project registry. Every column
 -- is a *declaration* about where/how to obtain repository truth -- the same
 -- fields CPX-01's ``ProjectContract`` already defines, persisted rather than
@@ -661,6 +702,7 @@ _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
     # and every read/write additionally requires the exact project id.
     "context_cursors",
     "usage_ledger",
+    "runtime_services",
 )
 
 # ``control_settings`` keys that are derived, project-dependent caches rather
@@ -676,8 +718,9 @@ SCHEMA_VERSION_SETTING = "schema_version"
 # implicit pre-ENG-CP-03 single-project schema; 2 adds the project registry and
 # project scoping; 3 adds ENG-PC-05's immutable usage ledger; 4 adds mutable
 # hierarchical usage-budget definitions; 5 makes run identity global and keeps
-# durable program attribution on each ledger row.
-CURRENT_SCHEMA_VERSION = 5
+# durable program attribution on each ledger row; 6 adds ENG-PC-09's generic,
+# project-scoped runtime-service identity and lifecycle record.
+CURRENT_SCHEMA_VERSION = 6
 
 
 def project_scoped_setting_key(key: str, project_id: str | None) -> str:
@@ -754,6 +797,7 @@ class State:
             self._migrate_usage_ledger()
             self._migrate_usage_budget_columns()
             self._migrate_configuration_revisions()
+            self._migrate_runtime_service_columns()
         except Exception:
             self._conn.rollback()
             raise
@@ -1081,6 +1125,21 @@ class State:
                 self._conn.execute(f"ALTER TABLE usage_budgets ADD COLUMN {column} {ddl}")
 
     @_serialized
+    def _migrate_runtime_service_columns(self) -> None:
+        """Keep declared launch argv distinct from observed process identity.
+
+        Existing rows deliberately receive NULL rather than copying ``argv``:
+        an argv value that was never observed from the live PID cannot safely
+        authorize a later signal.
+        """
+
+        existing = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(runtime_services)").fetchall()
+        }
+        if "process_argv" not in existing:
+            self._conn.execute("ALTER TABLE runtime_services ADD COLUMN process_argv TEXT")
+
+    @_serialized
     def _migrate_project_id_columns(self) -> None:
         """Add the nullable ``project_id`` column to each project-scoped table.
 
@@ -1197,6 +1256,101 @@ class State:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+    # ------------------------------------------------------- runtime services
+
+    @staticmethod
+    def _runtime_service_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        payload = dict(row)
+        for field in ("argv", "process_argv"):
+            raw = payload.get(field)
+            if raw is None:
+                payload[field] = None if field == "process_argv" else []
+                continue
+            try:
+                decoded = json.loads(raw)
+            except (TypeError, ValueError):
+                decoded = []
+            payload[field] = [str(part) for part in decoded] if isinstance(decoded, list) else []
+        return payload
+
+    @_serialized
+    def upsert_runtime_service(self, service: dict[str, Any]) -> dict[str, Any]:
+        """Persist one ENG-PC-09 service without weakening its scope identity."""
+
+        payload = dict(service)
+        argv = payload.get("argv", [])
+        if not isinstance(argv, (list, tuple)) or not all(isinstance(part, str) for part in argv):
+            raise ValueError("runtime service argv must be a string list")
+        payload["argv"] = json.dumps(list(argv))
+        process_argv = payload.get("process_argv")
+        if process_argv is not None:
+            if not isinstance(process_argv, (list, tuple)) or not all(
+                isinstance(part, str) for part in process_argv
+            ):
+                raise ValueError("runtime service process_argv must be a string list or null")
+            payload["process_argv"] = json.dumps(list(process_argv))
+        payload["updated_at"] = utc_now_iso()
+        payload.setdefault("created_at", payload["updated_at"])
+        columns = (
+            "id", "project_id", "name", "worktree_path", "runbook_id", "argv", "process_argv", "cwd",
+            "pid", "process_create_time", "process_session_id", "port", "preview_url",
+            "health", "ownership", "owner", "log_pointer", "status_reason", "created_at",
+            "updated_at", "started_at", "last_health_at", "stopped_at", "exit_code",
+        )
+        missing = [column for column in columns if column not in payload]
+        if missing:
+            raise ValueError(f"runtime service is missing fields: {', '.join(missing)}")
+        updates = ", ".join(
+            f"{column}=excluded.{column}" for column in columns if column not in {"id", "created_at"}
+        )
+        self._conn.execute(
+            f"INSERT INTO runtime_services ({', '.join(columns)}) "
+            f"VALUES ({', '.join(':' + column for column in columns)}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}",
+            payload,
+        )
+        self._conn.commit()
+        stored = self._conn.execute("SELECT * FROM runtime_services WHERE id = ?", (payload["id"],)).fetchone()
+        if stored is None:  # pragma: no cover - guarded by the successful insert above
+            raise RuntimeError("runtime service write completed without a readable row")
+        return self._runtime_service_from_row(stored)
+
+    @_serialized
+    def get_runtime_service(self, service_id: str, *, project_id: str | None = None) -> dict[str, Any] | None:
+        if project_id is None:
+            row = self._conn.execute("SELECT * FROM runtime_services WHERE id = ?", (service_id,)).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM runtime_services WHERE id = ? AND project_id = ?",
+                (service_id, project_id),
+            ).fetchone()
+        return self._runtime_service_from_row(row) if row else None
+
+    @_serialized
+    def list_runtime_services(
+        self,
+        *,
+        project_id: str | None = None,
+        worktree_path: str | None = None,
+        runbook_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        for column, value in (
+            ("project_id", project_id),
+            ("worktree_path", worktree_path),
+            ("runbook_id", runbook_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        sql = "SELECT * FROM runtime_services"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, id ASC"
+        rows = self._conn.execute(sql, tuple(values)).fetchall()
+        return [self._runtime_service_from_row(row) for row in rows]
 
     # ----------------------------------------------------------------- tasks
 

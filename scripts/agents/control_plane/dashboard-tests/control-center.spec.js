@@ -459,11 +459,14 @@ test('task Pause/Resume/Stop include the destructive-stop confirmation and 44px 
   // The seven viewport projects share one durable fixture backend, so an
   // earlier project can legitimately have stopped the originally queued task.
   // Verify the contract against whichever live task currently exposes Stop.
-  const stop = page.locator('#tasks-cards').getByRole('button', { name: /^Stop / }).first();
+  const tasks = await page.evaluate(() => fetch('/api/tasks').then((response) => response.json()));
+  const liveTask = tasks.find((task) => task.projection === 'ACTIVE' && task.state === 'RUNNING');
+  if (!liveTask) throw new Error('fixture must expose a live task with a Stop action');
+  const stop = page.locator('#tasks-cards').getByRole('button', { name: `Stop ${liveTask.id}`, exact: true });
   await expect(stop).toBeVisible();
-  const box = await stop.boundingBox();
-  expect(box).not.toBeNull();
-  expect(box.height).toBeGreaterThanOrEqual(36);
+  // Task polling replaces the card DOM. Re-resolve the named live task on
+  // every sample rather than retaining a node between visibility and geometry.
+  await expect.poll(async () => (await stop.boundingBox())?.height || 0).toBeGreaterThanOrEqual(36);
   await stop.click();
   await expect(page.locator('#confirm-sheet')).toBeVisible();
   await page.locator('#confirm-cancel').click();
@@ -620,6 +623,21 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
 });
 
+test('ENG-PC-09 Run Detail shows external runtime ownership without unsafe controls', async ({ page }) => {
+  await navTo(page, 'view-runs');
+  const running = page.locator('[data-runbook-id="fx-rb-running"]');
+  await running.getByRole('button', { name: 'View detail for Fixture overnight run' }).click();
+  const runtime = page.locator('#run-detail .run-detail-runtime');
+  await expect(runtime).toContainText('Fixture development app');
+  await expect(runtime).toContainText('EXTERNAL_UNOWNED');
+  await expect(runtime).toContainText('operational metadata only');
+  await expect(runtime).toContainText('runtime-services/');
+  await expect(runtime.getByRole('button', { name: 'Start', exact: true })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Restart' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Stop' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Open preview' })).toBeDisabled();
+});
+
 test('Run Detail refuses recovery for an ambiguous ownership proof', async ({ page }) => {
   const attention = page.locator('#overview-attention-list [data-attention-kind="recoverable_orphan"]');
   await expect(attention).toContainText('Recoverable orphan');
@@ -661,10 +679,14 @@ test('Execution Events filters typed classes and opens bounded evidence', async 
   await expect(page.locator('#card-events h2')).toHaveText('Execution Events');
   await page.locator('#history-category').selectOption('class:lease');
   const timeline = page.locator('#events-list');
-  await expect(timeline).toContainText('Execution lease acquired');
-  await expect(timeline).toContainText('MEASURED');
-  await timeline.locator('details.event-details summary').click();
-  await expect(timeline).toContainText('.agent-output/ENG-AGENT-02-S5/claude-code/fixture-event/summary.md');
+  const evidencePath = '.agent-output/ENG-AGENT-02-S5/claude-code/fixture-event/summary.md';
+  const leaseEvent = timeline.locator('li')
+    .filter({ hasText: 'Execution lease acquired' })
+    .filter({ has: page.locator('code', { hasText: evidencePath }) });
+  await expect(leaseEvent).toHaveCount(1);
+  await expect(leaseEvent).toContainText('MEASURED');
+  await leaseEvent.locator('details.event-details summary').click();
+  await expect(leaseEvent).toContainText(evidencePath);
 
   /** @type {() => void} */
   let releaseEvidence = () => {};
@@ -677,8 +699,8 @@ test('Execution Events filters typed classes and opens bounded evidence', async 
     await route.fulfill({ response });
   });
 
-  await timeline.getByRole('button', { name: 'Open summary' }).click();
-  const previewBeforeRefresh = await timeline.locator('.event-evidence-preview').elementHandle();
+  await leaseEvent.getByRole('button', { name: 'Open summary' }).click();
+  const previewBeforeRefresh = await leaseEvent.locator('.event-evidence-preview').elementHandle();
   expect(previewBeforeRefresh).not.toBeNull();
   if (!previewBeforeRefresh) throw new Error('Evidence preview was not rendered');
   const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/events?limit=100'));
@@ -689,15 +711,15 @@ test('Execution Events filters typed classes and opens bounded evidence', async 
   await expect.poll(() => previewBeforeRefresh.evaluate((node) => node.isConnected)).toBe(false);
 
   releaseEvidence();
-  const previewAfterRefresh = timeline.locator('.event-evidence-preview');
+  const previewAfterRefresh = leaseEvent.locator('.event-evidence-preview');
   await expect(previewAfterRefresh).toContainText('Fixture measured lease evidence.');
   await expect(previewAfterRefresh).toBeVisible();
 
   const rerendered = page.waitForResponse((response) => response.url().endsWith('/api/events?limit=100'));
   await page.locator('#history-search').fill('');
   await rerendered;
-  await expect(timeline.locator('.event-evidence-preview')).toContainText('Fixture measured lease evidence.');
-  await expect(timeline.locator('.event-evidence-preview')).toBeVisible();
+  await expect(leaseEvent.locator('.event-evidence-preview')).toContainText('Fixture measured lease evidence.');
+  await expect(leaseEvent.locator('.event-evidence-preview')).toBeVisible();
 });
 
 test('Quick Start resolves the fixture ledger task and shows a ready Prepared Run', async ({ page, request, baseURL }) => {
@@ -1028,6 +1050,20 @@ test('S9 worktrees distinguish managed and discovered Git worktrees with safe ac
   await expect(page.locator('#worktrees-refresh')).toHaveText(/Refresh status/i);
   const buttons = page.locator('.worktree-card .worktree-actions button');
   expect(await buttons.count()).toBeGreaterThan(0);
+  expect(await pageOverflows(page)).toBe(false);
+});
+
+test('ENG-PC-09 Worktree inspector exposes scoped runtime health and log pointer', async ({ page }) => {
+  await navTo(page, 'view-worktrees');
+  const runtime = page.locator('.worktree-runtime-service').first();
+  await expect(runtime).toContainText('Fixture development app');
+  await expect(runtime).toContainText('OCTAREL_DECLARED');
+  await expect(runtime).toContainText('operational metadata only');
+  await expect(runtime).toContainText('runtime-services/');
+  await expect(runtime.getByRole('button', { name: 'Start', exact: true })).toBeEnabled();
+  await expect(runtime.getByRole('button', { name: 'Restart' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Stop' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Open preview' })).toBeDisabled();
   expect(await pageOverflows(page)).toBe(false);
 });
 

@@ -13,11 +13,26 @@ The directory is gitignored. Never commit SQLite, WAL, SHM, or reports.
 ## What is stored
 
 Orchestration records: tasks, runbooks, events, worktrees, provider state,
-operations, project registry, advancement decisions, and overnight sessions
-(bounds, counters, current runbook pointer, stop reason; never a task list). Not product databases, not managed-repo files.
+operations, project registry, advancement decisions, runtime services, and
+overnight sessions (bounds, counters, current runbook pointer, stop reason;
+never a task list). Not product databases, not managed-repo files.
 
 Rows that belong to a project carry `project_id`. Switching projects does not
 rewrite another project's history.
+
+ENG-PC-09 runtime-service rows retain only the selected project/scope, declared
+fixed argv, separately observed stable process argv, cwd,
+PID/create-time/process-session identity, loopback port and preview URL,
+health/ownership, append-only log pointer, timestamps, and exit state. An older
+row with no observed process argv is not backfilled from its declaration and
+cannot authorize a signal. Logs live under `<state dir>/runtime-services/`;
+the database stores the relative pointer, not a duplicate raw log. A dead or
+ambiguous process record is retained as evidence and cannot authorize a signal.
+If a terminal row's historical PID is later reused, observation preserves that
+row as non-stoppable terminal evidence; with a free declared port, it remains
+eligible for a fresh launch rather than being reclassified as a live owner.
+Runtime preview URLs are operational metadata, never test or acceptance
+evidence.
 
 Graphify cache (optional, derived): `<state dir>/graph-context/<project>/<worktree>/<tree>/`. It is
 disposable; delete it freely. Each worktree directory also has an atomic `status.json` containing only its

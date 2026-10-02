@@ -132,6 +132,7 @@ async function navTo(page, viewId) {
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('h1')).toHaveText('Control Center');
+  await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15_000 });
 });
 
 test('every actionable Control Center control is either baselined or explicitly exempt', async ({ page, request }) => {
@@ -145,16 +146,22 @@ test('every actionable Control Center control is either baselined or explicitly 
   expect(reset.ok()).toBeTruthy();
   await page.goto('/');
   await expect(page.locator('h1')).toHaveText('Control Center');
+  await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15_000 });
 
   /** @type {Record<string, string[]>} */
   const discovered = {};
 
   for (const viewId of ALL_SECTIONS) {
     await navTo(page, viewId);
-    // Some views (e.g. Flow) populate their cards from a fetch issued only
-    // once their tab becomes active, racing an immediate DOM query.
-    await page.waitForLoadState('networkidle');
-    const controls = await discoverActionableControls(page.locator(`#${viewId}`));
+    // The dashboard intentionally polls forever, so networkidle is not a
+    // reachable readiness state. View-scoped refreshes publish their own busy
+    // boundary so discovery cannot race the priority/manager/provider render.
+    const view = page.locator(`#${viewId}`);
+    await expect(view).toBeVisible();
+    await expect(view).toHaveClass(/active/);
+    await expect(view).toHaveAttribute('data-refresh-ready', 'true');
+    await expect(view).not.toHaveAttribute('aria-busy', 'true');
+    const controls = await discoverActionableControls(view);
     const names = new Set();
     for (const control of controls) {
       const exempt = EXEMPTIONS.some((rule) => rule.view === viewId && rule.match(control.name, control));

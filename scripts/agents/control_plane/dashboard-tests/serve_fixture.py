@@ -79,6 +79,9 @@ from scripts.agents.control_plane.remote_access import (  # noqa: E402
 )
 from scripts.agents.control_plane.run_events import RunEvent  # noqa: E402
 from scripts.agents.control_plane.runbooks import PRESETS  # noqa: E402
+from scripts.agents.control_plane.runtime_services import (
+    RuntimeServiceManager,  # noqa: E402
+)
 from scripts.agents.control_plane.scheduler import (  # noqa: E402
     ConcurrencyPolicy,
     Scheduler,
@@ -906,6 +909,10 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
                     "validation_authority": "repository-owned-exact-tree-local-gate",
                     "app_lifecycle_command": "make run",
                     "app_lifecycle_port": "8765",
+                    "runtime_service_argv": '["make", "run"]',
+                    "runtime_service_port": "18765",
+                    "runtime_service_host": "127.0.0.1",
+                    "runtime_service_name": "Fixture development app",
                 },
             )
         )
@@ -971,7 +978,19 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             },
         )
 
-    return CommandContext(state=state, registry=registry, scheduler=scheduler, supervisor=supervisor, repo_root=root)
+    ctx = CommandContext(state=state, registry=registry, scheduler=scheduler, supervisor=supervisor, repo_root=root)
+    # ENG-PC-09: a durable external/unowned service row proves both inspectors
+    # render operational metadata while withholding every destructive control.
+    runtime = RuntimeServiceManager(ctx)
+    external = runtime._declared_row(str(root), "fx-rb-running")
+    external.update(
+        health="EXTERNAL",
+        ownership="EXTERNAL_UNOWNED",
+        owner=None,
+        status_reason="fixture external listener is informational and cannot be signalled",
+    )
+    state.upsert_runtime_service(external)
+    return ctx
 
 
 def reset_fixture_context(ctx: CommandContext, root: Path) -> CommandContext:

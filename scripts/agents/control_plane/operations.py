@@ -9,10 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import re
-import signal
-import socket
 import subprocess
 import uuid
 from pathlib import Path
@@ -24,6 +21,11 @@ from scripts.ci.runtime_paths import has_non_runtime_changes
 from ..redaction import redact_text
 from .models import TASK_TERMINAL_STATES, WorktreeRecord, task_projection, utc_now_iso
 from .recovery import discover_git_worktrees, pid_is_alive, reconcile_worktree_locks
+from .runtime_services import (
+    RuntimeServiceError,
+    RuntimeServiceManager,
+    RuntimeServiceMissingError,
+)
 
 OP_STATES = frozenset({"IDLE", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED", "CONFLICT", "CANCELLED"})
 GIT_ACTIONS = frozenset({"fetch", "pull", "push", "prepare_merge", "merge", "refresh"})
@@ -626,189 +628,27 @@ def sanitize_terminal_command(command: str) -> str:
     return redact_text(stripped)
 
 
-class AppLifecycleManager:
-    """Own only the canonical local development process launched by this instance.
+class AppLifecycleManager(RuntimeServiceManager):
+    """Compatibility adapter over ENG-PC-09's one runtime-service manager."""
 
-    ENG-CP-04: launch argv/port/cwd come from the selected project's
-    capabilities (``app_lifecycle_command``, ``app_lifecycle_port``) and
-    ``local_repo_root``. Generic CP code does not assume ``make run``, port
-    8765, or the OctaScene display name. A project that does not declare a
-    lifecycle command cannot be started.
-    """
-
-    def __init__(self, ctx: Any) -> None:
-        self.ctx = ctx
-        self.process: subprocess.Popen[str] | None = None
-        self.started_at: str | None = ctx.state.get_control_setting("app_started_at")
-        raw_exit = ctx.state.get_control_setting("app_last_exit_code")
-        self.last_exit_code: int | None = int(raw_exit) if raw_exit not in {None, ""} else None
-
-    def _lifecycle_spec(self) -> tuple[list[str], int, Path, str]:
-        project = getattr(self.ctx, "selected_project", None)
-        if project is None:
-            return ["make", "run"], 8765, self.ctx.repo_root, "OctaScene"
-        command = (project.capabilities.get("app_lifecycle_command") or "").strip()
-        if not command:
-            raise OperationError(
-                f"project {project.project_id!r} does not declare app_lifecycle_command; "
-                "generic Control Plane code will not assume make run"
-            )
-        port_raw = project.capabilities.get("app_lifecycle_port") or "8765"
-        try:
-            port = int(port_raw)
-        except ValueError as exc:
-            raise OperationError(f"project {project.project_id!r} app_lifecycle_port is not an integer: {port_raw!r}") from exc
-        return command.split(), port, project.local_repo_root, project.display_name
-
-    def _child_environment(self) -> dict[str, str]:
-        """ENG-AO-09: the managed app runs under its own project's Python, never Octarel's active one.
-
-        An unresolvable project environment does not block starting the app (this is not a gate); Octarel's
-        active virtual environment is still removed so the app cannot silently import from it.
-        """
-
-        from .managed_environment import (
-            ManagedEnvironmentError,
-            is_octarel_own_project,
-            isolated_environment,
-            resolve_managed_environment,
-        )
-
-        project = getattr(self.ctx, "selected_project", None)
-        if project is not None and is_octarel_own_project(project):
-            return dict(os.environ)
-        environment = None
-        if project is not None:
-            try:
-                environment = resolve_managed_environment(project)
-            except ManagedEnvironmentError:
-                environment = None
-        return isolated_environment(os.environ, environment)
-
-    def _persist(self, pid: int | None, create_time: float | None = None) -> None:
-        self.ctx.state.set_control_setting("app_pid", str(pid or ""))
-        self.ctx.state.set_control_setting("app_started_at", self.started_at or "")
-        self.ctx.state.set_control_setting("app_process_create_time", str(create_time or ""))
-        self.ctx.state.set_control_setting("app_last_exit_code", "" if self.last_exit_code is None else str(self.last_exit_code))
-
-    def _owned_pid(self) -> int | None:
-        raw = self.ctx.state.get_control_setting("app_pid")
-        if not raw or not raw.isdigit() or not pid_is_alive(int(raw)):
-            return None
-        pid = int(raw)
-        try:
-            import psutil
-
-            process = psutil.Process(pid)
-            expected = self.ctx.state.get_control_setting("app_process_create_time")
-            if expected and abs(process.create_time() - float(expected)) > 1:
-                return None
-            command = " ".join(process.cmdline()).lower()
-            cwd = Path(process.cwd()).resolve()
-            try:
-                argv, _port, launch_root, _name = self._lifecycle_spec()
-            except OperationError:
-                return None
-            expected_cwd = launch_root.resolve()
-            if cwd != expected_cwd or not all(part.lower() in command for part in argv):
-                return None
-        except (ImportError, OSError, ValueError):
-            if not self.process or self.process.pid != pid:
-                return None
-        return pid
-
-    def status(self) -> dict[str, Any]:
-        pid = self.process.pid if self.process else self._owned_pid()
-        if self.process and self.process.poll() is not None:
-            self.last_exit_code = self.process.returncode
-            self.process = None
-            pid = None
-            self._persist(None)
-        running = bool(pid and pid_is_alive(pid))
-        uptime = None
-        if running and self.started_at:
-            uptime = max(0, int((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(self.started_at)).total_seconds()))
-        try:
-            argv, port, _root, _name = self._lifecycle_spec()
-            launch_source = " ".join(argv)
-        except OperationError:
-            port, launch_source = 8765, "undeclared"
-        return {"status": "RUNNING" if running else "STOPPED", "pid": pid, "port": port, "uptime_seconds": uptime, "started_at": self.started_at, "launch_source": launch_source, "last_exit_code": self.last_exit_code}
-
-    def action(self, action: str, actor: str) -> dict[str, Any]:
+    def action(self, action: str, actor: str, **scope: Any) -> dict[str, Any]:
         if action not in APP_ACTIONS:
             raise OperationError("unsupported app lifecycle action")
-        if action == "restart":
-            if self.process:
-                self._stop(actor)
-            argv, _port, _root, display = self._lifecycle_spec()
-            return self._start(actor, event=f"{display} Restarted")
-        if action == "start":
-            return self._start(actor)
-        return self._stop(actor)
+        try:
+            return super().action(action, actor, **scope)
+        except RuntimeServiceError as exc:
+            # Existing command/API callers already translate OperationError to
+            # a 409. Preserve the legacy missing-process wording only for that
+            # exact case; identity and signal refusals must remain truthful.
+            legacy = "no Control-Center-managed development process is running"
+            message = legacy if isinstance(exc, RuntimeServiceMissingError) else str(exc)
+            raise OperationError(message) from None
 
     def shutdown_owned(self) -> bool:
-        """Stop a development process only when durable identity proves ownership."""
-
-        if self._owned_pid() is None:
-            return False
-        self._stop("control-center-shutdown")
-        return True
-
-    def _start(self, actor: str, event: str | None = None) -> dict[str, Any]:
-        argv, port, launch_root, display = self._lifecycle_spec()
-        if event is None:
-            event = f"{display} Started"
-        if self.status()["status"] == "RUNNING":
-            raise OperationError(f"the managed {display} development process is already running")
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                raise OperationError(f"port {port} is already active; refusing to start a duplicate process")
-        except (ConnectionRefusedError, TimeoutError, OSError):
-            pass
-        log_path = self.ctx.state.db_path.parent / "managed-app.log"
-        stream = log_path.open("a", encoding="utf-8")
-        self.process = subprocess.Popen(argv, cwd=launch_root, stdout=stream, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=self._child_environment())
-        stream.close()
-        self.started_at = utc_now_iso()
-        create_time = None
-        try:
-            import psutil
-
-            create_time = psutil.Process(self.process.pid).create_time()
-        except (ImportError, OSError):
-            pass
-        self._persist(self.process.pid, create_time)
-        self.ctx.state.record_event(category="app_lifecycle", message=f"{event}; actor={actor}; pid={self.process.pid}; launch=make-run")
-        return self.status()
-
-    def _stop(self, actor: str) -> dict[str, Any]:
-        old_pid = self.process.pid if self.process and self.process.poll() is None else self._owned_pid()
-        if not old_pid:
-            raise OperationError("no Control-Center-managed development process is running")
-        os.killpg(old_pid, signal.SIGTERM)
-        if self.process:
-            try:
-                self.process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                raise OperationError("process did not stop after SIGTERM; refusing to force-kill it") from None
-            self.last_exit_code = self.process.returncode
-        else:
-            deadline = dt.datetime.now().timestamp() + 8
-            while pid_is_alive(old_pid) and dt.datetime.now().timestamp() < deadline:
-                import time as _time
-
-                _time.sleep(0.1)
-            if pid_is_alive(old_pid):
-                raise OperationError("process did not stop after SIGTERM; refusing to force-kill it")
-        self.process = None
-        self._persist(None)
-        try:
-            _argv, _port, _root, display = self._lifecycle_spec()
-        except OperationError:
-            display = "app"
-        self.ctx.state.record_event(category="app_lifecycle", message=f"{display} Stopped; actor={actor}; pid={old_pid}; exit={self.last_exit_code}")
-        return self.status()
+            return super().shutdown_owned()
+        except RuntimeServiceError as exc:
+            raise OperationError(str(exc)) from None
 
 
 _PROGRAM_SOURCES = {
