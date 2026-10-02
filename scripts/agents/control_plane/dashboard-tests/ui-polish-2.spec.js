@@ -131,11 +131,11 @@ test('View Active Run lands on the run: selected, focused and its details open',
 
   // A later poll must not steal focus from an unrelated control.
   const replacementCard = await card.elementHandle();
-  const moreTab = page.locator('#more-tab');
-  await expect(moreTab).toBeVisible();
-  await moreTab.focus();
+  const paletteOpen = page.locator('#palette-open:visible, #palette-open-mobile:visible');
+  await expect(paletteOpen).toBeVisible();
+  await paletteOpen.focus();
   await page.waitForFunction((node) => !node.isConnected, replacementCard);
-  await expect(moreTab).toBeFocused();
+  await expect(paletteOpen).toBeFocused();
   // Leaving Runs clears the selection.
   await navTo(page, 'view-tasks');
   await navTo(page, 'view-runs');
