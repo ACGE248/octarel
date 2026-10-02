@@ -41,6 +41,7 @@
     "Open live output for Fixture budget evidence run",
     "Open live output for Fixture completed runbook",
     "Open live output for Fixture overnight run",
+    "Open live output for Fixture recoverable orphan run",
     "Open source reference https://github.com/ACGE#/octarel/iss…",
     "Open summary",
     "Overnight duration in hours",
@@ -68,6 +69,7 @@
     "View detail for Fixture completed runbook",
     "View detail for Fixture draft runbook",
     "View detail for Fixture overnight run",
+    "View detail for Fixture recoverable orphan run",
     "View report",
     "Worktree",
     "e.g. Finish PR ## overnight",
@@ -82,6 +84,7 @@
     "ENG-AGENT-#/mechanical-testingGemini Flash Lite (opencode#-…",
     "ENG-AGENT-#/primary-implementationCodex Build (codex-build)…",
     "ENG-CI-#/focused-testsGrok Build (grok-build)focused-testsG…",
+    "ENG-PC-#/primary-implementationClaude Code (claude-code)pri…",
     "V#-#/primary-implementationClaude Code (claude-code)primary…"
   ],
   "view-priority": [

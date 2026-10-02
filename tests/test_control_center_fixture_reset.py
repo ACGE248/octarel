@@ -11,9 +11,24 @@ from typing import Any
 import pytest
 
 from scripts.agents.control_plane import state as state_mod
+from scripts.agents.control_plane.recovery import (
+    OWNERSHIP_AMBIGUOUS,
+    ownership_proof_for_task,
+)
 from scripts.agents.control_plane.state import default_db_path
 
-ACTIVE_STATES = {"RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED"}
+ACTIVE_STATES = {
+    "RUNNING",
+    "QUEUED",
+    "PENDING",
+    "PAUSED",
+    "BLOCKED",
+    "WAITING_EXTERNAL",
+    "WAITING_APPROVAL",
+    "WAITING_PROVIDER",
+    "OWNER_ACTION_REQUIRED",
+    "RECOVERABLE_ORPHAN",
+}
 
 
 def _load_serve_fixture() -> Any:
@@ -107,6 +122,17 @@ def test_fixture_seed_keeps_one_current_task_ref_across_a_clock_second(
         task = ctx.state.get_task(task_id)
         assert task is not None
         assert task.task_ref == "ENG-AGENT-02"
+    completed = ctx.state.get_task("fx-rb-done-session")
+    fallback = ctx.state.get_task("fx-rb-fallback-session")
+    assert completed is not None and completed.state == "SUCCEEDED"
+    assert fallback is not None and fallback.state == "RUNNING"
+    orphan = ctx.state.get_task("fx-rb-recoverable-session")
+    assert orphan is not None
+    assert orphan.state == "RECOVERABLE_ORPHAN"
+    assert orphan.runbook_id == "fx-rb-recoverable"
+    orphan_runbook = ctx.state.get_runbook("fx-rb-recoverable")
+    assert orphan_runbook is not None and orphan_runbook.task_id == orphan.id
+    assert ownership_proof_for_task(orphan).verdict == OWNERSHIP_AMBIGUOUS
     # Every competing active reference is strictly older, not merely tied.
     current = ctx.state.get_task("fx-running-1").updated_at
     others = {

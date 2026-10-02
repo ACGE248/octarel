@@ -620,25 +620,22 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
 });
 
-test('Run Detail shows server-proven recovery and refuses an ambiguous ownership proof', async ({ page }) => {
-  await navTo(page, 'view-runs');
+test('Run Detail refuses recovery for an ambiguous ownership proof', async ({ page }) => {
+  const attention = page.locator('#overview-attention-list [data-attention-kind="recoverable_orphan"]');
+  await expect(attention).toContainText('Recoverable orphan');
+  await attention.getByRole('button', { name: 'Open runs for Recoverable orphan' }).click();
+  await expect(page.locator('#view-runs')).toBeVisible();
   const detail = page.locator('#run-detail');
-
-  await page.locator('[data-runbook-id="fx-rb-fallback"]').getByRole(
-    'button', { name: 'View detail for Fixture automatic fallback run' }
+  const orphan = page.locator('[data-runbook-id="fx-rb-recoverable"]');
+  await expect(orphan.getByRole('button', { name: 'Open live output for Fixture recoverable orphan run' })).toBeVisible();
+  await orphan.getByRole(
+    'button', { name: 'View detail for Fixture recoverable orphan run' }
   ).click();
-  const eligible = detail.locator('.run-detail-recovery');
-  await expect(eligible).toContainText('PID_ABSENT');
-  await expect(eligible).toContainText('0 of 3');
-  await expect(eligible.getByRole('button', { name: 'Recover safely' })).toBeEnabled();
-
-  await page.locator('[data-runbook-id="fx-rb-done"]').getByRole(
-    'button', { name: 'View detail for Fixture completed runbook' }
-  ).click();
+  await expect(detail).toContainText('fx-rb-recoverable');
   const ambiguous = detail.locator('.run-detail-recovery');
   await expect(ambiguous).toContainText('AMBIGUOUS');
   await expect(ambiguous).toContainText('PID_ONLY');
-  await expect(ambiguous).toContainText('ownership is unproven');
+  await expect(ambiguous).toContainText('Ownership is ambiguous, so Octarel cannot prove that recovery is safe.');
   await expect(ambiguous).toContainText('Implementation');
   await expect(ambiguous).toContainText('PRESERVED');
   await expect(ambiguous).toContainText('INVALIDATED_BY_TREE_CHANGE');
