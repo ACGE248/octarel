@@ -66,6 +66,7 @@
   // OCTAREL-UI-03: <details> disclosures inside lists that re-render every poll
   // must not collapse under the operator; open state is remembered by key.
   const disclosureOpen = new Set();
+  const eventEvidencePreviews = new Map();
   function rememberDisclosure(details, key) {
     details.open = disclosureOpen.has(key);
     details.addEventListener("toggle", () => {
@@ -73,6 +74,30 @@
       else disclosureOpen.delete(key);
     });
     return details;
+  }
+
+  function eventEvidencePreviewKey(eventId, kind) {
+    return JSON.stringify([String(eventId), String(kind)]);
+  }
+
+  function showEventEvidencePreview(listEl, key, content) {
+    listEl.querySelectorAll(".event-evidence-preview").forEach((preview) => {
+      if (preview.dataset.evidenceKey !== key) return;
+      preview.textContent = content;
+      preview.hidden = false;
+    });
+  }
+
+  function pruneEventEvidencePreviews(events) {
+    const currentKeys = new Set();
+    events.forEach((event) => {
+      Object.keys(event.evidence || {}).forEach((kind) => {
+        currentKeys.add(eventEvidencePreviewKey(event.id, kind));
+      });
+    });
+    eventEvidencePreviews.forEach((_content, key) => {
+      if (!currentKeys.has(key)) eventEvidencePreviews.delete(key);
+    });
   }
 
   function elapsedBetween(startIso, endIso) {
@@ -5652,18 +5677,24 @@
           detailChildren.push(el("pre", { class: "event-data", text: JSON.stringify(e.data, null, 2) }));
         }
         Object.entries(e.evidence || {}).forEach(([kind, path]) => {
+          const previewKey = eventEvidencePreviewKey(e.id, kind);
           const preview = el("pre", { class: "event-evidence-preview", hidden: "hidden" });
+          preview.dataset.evidenceKey = previewKey;
+          if (eventEvidencePreviews.has(previewKey)) {
+            preview.textContent = eventEvidencePreviews.get(previewKey);
+            preview.hidden = false;
+          }
           const open = el("button", { type: "button", class: "event-evidence-open", text: `Open ${kind}` });
           open.addEventListener("click", async () => {
             open.disabled = true;
             try {
               const result = await getJSON(`/api/events/${e.id}/evidence/${encodeURIComponent(kind)}`);
-              preview.textContent = result.content || "(empty evidence file)";
-              if (result.truncated) preview.textContent += "\n… preview truncated";
-              preview.hidden = false;
+              let content = result.content || "(empty evidence file)";
+              if (result.truncated) content += "\n… preview truncated";
+              eventEvidencePreviews.set(previewKey, content);
+              showEventEvidencePreview(listEl, previewKey, content);
             } catch (err) {
-              preview.textContent = "Evidence is unavailable.";
-              preview.hidden = false;
+              showEventEvidencePreview(listEl, previewKey, "Evidence is unavailable.");
             } finally {
               open.disabled = false;
             }
@@ -5689,6 +5720,7 @@
   async function refreshEvents() {
     const events = await getJSON("/api/events?limit=100");
     state.events = events;
+    pruneEventEvidencePreviews(events);
     const hist = document.getElementById("events-list");
     const term = (document.getElementById("history-search")?.value || "").toLowerCase();
     const category = document.getElementById("history-category")?.value || "";

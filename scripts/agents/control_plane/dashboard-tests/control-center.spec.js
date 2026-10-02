@@ -665,8 +665,39 @@ test('Execution Events filters typed classes and opens bounded evidence', async 
   await expect(timeline).toContainText('MEASURED');
   await timeline.locator('details.event-details summary').click();
   await expect(timeline).toContainText('.agent-output/ENG-AGENT-02-S5/claude-code/fixture-event/summary.md');
+
+  /** @type {() => void} */
+  let releaseEvidence = () => {};
+  const evidenceRelease = new Promise((resolve) => {
+    releaseEvidence = () => resolve();
+  });
+  await page.route('**/api/events/*/evidence/summary', async (route) => {
+    const response = await route.fetch();
+    await evidenceRelease;
+    await route.fulfill({ response });
+  });
+
   await timeline.getByRole('button', { name: 'Open summary' }).click();
+  const previewBeforeRefresh = await timeline.locator('.event-evidence-preview').elementHandle();
+  expect(previewBeforeRefresh).not.toBeNull();
+  if (!previewBeforeRefresh) throw new Error('Evidence preview was not rendered');
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/events?limit=100'));
+  // Filtering calls the same refreshEvents render path as the two-second poll,
+  // while the evidence response is deliberately held until the old node detaches.
+  await page.locator('#history-search').fill('Execution');
+  await refreshed;
+  await expect.poll(() => previewBeforeRefresh.evaluate((node) => node.isConnected)).toBe(false);
+
+  releaseEvidence();
+  const previewAfterRefresh = timeline.locator('.event-evidence-preview');
+  await expect(previewAfterRefresh).toContainText('Fixture measured lease evidence.');
+  await expect(previewAfterRefresh).toBeVisible();
+
+  const rerendered = page.waitForResponse((response) => response.url().endsWith('/api/events?limit=100'));
+  await page.locator('#history-search').fill('');
+  await rerendered;
   await expect(timeline.locator('.event-evidence-preview')).toContainText('Fixture measured lease evidence.');
+  await expect(timeline.locator('.event-evidence-preview')).toBeVisible();
 });
 
 test('Quick Start resolves the fixture ledger task and shows a ready Prepared Run', async ({ page, request, baseURL }) => {
