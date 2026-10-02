@@ -254,8 +254,11 @@
   ],
   "view-settings": [
     "Apply",
+    "Apply rollback",
     "Enable notifications",
     "Max write workers",
+    "Preview rollback",
+    "Rollback revision",
     "Theme"
   ]
 }

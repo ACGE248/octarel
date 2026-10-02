@@ -1147,14 +1147,17 @@ def create_app(
         """Runtime snapshot plus explicit repository/runtime ownership facts."""
 
         return {
-            "current_revision": ctx.state.current_configuration_revision(),
+            "current_revision": sanitize_data(ctx.state.current_configuration_revision()),
             "ownership": CONFIGURATION_OWNERSHIP,
         }
 
     @app.get("/api/configuration/revisions")
     def configuration_revisions(limit: int = 100) -> dict[str, Any]:
         return {
-            "revisions": ctx.state.list_configuration_revisions(limit=limit),
+            "revisions": [
+                sanitize_data(revision)
+                for revision in ctx.state.list_configuration_revisions(limit=limit)
+            ],
             "ownership": CONFIGURATION_OWNERSHIP,
         }
 
@@ -1194,7 +1197,48 @@ def create_app(
             target=str(revision["id"]),
             result="OK",
         )
-        return {"revision": revision, "ownership": CONFIGURATION_OWNERSHIP}
+        return {"revision": sanitize_data(revision), "ownership": CONFIGURATION_OWNERSHIP}
+
+    @app.post("/api/configuration/rollback/preview")
+    def configuration_rollback_preview(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run the exact rollback validation path without changing configuration."""
+
+        actor = configuration_actor(request)
+        target = str(payload.get("revision_id", "-"))
+        try:
+            revision_id = payload.get("revision_id")
+            predecessor_id = payload.get("predecessor_id")
+            reason = payload.get("reason")
+            if isinstance(revision_id, bool) or not isinstance(revision_id, int):
+                raise InvalidConfigurationError("revision_id must be an integer")
+            if isinstance(predecessor_id, bool) or not isinstance(predecessor_id, int):
+                raise InvalidConfigurationError("predecessor_id must be an integer")
+            if not isinstance(reason, str):
+                raise InvalidConfigurationError("reason must be a string")
+            preview = ctx.state.preview_configuration_rollback(
+                revision_id,
+                actor=actor,
+                reason=reason,
+                predecessor_id=predecessor_id,
+            )
+        except ConfigurationRevisionError as exc:
+            configuration_failure(
+                request,
+                verb="configuration_rollback_preview",
+                target=target,
+                actor=actor,
+                exc=exc,
+            )
+            status = 409 if isinstance(exc, StaleConfigurationError) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from None
+        _record_remote_audit(
+            ctx,
+            request,
+            verb="configuration_rollback_preview",
+            target=target,
+            result="VALID",
+        )
+        return sanitize_data({"preview": preview, "ownership": CONFIGURATION_OWNERSHIP})
 
     @app.post("/api/configuration/rollback")
     def configuration_rollback(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1232,7 +1276,7 @@ def create_app(
             target=target,
             result=f"OK: revision {revision['id']}",
         )
-        return {"revision": revision, "ownership": CONFIGURATION_OWNERSHIP}
+        return {"revision": sanitize_data(revision), "ownership": CONFIGURATION_OWNERSHIP}
 
     @app.get("/api/projects")
     def projects_list() -> dict[str, Any]:

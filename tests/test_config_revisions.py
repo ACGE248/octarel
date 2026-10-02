@@ -131,6 +131,13 @@ def test_invalid_historical_configuration_is_refused_on_rollback(tmp_path: Path)
     state._conn.commit()
 
     with pytest.raises(InvalidConfigurationError, match="at least 1"):
+        state.preview_configuration_rollback(
+            1,
+            actor="operator@example.test",
+            reason="preview legacy",
+            predecessor_id=2,
+        )
+    with pytest.raises(InvalidConfigurationError, match="at least 1"):
         state.rollback_configuration(
             1,
             actor="operator@example.test",
@@ -203,6 +210,11 @@ def test_apply_rollback_and_refused_rollback_keep_audit_continuity(tmp_path: Pat
     )
     assert applied.status_code == 200
     applied_id = applied.json()["revision"]["id"]
+    previewed = client.post(
+        "/api/configuration/rollback/preview",
+        json={"revision_id": 0, "predecessor_id": applied_id, "reason": "preview undo"},
+    )
+    assert previewed.status_code == 200
     rolled_back = client.post(
         "/api/configuration/rollback",
         json={"revision_id": 0, "predecessor_id": applied_id, "reason": "undo scale"},
@@ -213,11 +225,18 @@ def test_apply_rollback_and_refused_rollback_keep_audit_continuity(tmp_path: Pat
         json={"revision_id": 0, "predecessor_id": applied_id, "reason": "stale retry"},
     )
     assert refused.status_code == 409
+    refused_preview = client.post(
+        "/api/configuration/rollback/preview",
+        json={"revision_id": 0, "predecessor_id": applied_id, "reason": "stale preview"},
+    )
+    assert refused_preview.status_code == 409
 
     assert [item[0] for item in remote_audits] == [
         "configuration_apply",
+        "configuration_rollback_preview",
         "configuration_rollback",
         "configuration_rollback",
+        "configuration_rollback_preview",
     ]
     assert remote_audits[-1][1].startswith("REFUSED:")
     audit_messages = [
@@ -227,6 +246,64 @@ def test_apply_rollback_and_refused_rollback_keep_audit_continuity(tmp_path: Pat
     assert any("local-operator rolled" in message for message in audit_messages)
     assert any("local-operator refused" in message for message in audit_messages)
     assert all(revision["actor"] == "local-operator" for revision in ctx.state.list_configuration_revisions()[:2])
+
+
+def test_rollback_preview_is_serialized_safe_and_does_not_append_a_revision(tmp_path: Path):
+    ctx = _context(tmp_path)
+    client = TestClient(create_app(ctx, roadmap_path=tmp_path / "missing-roadmap.md"))
+    applied = client.post(
+        "/api/configuration/apply",
+        json={"changes": {"max_write_workers": "2"}, "predecessor_id": 0, "reason": "scale up"},
+    ).json()["revision"]
+    count_before = len(client.get("/api/configuration/revisions").json()["revisions"])
+
+    response = client.post(
+        "/api/configuration/rollback/preview",
+        json={"revision_id": 0, "predecessor_id": applied["id"], "reason": "preview baseline"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["preview"] == {
+        "status": "VALID",
+        "target_revision_id": 0,
+        "predecessor_id": applied["id"],
+        "changes": {"max_write_workers": {"before": "2", "after": None}},
+    }
+    assert len(client.get("/api/configuration/revisions").json()["revisions"]) == count_before
+
+    unsafe_values = ("token=abcdefghijklmnop", "restore /private/operator/project")
+    for unsafe in unsafe_values:
+        refused = client.post(
+            "/api/configuration/rollback/preview",
+            json={"revision_id": 0, "predecessor_id": applied["id"], "reason": unsafe},
+        )
+        assert refused.status_code == 400
+        serialized = refused.text
+        assert "token=abcdefghijklmnop" not in serialized
+        assert "/private/operator/project" not in serialized
+
+
+def test_configuration_history_serialization_redacts_legacy_metadata(tmp_path: Path):
+    state = State(tmp_path / "state.db")
+    state._conn.execute(
+        "INSERT INTO configuration_revisions "
+        "(id, actor, created_at, reason, changed_fields, predecessor_id, settings) "
+        "VALUES (1, ?, '2026-01-01T00:00:00+00:00', ?, ?, 0, ?)",
+        (
+            "sk-ABCDEFGHIJKLMNOP1234567890",
+            "restored from /private/operator/project",
+            json.dumps({"max_write_workers": {"before": None, "after": "2"}}),
+            json.dumps({"max_write_workers": "2"}),
+        ),
+    )
+    state._conn.commit()
+    client = TestClient(create_app(_context(tmp_path, state), roadmap_path=tmp_path / "missing.md"))
+
+    serialized = client.get("/api/configuration/revisions").text
+
+    assert "sk-ABCDEFGHIJKLMNOP1234567890" not in serialized
+    assert "/private/operator/project" not in serialized
+    assert "[absolute path omitted]" in serialized
 
 
 def test_repository_controlled_sources_are_facts_not_revision_targets(tmp_path: Path):

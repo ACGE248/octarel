@@ -910,6 +910,63 @@ test('dark mode is the default and light mode re-themes the same layout', async 
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
 
+test('ENG-PC-08 Settings shows ownership, history, diffs, and validated rollback preview', async ({ page, request }) => {
+  await navTo(page, 'view-settings');
+
+  const runtime = page.locator('#configuration-runtime-values');
+  await expect(runtime.locator('.configuration-value')).toHaveCount(7);
+  await expect(runtime).toContainText('max_write_workers');
+  await expect(runtime).toContainText('Source: runtime revision #2 · Actor: fixture:operator');
+
+  const repository = page.locator('#configuration-repository-values');
+  await expect(repository).toContainText('scripts/agents/workers.json');
+  await expect(repository).toContainText('.agents/');
+  await expect(repository).toContainText('READ-ONLY');
+  await expect(repository.locator('input, select, textarea, button')).toHaveCount(0);
+
+  const history = page.locator('#configuration-history');
+  const current = history.locator('[data-revision-id="2"]');
+  await expect(current).toContainText('Revision #2 — CURRENT');
+  await expect(current).toContainText('Actor: fixture:operator');
+  await expect(current).toContainText('Reason: restore valid runtime configuration');
+  await expect(current.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('UNKNOWN — not set');
+  await expect(current.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('4');
+
+  const legacy = history.locator('[data-revision-id="1"]');
+  const emptyDiff = legacy.locator('.configuration-diff', { hasText: 'held_task_ids' });
+  await expect(emptyDiff).toContainText('UNKNOWN — not set');
+  await expect(emptyDiff).toContainText('EMPTY — set explicitly');
+  await expect(emptyDiff).toContainText('Source: revision #1 · Actor: fixture:migration');
+
+  const selector = page.getByLabel('Rollback revision');
+  const preview = page.getByRole('button', { name: 'Preview rollback' });
+  const apply = page.getByRole('button', { name: 'Apply rollback' });
+  const result = page.locator('#configuration-rollback-preview-result');
+  await selector.selectOption('0');
+  const countBefore = (await (await request.get('/api/configuration/revisions')).json()).revisions.length;
+  await preview.click();
+  await expect(result).toContainText('PREVIEW ONLY — VALIDATION: VALID');
+  await expect(result).toContainText('Configuration and revision history are unchanged');
+  await expect(apply).toBeEnabled();
+  const countAfterPreview = (await (await request.get('/api/configuration/revisions')).json()).revisions.length;
+  expect(countAfterPreview).toBe(countBefore);
+
+  await selector.selectOption('1');
+  await preview.click();
+  await expect(result).toContainText('PREVIEW ONLY — VALIDATION: REFUSED');
+  await expect(result).toContainText('held_task_ids must be a JSON array of strings');
+  await expect(apply).toBeDisabled();
+
+  await selector.selectOption('0');
+  await preview.click();
+  await expect(apply).toBeEnabled();
+  await apply.click();
+  await expect(result).toContainText('ROLLBACK APPLIED — NEW REVISION #3');
+  await expect(history.locator('[data-revision-id="3"]')).toContainText('CURRENT');
+  const countAfterApply = (await (await request.get('/api/configuration/revisions')).json()).revisions.length;
+  expect(countAfterApply).toBe(countBefore + 1);
+});
+
 test('mobile bottom navigation and vertical workflow render at phone width', async ({ page }) => {
   const width = page.viewportSize()?.width || 0;
   test.skip(width > 500, 'phone-layout assertion is for the 393 project');

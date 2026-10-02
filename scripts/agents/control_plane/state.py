@@ -2970,21 +2970,9 @@ class State:
         normalized_actor, normalized_reason = validate_revision_attribution(actor, reason)
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            current_row = self._current_configuration_revision_row()
-            current_id = int(current_row["id"])
-            if current_id != predecessor_id:
-                raise StaleConfigurationError(
-                    f"stale configuration predecessor {predecessor_id}; current revision is {current_id}"
-                )
-            target_row = self._conn.execute(
-                "SELECT * FROM configuration_revisions WHERE id = ?", (target_revision_id,)
-            ).fetchone()
-            if target_row is None:
-                raise InvalidConfigurationError(f"unknown configuration revision {target_revision_id}")
-            before = validate_configuration(json.loads(current_row["settings"]))
-            # Validation is intentionally repeated at rollback time.  A
-            # historical value can become invalid as runtime contracts evolve.
-            after = validate_configuration(json.loads(target_row["settings"]))
+            current_id, before, after = self._validated_configuration_rollback(
+                target_revision_id, predecessor_id=predecessor_id
+            )
             revision = self._insert_configuration_revision(
                 actor=normalized_actor,
                 reason=f"{normalized_reason} (rollback to revision {target_revision_id})",
@@ -2997,6 +2985,59 @@ class State:
             self._conn.rollback()
             raise
         return revision
+
+    def _validated_configuration_rollback(
+        self, target_revision_id: int, *, predecessor_id: int
+    ) -> tuple[int, dict[str, str], dict[str, str]]:
+        """Resolve the exact validation shared by rollback preview and apply."""
+
+        current_row = self._current_configuration_revision_row()
+        current_id = int(current_row["id"])
+        if current_id != predecessor_id:
+            raise StaleConfigurationError(
+                f"stale configuration predecessor {predecessor_id}; current revision is {current_id}"
+            )
+        target_row = self._conn.execute(
+            "SELECT * FROM configuration_revisions WHERE id = ?", (target_revision_id,)
+        ).fetchone()
+        if target_row is None:
+            raise InvalidConfigurationError(f"unknown configuration revision {target_revision_id}")
+        before = validate_configuration(json.loads(current_row["settings"]))
+        # Validation is intentionally repeated at rollback time. A historical
+        # value can become invalid as runtime contracts evolve.
+        after = validate_configuration(json.loads(target_row["settings"]))
+        return current_id, before, after
+
+    @_serialized
+    def preview_configuration_rollback(
+        self,
+        target_revision_id: int,
+        *,
+        actor: str,
+        reason: str,
+        predecessor_id: int,
+    ) -> dict[str, Any]:
+        """Validate a rollback against current state without writing anything."""
+
+        validate_revision_attribution(actor, reason)
+        self._conn.execute("BEGIN")
+        try:
+            current_id, before, after = self._validated_configuration_rollback(
+                target_revision_id, predecessor_id=predecessor_id
+            )
+            changes = {
+                key: {"before": before.get(key), "after": after.get(key)}
+                for key in sorted(set(before) | set(after))
+                if before.get(key) != after.get(key)
+            }
+        finally:
+            self._conn.rollback()
+        return {
+            "status": "VALID",
+            "target_revision_id": target_revision_id,
+            "predecessor_id": current_id,
+            "changes": changes,
+        }
 
     @_serialized
     def set_control_setting(self, key: str, value: str) -> None:

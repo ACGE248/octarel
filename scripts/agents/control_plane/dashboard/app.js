@@ -37,6 +37,7 @@
     selectedRunId: null,
     quickstart: [],
     usageRefreshedAt: null,
+    configuration: { ownership: { runtime_editable: [], repository_controlled: [] }, revisions: [] },
   };
 
   // Overview pipeline diagram: remembers each task node's state across polls
@@ -45,6 +46,7 @@
   // 2s. Replaced wholesale on each render — never grows unbounded.
   let pipelinePrevTaskStates = new Map();
   let connectTerminalView = null;
+  let validatedConfigurationRollback = null;
 
   // --------------------------------------------------------------------- helpers
 
@@ -3234,6 +3236,187 @@
     if (input && document.activeElement !== input) input.value = String(data.write.limit);
   }
 
+  function configurationFact(value) {
+    if (value === null || value === undefined) {
+      return el("span", { class: "configuration-fact is-unknown", text: "UNKNOWN — not set" });
+    }
+    if (value === "") {
+      return el("span", { class: "configuration-fact is-empty", text: "EMPTY — set explicitly" });
+    }
+    return el("code", { class: "configuration-fact", text: String(value) });
+  }
+
+  function configurationProvenance(key, value, revisions) {
+    const comparableValue = value === undefined ? null : value;
+    const source = revisions.find((revision) => {
+      const change = revision.changed_fields && revision.changed_fields[key];
+      return change && change.after === comparableValue;
+    });
+    return source
+      ? `Source: runtime revision #${source.id} · Actor: ${source.actor}`
+      : "Source: runtime configuration baseline · Actor: none recorded";
+  }
+
+  function renderConfiguration(data) {
+    state.configuration = data;
+    const ownership = data.ownership || {};
+    const revisions = data.revisions || [];
+    const current = revisions[0] || { id: null, settings: {} };
+    const runtimeRoot = document.getElementById("configuration-runtime-values");
+    const repositoryRoot = document.getElementById("configuration-repository-values");
+    const historyRoot = document.getElementById("configuration-history");
+    const selector = document.getElementById("configuration-rollback-revision");
+    if (!runtimeRoot || !repositoryRoot || !historyRoot || !selector) return;
+
+    runtimeRoot.innerHTML = "";
+    (ownership.runtime_editable || []).forEach((key) => {
+      const value = Object.prototype.hasOwnProperty.call(current.settings || {}, key)
+        ? current.settings[key]
+        : undefined;
+      runtimeRoot.appendChild(el("div", { class: "configuration-value" }, [
+        el("div", { class: "configuration-value-head" }, [el("code", { text: key }), configurationFact(value)]),
+        el("div", { class: "configuration-source", text: configurationProvenance(key, value, revisions) }),
+      ]));
+    });
+
+    repositoryRoot.innerHTML = "";
+    (ownership.repository_controlled || []).forEach((item) => {
+      repositoryRoot.appendChild(el("div", { class: "configuration-value", "data-read-only": "true" }, [
+        el("div", { class: "configuration-value-head" }, [
+          el("code", { text: item.path }),
+          el("span", { class: "configuration-fact", text: "READ-ONLY" }),
+        ]),
+        el("div", { class: "configuration-source", text: `Source: ${item.source} · Actor: repository history` }),
+        el("div", { class: "configuration-source", text: item.reason }),
+      ]));
+    });
+
+    historyRoot.innerHTML = "";
+    revisions.forEach((revision, index) => {
+      const diffs = el("div", { class: "configuration-revision-diffs" });
+      const fields = Object.entries(revision.changed_fields || {});
+      if (!fields.length) {
+        diffs.appendChild(el("p", { class: "hint", text: "No fields changed from its predecessor." }));
+      }
+      fields.forEach(([key, change]) => {
+        diffs.appendChild(el("div", { class: "configuration-diff" }, [
+          el("code", { class: "configuration-diff-key", text: key }),
+          configurationFact(change.before),
+          el("span", { class: "configuration-diff-arrow", "aria-hidden": "true", text: "→" }),
+          configurationFact(change.after),
+          el("span", { class: "configuration-source", text: `Source: revision #${revision.id} · Actor: ${revision.actor}` }),
+        ]));
+      });
+      historyRoot.appendChild(el("article", { class: "configuration-revision", "data-revision-id": String(revision.id) }, [
+        el("header", {}, [
+          el("h4", { text: `Revision #${revision.id}${index === 0 ? " — CURRENT" : ""}` }),
+          el("span", { class: "entity-meta", text: revision.created_at }),
+        ]),
+        el("p", { class: "entity-meta", text: `Actor: ${revision.actor} · Predecessor: ${revision.predecessor_id == null ? "none" : `#${revision.predecessor_id}`}` }),
+        el("p", { text: `Reason: ${revision.reason}` }),
+        diffs,
+      ]));
+    });
+
+    const selected = selector.value;
+    selector.innerHTML = "";
+    revisions.slice(1).forEach((revision) => {
+      selector.appendChild(el("option", { value: String(revision.id), text: `Revision #${revision.id} — ${revision.reason}` }));
+    });
+    if (Array.from(selector.options).some((option) => option.value === selected)) selector.value = selected;
+    selector.disabled = selector.options.length === 0;
+    document.getElementById("configuration-rollback-preview").disabled = selector.disabled;
+    if (validatedConfigurationRollback && current.id !== validatedConfigurationRollback.predecessor) {
+      validatedConfigurationRollback = null;
+      document.getElementById("configuration-rollback-apply").disabled = true;
+      renderConfigurationPreview(
+        "REFUSED",
+        `The preview is stale because current revision is now #${current.id}. Preview again before applying.`,
+        {},
+      );
+    }
+  }
+
+  async function refreshConfiguration() {
+    renderConfiguration(await getJSON("/api/configuration/revisions"));
+  }
+
+  function renderConfigurationPreview(validation, message, changes) {
+    const root = document.getElementById("configuration-rollback-preview-result");
+    root.dataset.validation = validation;
+    root.innerHTML = "";
+    root.appendChild(el("strong", { text: `PREVIEW ONLY — VALIDATION: ${validation}` }));
+    root.appendChild(el("span", { text: message }));
+    const rows = Object.entries(changes || {});
+    if (rows.length) {
+      const list = el("ul", { class: "configuration-preview-changes" });
+      rows.forEach(([key, change]) => {
+        const item = el("li", {}, [el("code", { text: key }), document.createTextNode(": ")]);
+        item.appendChild(configurationFact(change.before));
+        item.appendChild(document.createTextNode(" → "));
+        item.appendChild(configurationFact(change.after));
+        list.appendChild(item);
+      });
+      root.appendChild(list);
+    }
+  }
+
+  function initConfigurationRollback() {
+    const selector = document.getElementById("configuration-rollback-revision");
+    const previewButton = document.getElementById("configuration-rollback-preview");
+    const applyButton = document.getElementById("configuration-rollback-apply");
+    const clearValidatedPreview = () => {
+      validatedConfigurationRollback = null;
+      applyButton.disabled = true;
+    };
+    selector.addEventListener("change", () => {
+      clearValidatedPreview();
+      renderConfigurationPreview("PENDING", "Selection changed. Preview this revision before applying.", {});
+    });
+    previewButton.addEventListener("click", async () => {
+      clearValidatedPreview();
+      const current = state.configuration.revisions[0];
+      const target = Number(selector.value);
+      if (!current || !Number.isInteger(target)) return;
+      renderConfigurationPreview("PENDING", "Validating current state. Nothing has been applied.", {});
+      const result = await postJSON("/api/configuration/rollback/preview", {
+        revision_id: target,
+        predecessor_id: current.id,
+        reason: "Settings rollback preview",
+      });
+      if (!result.ok || !result.body || !result.body.preview) {
+        renderConfigurationPreview("REFUSED", result.body?.detail || `Preview failed with HTTP ${result.status}. Nothing was applied.`, {});
+        return;
+      }
+      const preview = result.body.preview;
+      validatedConfigurationRollback = { target, predecessor: preview.predecessor_id };
+      applyButton.disabled = false;
+      renderConfigurationPreview("VALID", "These changes would be applied. Configuration and revision history are unchanged.", preview.changes);
+    });
+    applyButton.addEventListener("click", async () => {
+      if (!validatedConfigurationRollback) return;
+      const pending = validatedConfigurationRollback;
+      clearValidatedPreview();
+      const result = await postJSON("/api/configuration/rollback", {
+        revision_id: pending.target,
+        predecessor_id: pending.predecessor,
+        reason: "Settings rollback from validated preview",
+      });
+      if (!result.ok || !result.body || !result.body.revision) {
+        renderConfigurationPreview("REFUSED", `ROLLBACK NOT APPLIED — ${result.body?.detail || `HTTP ${result.status}`}`, {});
+        await refreshConfiguration();
+        return;
+      }
+      const revision = result.body.revision;
+      const root = document.getElementById("configuration-rollback-preview-result");
+      root.dataset.validation = "VALID";
+      root.innerHTML = "";
+      root.appendChild(el("strong", { text: `ROLLBACK APPLIED — NEW REVISION #${revision.id}` }));
+      root.appendChild(el("span", { text: `Actor: ${revision.actor} · Reason: ${revision.reason}` }));
+      await refreshConfiguration();
+    });
+  }
+
   async function refreshResources() {
     const data = await getJSON("/api/resources");
     state.resources = data;
@@ -5699,6 +5882,7 @@
         refreshRepositoryHealth,
         refreshGraphify,
         refreshTerminalHistory,
+        refreshConfiguration,
       ];
       let results = await Promise.allSettled(foundationJobs.map((job) => job()));
       results.filter((result) => result.status === "rejected").forEach((result) => console.warn(result.reason));
@@ -6233,6 +6417,7 @@
   initSearch();
   initSteering();
   initMaxWriters();
+  initConfigurationRollback();
   initRanges();
   initWorkflowDetail();
   initOperationsControls();
