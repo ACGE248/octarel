@@ -520,6 +520,65 @@ CREATE TABLE IF NOT EXISTS context_cursors (
 CREATE INDEX IF NOT EXISTS idx_context_cursors_identity
     ON context_cursors (identity_fingerprint);
 
+-- ENG-PC-10 (issue #38): typed operator decisions.  The request identity,
+-- classification, safe payload and state fingerprint are immutable; only the
+-- lifecycle/resolution columns may change.  action_payload is a class-specific
+-- validated JSON object, never command text or credentials.
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT,
+    run_id TEXT,
+    action_type TEXT NOT NULL CHECK (action_type IN (
+        'DESTRUCTIVE_CLEANUP',
+        'METERED_OVERFLOW_ROUTE',
+        'MATERIAL_SCOPE_CHANGE',
+        'AMBIGUOUS_PRODUCT_ARCHITECTURE_CHOICE',
+        'REMOTE_SENSITIVE_ACTION'
+    )),
+    risk TEXT NOT NULL CHECK (risk IN ('MEDIUM', 'HIGH', 'CRITICAL')),
+    safe_payload_summary TEXT NOT NULL,
+    action_payload TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN (
+        'PENDING', 'EXECUTING', 'APPROVED', 'REJECTED', 'EXPIRED', 'STALE', 'FAILED_SAFE'
+    )),
+    state_fingerprint TEXT NOT NULL,
+    state_revision TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT,
+    resolution_note TEXT,
+    result_summary TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approval_requests_project_state
+    ON approval_requests (project_id, state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_approval_requests_run
+    ON approval_requests (project_id, run_id, created_at DESC);
+CREATE TRIGGER IF NOT EXISTS approval_requests_immutable_contract
+    BEFORE UPDATE ON approval_requests
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.project_id IS NOT OLD.project_id
+      OR NEW.task_id IS NOT OLD.task_id
+      OR NEW.run_id IS NOT OLD.run_id
+      OR NEW.action_type IS NOT OLD.action_type
+      OR NEW.risk IS NOT OLD.risk
+      OR NEW.safe_payload_summary IS NOT OLD.safe_payload_summary
+      OR NEW.action_payload IS NOT OLD.action_payload
+      OR NEW.reason IS NOT OLD.reason
+      OR NEW.requested_by IS NOT OLD.requested_by
+      OR NEW.expires_at IS NOT OLD.expires_at
+      OR NEW.state_fingerprint IS NOT OLD.state_fingerprint
+      OR NEW.state_revision IS NOT OLD.state_revision
+      OR NEW.created_at IS NOT OLD.created_at
+    BEGIN SELECT RAISE(ABORT, 'approval request contract is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS approval_requests_no_delete
+    BEFORE DELETE ON approval_requests
+    BEGIN SELECT RAISE(ABORT, 'approval requests are durable audit evidence'); END;
+
 CREATE TABLE IF NOT EXISTS overnight_sessions (
     session_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -701,6 +760,7 @@ _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
     # hypothetical pre-project ENG-PC-06 database; current rows are NOT NULL
     # and every read/write additionally requires the exact project id.
     "context_cursors",
+    "approval_requests",
     "usage_ledger",
     "runtime_services",
 )
@@ -719,8 +779,9 @@ SCHEMA_VERSION_SETTING = "schema_version"
 # project scoping; 3 adds ENG-PC-05's immutable usage ledger; 4 adds mutable
 # hierarchical usage-budget definitions; 5 makes run identity global and keeps
 # durable program attribution on each ledger row; 6 adds ENG-PC-09's generic,
-# project-scoped runtime-service identity and lifecycle record.
-CURRENT_SCHEMA_VERSION = 6
+# project-scoped runtime-service identity and lifecycle record; 7 adds typed,
+# project-scoped approval requests and their immutable revalidation identity.
+CURRENT_SCHEMA_VERSION = 7
 
 
 def project_scoped_setting_key(key: str, project_id: str | None) -> str:
@@ -1798,6 +1859,205 @@ class State:
             f"SELECT * FROM events{where} ORDER BY id {direction} LIMIT ?", values
         ).fetchall()
         return [Event.from_row(dict(row)) for row in rows]
+
+    # ---------------------------------------------------------- approvals
+
+    @staticmethod
+    def _approval_request_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        for key in ("safe_payload_summary", "action_payload", "result_summary"):
+            raw = item.get(key)
+            item[key] = json.loads(raw) if raw else (None if key == "result_summary" else {})
+        return item
+
+    @_serialized
+    def create_approval_request(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Persist one server-derived approval contract without upsert semantics."""
+
+        payload = dict(row)
+        for key in ("safe_payload_summary", "action_payload"):
+            payload[key] = json.dumps(payload[key], sort_keys=True, separators=(",", ":"))
+        payload["result_summary"] = None
+        columns = ", ".join(payload)
+        placeholders = ", ".join(f":{key}" for key in payload)
+        self._conn.execute(
+            f"INSERT INTO approval_requests ({columns}) VALUES ({placeholders})", payload
+        )
+        self._conn.commit()
+        stored = self._conn.execute(
+            "SELECT * FROM approval_requests WHERE id = ?", (payload["id"],)
+        ).fetchone()
+        return self._approval_request_from_row(stored)
+
+    @_serialized
+    def get_approval_request(
+        self, approval_id: str, *, project_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if project_id is None:
+            row = self._conn.execute(
+                "SELECT * FROM approval_requests WHERE id = ?", (approval_id,)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM approval_requests WHERE id = ? AND project_id = ?",
+                (approval_id, project_id),
+            ).fetchone()
+        return self._approval_request_from_row(row) if row else None
+
+    @_serialized
+    def list_approval_requests(
+        self,
+        *,
+        project_id: str,
+        states: Iterable[str] | None = None,
+        run_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["project_id = ?"]
+        values: list[Any] = [project_id]
+        selected_states = tuple(states or ())
+        if selected_states:
+            clauses.append(f"state IN ({', '.join('?' for _ in selected_states)})")
+            values.extend(selected_states)
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            values.append(run_id)
+        values.append(max(1, min(int(limit), 1_000)))
+        rows = self._conn.execute(
+            f"SELECT * FROM approval_requests WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            values,
+        ).fetchall()
+        return [self._approval_request_from_row(row) for row in rows]
+
+    @_serialized
+    def expire_approval_requests(self, *, project_id: str) -> list[dict[str, Any]]:
+        now = utc_now_iso()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            ids = [
+                str(row["id"])
+                for row in self._conn.execute(
+                    "SELECT id FROM approval_requests "
+                    "WHERE project_id = ? AND state = 'PENDING' AND expires_at <= ?",
+                    (project_id, now),
+                ).fetchall()
+            ]
+            if ids:
+                placeholders = ", ".join("?" for _ in ids)
+                self._conn.execute(
+                    "UPDATE approval_requests SET state = 'EXPIRED', updated_at = ?, resolved_at = ?, "
+                    "resolved_by = 'system:expiry', resolution_note = 'explicit approval deadline passed' "
+                    f"WHERE id IN ({placeholders}) AND project_id = ? AND state = 'PENDING'",
+                    (now, now, *ids, project_id),
+                )
+                rows = self._conn.execute(
+                    f"SELECT * FROM approval_requests WHERE id IN ({placeholders}) ORDER BY id",
+                    ids,
+                ).fetchall()
+            else:
+                rows = []
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        return [self._approval_request_from_row(row) for row in rows]
+
+    @_serialized
+    def claim_approval_resolution(
+        self,
+        approval_id: str,
+        *,
+        project_id: str,
+        decision: str,
+        resolved_by: str,
+        resolution_note: str,
+        current_fingerprint: str | None,
+        current_revision: str | None,
+    ) -> dict[str, Any]:
+        """CAS one PENDING request into REJECTED, EXPIRED, STALE or EXECUTING.
+
+        ``BEGIN IMMEDIATE`` makes the PENDING check and transition atomic across
+        independent dashboard/daemon processes.  No handler runs until the
+        durable row is exclusively claimed as EXECUTING.
+        """
+
+        now = utc_now_iso()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            stored = self._conn.execute(
+                "SELECT * FROM approval_requests WHERE id = ? AND project_id = ?",
+                (approval_id, project_id),
+            ).fetchone()
+            if stored is None:
+                raise ValueError("approval does not belong to the selected project")
+            if stored["state"] != "PENDING":
+                raise ValueError(f"approval is already {stored['state']}")
+            if stored["expires_at"] <= now:
+                next_state = "EXPIRED"
+                note = "explicit approval deadline passed"
+            elif decision == "REJECT":
+                next_state = "REJECTED"
+                note = resolution_note
+            elif (
+                current_fingerprint != stored["state_fingerprint"]
+                or current_revision != stored["state_revision"]
+            ):
+                next_state = "STALE"
+                note = "server state or action classification changed before resolution"
+            else:
+                next_state = "EXECUTING"
+                note = resolution_note
+            cursor = self._conn.execute(
+                "UPDATE approval_requests SET state = ?, updated_at = ?, resolved_at = ?, "
+                "resolved_by = ?, resolution_note = ? WHERE id = ? AND project_id = ? AND state = 'PENDING'",
+                (next_state, now, now, resolved_by, note, approval_id, project_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("approval resolution lost its compare-and-swap")
+            row = self._conn.execute(
+                "SELECT * FROM approval_requests WHERE id = ?", (approval_id,)
+            ).fetchone()
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        return self._approval_request_from_row(row)
+
+    @_serialized
+    def finalize_approval_request(
+        self,
+        approval_id: str,
+        *,
+        project_id: str,
+        state: str,
+        result_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        if state not in {"APPROVED", "FAILED_SAFE"}:
+            raise ValueError("approval may finalize only as APPROVED or FAILED_SAFE")
+        now = utc_now_iso()
+        cursor = self._conn.execute(
+            "UPDATE approval_requests SET state = ?, updated_at = ?, resolved_at = ?, result_summary = ? "
+            "WHERE id = ? AND project_id = ? AND state = 'EXECUTING'",
+            (
+                state,
+                now,
+                now,
+                json.dumps(result_summary, sort_keys=True, separators=(",", ":")),
+                approval_id,
+                project_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            self._conn.rollback()
+            raise ValueError("approval is no longer executing")
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM approval_requests WHERE id = ?", (approval_id,)
+        ).fetchone()
+        return self._approval_request_from_row(row)
 
     # ------------------------------------------------------ context cursors
 

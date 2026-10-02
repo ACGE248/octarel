@@ -40,6 +40,7 @@ from ..graph_lifecycle import capability_status as graphify_capability_status
 from ..graph_lifecycle import request_refresh as graphify_request_refresh
 from ..graph_lifecycle import state_event_recorder as graphify_state_event_recorder
 from ..redaction import redact_text
+from . import approvals as _approvals
 from . import manager_chat as _manager_chat
 from . import pricing as _pricing
 from . import recovery as _recovery
@@ -924,6 +925,10 @@ def create_app(
     _usage_cache: dict[str, Any] = {"at": 0.0, "body": None}
     app_lifecycle = AppLifecycleManager(ctx)
     app.state.app_lifecycle = app_lifecycle
+    # The approvals module receives only this existing guarded supervisor for
+    # its REMOTE_SENSITIVE_ACTION handler.  It cannot construct or execute an
+    # arbitrary command from a request payload.
+    ctx.approval_runtime_manager = app_lifecycle
     worktree_status_cache: dict[str, Any] = {"key": object(), "at": 0.0, "rows": []}
     worktree_status_lock = threading.Lock()
 
@@ -947,6 +952,126 @@ def create_app(
     def configuration_actor(request: Request) -> str:
         identity = _remote_identity_of(request)
         return f"remote:{identity.email}" if identity is not None else "local-operator"
+
+    def public_approval(row: dict[str, Any]) -> dict[str, Any]:
+        """Expose the safe impact projection, never the execution payload."""
+
+        return {
+            key: row.get(key)
+            for key in (
+                "id", "project_id", "task_id", "run_id", "action_type", "risk",
+                "safe_payload_summary", "reason", "requested_by", "expires_at", "state",
+                "state_revision", "created_at", "updated_at", "resolved_at", "resolved_by",
+                "resolution_note", "result_summary",
+            )
+        }
+
+    def approval_handoff(
+        request: Request,
+        *,
+        action_type: str,
+        payload: dict[str, Any],
+        reason: str,
+        verb: str,
+        target: str | None,
+        task_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create, audit, and publicly project one production-path handoff."""
+
+        try:
+            row = _approvals.create_request(
+                ctx,
+                action_type=action_type,
+                payload=payload,
+                reason=reason,
+                requested_by=configuration_actor(request),
+                task_id=task_id,
+                run_id=run_id,
+            )
+        except _approvals.ApprovalError as exc:
+            _record_remote_audit(
+                ctx,
+                request,
+                verb=verb,
+                target=target,
+                result=f"REFUSED: {exc}",
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        _record_remote_audit(
+            ctx,
+            request,
+            verb=verb,
+            target=target,
+            result=f"APPROVAL_REQUESTED: {row['id']}",
+        )
+        return public_approval(row)
+
+    def approval_command_handoff(
+        request: Request,
+        *,
+        verb: str,
+        body: dict[str, Any],
+        confirm: bool,
+        target: str | None,
+    ) -> dict[str, Any] | None:
+        """Route the two approval-owned commands through one production seam.
+
+        Both the ordinary command endpoint and the caller-supplied steering
+        endpoint use this helper.  A protected verb can therefore only create
+        the same typed request (after the same confirmation and field
+        validation) or fail closed; it never falls through to ``apply_command``.
+        """
+
+        if verb not in {"usage_override", "worktree_cleanup"}:
+            return None
+        if not confirm:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{verb} is destructive and requires confirm=true after operator review",
+            )
+        if verb == "worktree_cleanup":
+            unexpected = sorted(body)
+            if unexpected:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unsupported cleanup request field(s): {', '.join(unexpected)}",
+                )
+            approval = approval_handoff(
+                request,
+                action_type=_approvals.ACTION_DESTRUCTIVE_CLEANUP,
+                payload={},
+                reason="Operator confirmed the current server-previewed finished-clean worktree cleanup",
+                verb=verb,
+                target=target,
+            )
+            return {
+                "ok": True,
+                "message": "Approval request created; no worktree was removed.",
+                "data": {"mode": "APPROVAL_REQUESTED", "approval_request": approval},
+            }
+
+        unexpected = sorted(set(body) - {"runbook_id", "reason"})
+        if unexpected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported premium route request field(s): {', '.join(unexpected)}",
+            )
+        runbook_id = body.get("runbook_id")
+        approval = approval_handoff(
+            request,
+            action_type=_approvals.ACTION_METERED_OVERFLOW_ROUTE,
+            payload={"runbook_id": runbook_id},
+            reason=str(body.get("reason") or "Control Center operator premium route request"),
+            verb=verb,
+            target=runbook_id,
+            run_id=runbook_id if isinstance(runbook_id, str) else None,
+        )
+        return {
+            "ok": True,
+            "message": "Approval request created; usage governance was not changed.",
+            "data": {"mode": "APPROVAL_REQUESTED", "approval_request": approval},
+        }
 
     def sync_scheduler_configuration(settings: dict[str, str]) -> None:
         """Apply validated concurrency values to the live scheduler as well as SQLite."""
@@ -2574,6 +2699,116 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
+    @app.get("/api/approvals")
+    def approvals_list(run_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Selected-project typed decisions; read-only and provider-free."""
+
+        project_id = ctx.selected_project_id
+        if not project_id:
+            return []
+        _approvals.expire_pending(ctx)
+        rows = ctx.state.list_approval_requests(
+            project_id=project_id,
+            run_id=run_id,
+            limit=max(1, min(int(limit), 1_000)),
+        )
+        return [public_approval(row) for row in rows]
+
+    @app.post("/api/approvals")
+    def approvals_create(request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Create one server-classified request from a fixed typed payload."""
+
+        body = dict(payload or {})
+        allowed = {"action_type", "payload", "reason", "task_id", "run_id", "expires_in_seconds"}
+        unexpected = sorted(set(body) - allowed)
+        if unexpected:
+            # In particular, risk/safe/destructive/project/requester fields are
+            # never silently ignored: a client trying to supply one is refused.
+            _record_remote_audit(
+                ctx,
+                request,
+                verb="approval_request",
+                target="approval",
+                result="REFUSED: unsupported request fields",
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported approval request field(s): {', '.join(unexpected)}",
+            )
+        actor = configuration_actor(request)
+        target = str(body.get("run_id") or body.get("task_id") or body.get("action_type") or "approval")
+        try:
+            row = _approvals.create_request(
+                ctx,
+                action_type=body.get("action_type"),
+                payload=body.get("payload"),
+                reason=body.get("reason"),
+                requested_by=actor,
+                task_id=body.get("task_id"),
+                run_id=body.get("run_id"),
+                expires_in_seconds=body.get("expires_in_seconds", 3_600),
+            )
+        except _approvals.ApprovalError as exc:
+            _record_remote_audit(
+                ctx, request, verb="approval_request", target=target, result=f"REFUSED: {exc}"
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        _record_remote_audit(
+            ctx, request, verb="approval_request", target=row["id"], result="OK"
+        )
+        return public_approval(row)
+
+    @app.post("/api/approvals/{approval_id}/resolve")
+    def approvals_resolve(
+        approval_id: str,
+        request: Request,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Approve/reject after atomic expiry and changed-state revalidation."""
+
+        body = dict(payload or {})
+        unexpected = sorted(set(body) - {"decision", "resolution_note"})
+        if unexpected:
+            _record_remote_audit(
+                ctx,
+                request,
+                verb="approval_resolve",
+                target=approval_id,
+                result="REFUSED: unsupported resolution fields",
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported approval resolution field(s): {', '.join(unexpected)}",
+            )
+        actor = configuration_actor(request)
+        try:
+            row = _approvals.resolve_request(
+                ctx,
+                approval_id=approval_id,
+                decision=body.get("decision"),
+                resolved_by=actor,
+                resolution_note=body.get("resolution_note"),
+            )
+        except _approvals.ApprovalConflict as exc:
+            _record_remote_audit(
+                ctx, request, verb="approval_resolve", target=approval_id, result=f"REFUSED: {exc}"
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except (_approvals.ApprovalError, ValueError) as exc:
+            _record_remote_audit(
+                ctx, request, verb="approval_resolve", target=approval_id, result=f"REFUSED: {exc}"
+            )
+            status = 404 if "does not belong" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from None
+        _record_remote_audit(
+            ctx,
+            request,
+            verb="approval_resolve",
+            target=approval_id,
+            result=f"OK: {row['state']}",
+        )
+        return public_approval(row)
+
     @app.get("/api/attention")
     def attention() -> dict[str, Any]:
         old_runs, old_tasks = superseded()
@@ -2622,6 +2857,21 @@ def create_app(
             row for row in current_budget_progress()
             if row["status"] in {_usage_budgets.STATUS_WARNING, _usage_budgets.STATUS_BLOCKED}
         ]
+        approval_attention: list[dict[str, Any]] = []
+        if ctx.selected_project_id:
+            _approvals.expire_pending(ctx)
+            approval_attention = [
+                public_approval(row)
+                for row in ctx.state.list_approval_requests(
+                    project_id=ctx.selected_project_id,
+                    states=[
+                        _approvals.STATE_PENDING,
+                        _approvals.STATE_EXECUTING,
+                        _approvals.STATE_FAILED_SAFE,
+                    ],
+                    limit=100,
+                )
+            ]
         return {
             "tasks": failed_or_blocked,
             "recovery": recovery_attention,
@@ -2630,6 +2880,7 @@ def create_app(
             "execution_leases": troubled_leases,
             "wakes": troubled_wakes,
             "usage_budgets": troubled_budgets,
+            "approvals": approval_attention,
         }
 
     @app.post("/api/wake-queue/manual")
@@ -2725,6 +2976,26 @@ def create_app(
             raise HTTPException(status_code=400, detail="runbook_id must be a string")
         remote_identity = _remote_identity_of(request)
         actor = remote_identity.email if remote_identity else "local"
+        if remote_identity is not None:
+            approval = approval_handoff(
+                request,
+                action_type=_approvals.ACTION_REMOTE_SENSITIVE,
+                payload={
+                    "service_id": service_id,
+                    "action": action,
+                    "worktree_path": worktree_path,
+                    "runbook_id": runbook_id,
+                },
+                reason=f"Authenticated remote operator requested runtime service {action}",
+                verb=f"runtime_service_{action}",
+                target=service_id,
+                run_id=runbook_id,
+            )
+            return {
+                "status": "APPROVAL_REQUESTED",
+                "message": "Approval request created; the runtime process was not changed.",
+                "approval_request": approval,
+            }
         try:
             result = app_lifecycle.action(
                 action,
@@ -2758,6 +3029,32 @@ def create_app(
             raise HTTPException(status_code=409, detail=f"{action} requires confirm=true")
         remote_identity = _remote_identity_of(request)
         actor = remote_identity.email if remote_identity else "local"
+        if remote_identity is not None:
+            status = app_lifecycle.status()
+            service_id = status.get("service_id")
+            if not service_id:
+                detail = str(status.get("note") or "canonical runtime service is unavailable")
+                _record_remote_audit(
+                    ctx,
+                    request,
+                    verb=f"app_{action}",
+                    target="local-dev-app",
+                    result=f"REFUSED: {detail}",
+                )
+                raise HTTPException(status_code=409, detail=detail)
+            approval = approval_handoff(
+                request,
+                action_type=_approvals.ACTION_REMOTE_SENSITIVE,
+                payload={"service_id": service_id, "action": action},
+                reason=f"Authenticated remote operator requested legacy app lifecycle {action}",
+                verb=f"app_{action}",
+                target="local-dev-app",
+            )
+            return {
+                "status": "APPROVAL_REQUESTED",
+                "message": "Approval request created; the runtime process was not changed.",
+                "approval_request": approval,
+            }
         try:
             result = app_lifecycle.action(action, actor)
         except OperationError as exc:
@@ -3081,11 +3378,20 @@ def create_app(
             raise HTTPException(
                 status_code=409, detail=f"{verb} is destructive and requires confirm=true after operator review"
             )
+        target = body.get("task_id") or body.get("runbook_id") or body.get("name") or body.get("path")
+        approval_response = approval_command_handoff(
+            request,
+            verb=verb,
+            body=body,
+            confirm=confirm,
+            target=target,
+        )
+        if approval_response is not None:
+            return approval_response
         if verb == "git_operation":
             body["confirm"] = confirm
         if verb == "worktree_cleanup":
             body["confirm"] = confirm
-        target = body.get("task_id") or body.get("runbook_id") or body.get("name") or body.get("path")
         try:
             result = apply_command(ctx, verb, **body)
         except CommandError as exc:
@@ -3178,6 +3484,19 @@ def create_app(
                 status_code=409,
                 detail=f"{verb} is destructive and requires confirm=true after the operator reviews the preview",
             )
+        approval_response = approval_command_handoff(
+            request,
+            verb=verb,
+            body=args,
+            confirm=confirm,
+            target=target,
+        )
+        if approval_response is not None:
+            ctx.state.record_event(
+                category="steering",
+                message=f"requested approval from steering ({raw_text!r}): {verb}({args})",
+            )
+            return approval_response
         try:
             result = apply_command(ctx, verb, **args)
         except CommandError as exc:

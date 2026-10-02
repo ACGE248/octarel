@@ -41,6 +41,7 @@ if str(_REPO_ROOT) not in sys.path:
 import subprocess  # noqa: E402
 
 from scripts.agents.control_plane.commands import CommandContext  # noqa: E402
+from scripts.agents.control_plane import approvals as approvals_module  # noqa: E402
 from scripts.agents.control_plane.context_cursor import (  # noqa: E402
     AncestryRequest,
     ContextIdentity,
@@ -990,6 +991,20 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
         status_reason="fixture external listener is informational and cannot be signalled",
     )
     state.upsert_runtime_service(external)
+    ctx.approval_runtime_manager = runtime
+    approvals_module.create_request(
+        ctx,
+        action_type=approvals_module.ACTION_AMBIGUOUS_PRODUCT_ARCHITECTURE_CHOICE,
+        payload={
+            "question_ref": "ADR-FIXTURE-10",
+            "decision": "Extend the shipped Run Detail inspector",
+        },
+        reason="Fixture operator decision required for typed approval coverage",
+        requested_by="fixture-operator",
+        task_id="fx-rb-running-session",
+        run_id="fx-rb-running",
+        expires_in_seconds=24 * 60 * 60,
+    )
     return ctx
 
 

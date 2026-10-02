@@ -1,6 +1,8 @@
 {
   "view-overview": [
     "+ # more · not exposed by provider",
+    "Approval resolution note",
+    "Approve",
     "Insights task status, activity, recent events",
     "Open Orchestrator details, #",
     "Open Review details, #",
@@ -13,6 +15,7 @@
     "Open runs for Recoverable orphan",
     "Open runs for Run needs attention",
     "Open tasks for Task blocked",
+    "Reject",
     "Run Overnight",
     "Send",
     "Type a command… (e.g., /start, /status, /dry-run TASK-ID)",
@@ -23,6 +26,8 @@
     "◇Results# reported item"
   ],
   "view-runs": [
+    "Approval resolution note",
+    "Approve",
     "Cancel Quick Start",
     "Continue OctaScene next eligible taskStandalone Video Editor…",
     "Continue Video Editor — V#-#Standalone Video Editor · V#-#…",
@@ -54,6 +59,7 @@
     "Preset",
     "QUEUE_EXHAUSTED",
     "Recover safely",
+    "Reject",
     "Restart",
     "Retry with selected worker",
     "Retry worker for Fixture blocked V#-# run",

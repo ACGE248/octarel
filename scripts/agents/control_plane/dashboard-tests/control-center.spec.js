@@ -404,12 +404,18 @@ test('usage routing and local gate are first-class without hosted Actions', asyn
   const routing = page.locator('#usage-routing-body');
   await expect(routing).toContainText('fx-rb-running · routine');
   await expect(routing).toContainText(/Codex 0\/1 · auto (blocked|eligible) · tokens unknown/);
-  if ((await routing.textContent()).includes('auto blocked')) {
+  const overrideNeeded = (await routing.textContent()).includes('auto blocked');
+  if (overrideNeeded) {
     await routing.getByRole('button', { name: 'Premium override' }).first().click();
     await expect(page.locator('#confirm-body')).toContainText('Allow premium Codex routing');
     await page.locator('#confirm-ok').click();
+    await expect(routing.locator('.approval-initiation-status').first()).toContainText(
+      'Usage governance remains unchanged until it is approved',
+    );
+    await expect(routing).toContainText('conserve');
+  } else {
+    await expect(routing).toContainText('unrestricted');
   }
-  await expect(routing).toContainText('unrestricted');
 
   await navTo(page, 'view-system');
   const gate = page.locator('#tests-body');
