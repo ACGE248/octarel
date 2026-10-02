@@ -151,6 +151,7 @@ def test_cursor_never_omits_or_changes_mandatory_policy() -> None:
         "ancestry": None,
         "event_window": {"limit": 1000, "truncated": False, "truncation_reason": None},
         "events": [],
+        "evicted_event_positions": [],
         "invalidation_reason": None,
         "newly_relevant_tasks": [],
         "task_changes": [],
@@ -261,6 +262,100 @@ def test_newly_relevant_task_receives_earlier_event_once_and_then_advances() -> 
     third = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
     assert _incremental(third.prompt)["authoritative"]["events"] == []
     assert third.cursor.delivered_event_positions == {"dep-a": 1, "task-a": 2}
+
+
+def test_relevant_task_leaves_and_reenters_without_repeating_delivered_history() -> None:
+    state = State(":memory:")
+    _seed(state)
+    _record(state, project_id="project-a", task_id="dep-a", message="DEPENDENCY HISTORY ONCE")
+
+    first = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    assert [event["message"] for event in _incremental(first.prompt)["authoritative"]["events"]] == [
+        "DEPENDENCY HISTORY ONCE"
+    ]
+
+    state.upsert_task(Task(
+        id="task-a", task_ref="A-TASK", role="implementation", worker="fixture",
+        project_id="project-a",
+    ))
+    build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    state.upsert_task(Task(
+        id="task-a", task_ref="A-TASK", role="implementation", worker="fixture",
+        project_id="project-a", dependencies=("dep-a",),
+    ))
+
+    reentered = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    authoritative = _incremental(reentered.prompt)["authoritative"]
+    assert authoritative["events"] == []
+    assert authoritative["newly_relevant_tasks"] == [{
+        "task_id": "dep-a", "reason": "entered bounded task ancestry"
+    }]
+    assert reentered.cursor.delivered_event_positions["dep-a"] == 1
+
+
+def test_event_position_cap_reports_eviction_and_evicted_reentry_redelivers(monkeypatch) -> None:
+    assert context_cursor.MAX_RETAINED_EVENT_POSITIONS == 64
+    monkeypatch.setattr(context_cursor, "MAX_RETAINED_EVENT_POSITIONS", 3)
+    state = State(":memory:")
+    state.upsert_task(Task(
+        id="task-a", task_ref="A-TASK", role="implementation", worker="fixture",
+        project_id="project-a",
+    ))
+    for index in range(3):
+        task_id = f"dep-{index}"
+        state.upsert_task(Task(
+            id=task_id, task_ref=f"DEPENDENCY-{index}", role="implementation", worker="fixture",
+            project_id="project-a",
+        ))
+        _record(state, project_id="project-a", task_id=task_id, message=f"HISTORY {index}")
+
+    build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    deliveries = []
+    for index in range(3):
+        state.upsert_task(Task(
+            id="task-a", task_ref="A-TASK", role="implementation", worker="fixture",
+            project_id="project-a", dependencies=(f"dep-{index}",),
+        ))
+        deliveries.append(build_incremental_context(
+            state, identity=_identity(), policy_bundle=_policy()
+        ))
+
+    bounded = deliveries[-1]
+    authoritative = _incremental(bounded.prompt)["authoritative"]
+    expected_eviction = [{
+        "task_id": "dep-0",
+        "reason": "inactive cursor position evicted at cap; history will be re-delivered on re-entry",
+    }]
+    assert len(bounded.cursor.delivered_event_positions) == 3
+    assert "dep-0" not in bounded.cursor.delivered_event_positions
+    assert authoritative["evicted_event_positions"] == expected_eviction
+    assert bounded.cursor.inspection_summary["evicted_event_positions"] == expected_eviction
+
+    state.upsert_task(Task(
+        id="task-a", task_ref="A-TASK", role="implementation", worker="fixture",
+        project_id="project-a", dependencies=("dep-0",),
+    ))
+    reentered = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+    reentered_authoritative = _incremental(reentered.prompt)["authoritative"]
+    assert [event["message"] for event in reentered_authoritative["events"]] == ["HISTORY 0"]
+    assert reentered_authoritative["newly_relevant_tasks"] == [{
+        "task_id": "dep-0", "reason": "entered bounded task ancestry"
+    }]
+
+
+def test_event_position_map_ignores_tasks_that_were_never_relevant() -> None:
+    state = State(":memory:")
+    _seed(state)
+    state.upsert_task(Task(
+        id="unrelated", task_ref="UNRELATED", role="implementation", worker="fixture",
+        project_id="project-a",
+    ))
+    _record(state, project_id="project-a", task_id="unrelated", message="UNRELATED HISTORY")
+
+    delivered = build_incremental_context(state, identity=_identity(), policy_bundle=_policy())
+
+    assert "UNRELATED HISTORY" not in delivered.prompt
+    assert "unrelated" not in delivered.cursor.delivered_event_positions
 
 
 def test_invalidation_reason_never_echoes_an_absolute_path_into_provider_prompt() -> None:

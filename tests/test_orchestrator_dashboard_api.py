@@ -225,6 +225,7 @@ def test_context_inspector_projects_safe_recorded_facts_and_derived_formula(clie
     assert body["event_additions"]["value"] == 0
     assert body["events_truncated"]["value"] is False
     assert body["newly_relevant_tasks"] == []
+    assert body["evicted_event_positions"] == []
     assert body["ancestry_additions"]["value"] == 0
     assert body["context_savings_characters"]["class"] == "DERIVED"
     assert body["context_savings_characters"]["formula"] == (

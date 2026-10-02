@@ -1978,6 +1978,7 @@ def create_app(
                 "ancestry_additions": unknown,
                 "events_truncated": unknown,
                 "newly_relevant_tasks": [],
+                "evicted_event_positions": [],
                 "context_savings_characters": {
                     **unknown,
                     "formula": "full_refresh_characters - required_incremental_characters",
@@ -2057,6 +2058,15 @@ def create_app(
             for item in raw_newly_relevant[:32]
             if isinstance(item, dict)
         ] if isinstance(raw_newly_relevant, list) else []
+        raw_evicted_positions = summary.get("evicted_event_positions")
+        evicted_event_positions = [
+            {
+                "task_id": sanitize_text(str(item.get("task_id") or "UNKNOWN")),
+                "reason": sanitize_text(str(item.get("reason") or "UNKNOWN")),
+            }
+            for item in raw_evicted_positions[:64]
+            if isinstance(item, dict)
+        ] if isinstance(raw_evicted_positions, list) else []
         events_truncated = summary.get("events_truncated")
         return {
             "task": sanitize_text(task_id),
@@ -2074,6 +2084,7 @@ def create_app(
                 else _session_fact(klass="UNKNOWN", reason="event truncation was not recorded")
             ),
             "newly_relevant_tasks": newly_relevant_tasks,
+            "evicted_event_positions": evicted_event_positions,
             "context_savings_characters": savings,
             "invalidation_component": component_fact,
             "ancestry": {

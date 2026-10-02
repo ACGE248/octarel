@@ -4674,6 +4674,23 @@
       admissionWrap.appendChild(list);
     }
     target.appendChild(admissionWrap);
+    const evictedPositions = payload.evicted_event_positions || [];
+    const evictionWrap = el("div", { class: "context-ancestry" }, [
+      el("h5", { text: "Evicted event positions" }),
+    ]);
+    if (!evictedPositions.length) {
+      evictionWrap.appendChild(el("p", { class: "hint", text: "Measured 0 evicted event positions." }));
+    } else {
+      const list = el("ul", { class: "context-ancestry-list" });
+      evictedPositions.forEach((item) => {
+        list.appendChild(el("li", {}, [
+          el("span", { class: "context-reference-kind", text: item.task_id }),
+          el("span", { text: item.reason }),
+        ]));
+      });
+      evictionWrap.appendChild(list);
+    }
+    target.appendChild(evictionWrap);
     const ancestry = payload.ancestry || {};
     const ancestryWrap = el("div", { class: "context-ancestry" }, [
       el("h5", { text: "Ancestry & source references" }),

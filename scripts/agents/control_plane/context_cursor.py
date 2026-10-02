@@ -34,6 +34,8 @@ MAX_INCREMENTAL_CHARACTERS = 32_000
 DEFAULT_ANCESTRY_LIMIT = 12
 MAX_ANCESTRY_LIMIT = 32
 MAX_EVENT_READ = 1_000
+# Enough for the largest current ancestry plus a bounded inactive re-entry cache.
+MAX_RETAINED_EVENT_POSITIONS = 64
 
 
 def _canonical(value: object) -> str:
@@ -306,6 +308,51 @@ def _incremental_events(
     return events, truncated
 
 
+def _bounded_event_positions(
+    previous: Mapping[str, int],
+    *,
+    relevant_task_ids: set[str],
+    events: list[Event],
+) -> tuple[dict[str, int], list[dict[str, str]]]:
+    """Advance per-task watermarks while retaining a bounded re-entry cache.
+
+    Positions for tasks that leave the current ancestry are deliberately kept
+    so an ordinary leave/re-enter cycle remains idempotent.  Once the explicit
+    cap is reached, only inactive positions are evicted, lowest watermark then
+    task id first.  Eviction can make history repeat on re-entry; over-delivery
+    is safer than omission, and the returned records make that trade-off
+    visible to both the delivered context and the operator inspector.
+    """
+
+    positions = {str(task_id): max(0, int(event_id)) for task_id, event_id in previous.items()}
+    for task_id in relevant_task_ids:
+        positions.setdefault(task_id, 0)
+    for event in events:
+        if event.task_id is not None and event.id is not None:
+            positions[event.task_id] = max(positions.get(event.task_id, 0), int(event.id))
+
+    overflow = max(0, len(positions) - MAX_RETAINED_EVENT_POSITIONS)
+    inactive = sorted(
+        (task_id for task_id in positions if task_id not in relevant_task_ids),
+        key=lambda task_id: (positions[task_id], task_id),
+    )
+    if overflow > len(inactive):
+        # The ancestry contract currently makes this unreachable, but fail
+        # closed rather than silently discard an active task's watermark.
+        raise RuntimeError("relevant task positions exceed the cursor position cap")
+
+    evicted: list[dict[str, str]] = []
+    for task_id in inactive[:overflow]:
+        positions.pop(task_id)
+        evicted.append(
+            {
+                "task_id": task_id,
+                "reason": "inactive cursor position evicted at cap; history will be re-delivered on re-entry",
+            }
+        )
+    return positions, evicted
+
+
 def _graph_payload(supplier: Callable[[], object] | None) -> tuple[dict[str, object], str]:
     if supplier is None:
         return {"status": "ABSENT", "supplied": False}, ""
@@ -446,6 +493,11 @@ def build_incremental_context(
         relevant_task_ids=relevant_task_ids,
         event_positions=previous_event_positions,
     )
+    next_event_positions, evicted_event_positions = _bounded_event_positions(
+        previous_event_positions,
+        relevant_task_ids=relevant_task_ids,
+        events=events,
+    )
     event_window = {
         "limit": MAX_EVENT_READ,
         "truncated": events_truncated,
@@ -459,6 +511,7 @@ def build_incremental_context(
         "events": [_event_context(event) for event in events],
         "event_window": event_window,
         "newly_relevant_tasks": newly_relevant_tasks,
+        "evicted_event_positions": evicted_event_positions,
         "ancestry": ancestry_record if include_ancestry else None,
     }
     graph_record, graph_text = _graph_payload(graph_context_supplier)
@@ -501,6 +554,7 @@ def build_incremental_context(
                 ),
             },
             "newly_relevant_tasks": newly_relevant_tasks,
+            "evicted_event_positions": evicted_event_positions,
             "ancestry": ancestry_record,
         },
         "graphify": graph_record,
@@ -543,6 +597,7 @@ def build_incremental_context(
         delivered_event_additions = 0
         delivered_ancestry_additions = 0
         delivered_newly_relevant_tasks: list[dict[str, str]] = []
+        delivered_evicted_event_positions: list[dict[str, str]] = []
         delivered_ancestry_nodes = (
             []
             if reset or stored is None
@@ -560,21 +615,16 @@ def build_incremental_context(
     else:
         outcome = OUTCOME_DELIVERED
         retained_tasks = current_task_identities
-        retained_event_positions = dict(previous_event_positions)
-        for task_id in relevant_task_ids:
-            retained_event_positions.setdefault(task_id, 0)
-        for event in events:
-            if event.task_id is not None and event.id is not None:
-                retained_event_positions[event.task_id] = max(
-                    retained_event_positions.get(event.task_id, 0), int(event.id)
-                )
+        retained_event_positions = next_event_positions
         retained_ancestry = ancestry_identity
-        retained_event = max(retained_event_positions.values(), default=0)
+        prior_event = stored.last_event_id if stored is not None and not reset else 0
+        retained_event = max(prior_event, max(retained_event_positions.values(), default=0))
         delivered_event_references = [int(event.id) for event in events if event.id is not None]
         delivered_task_additions = len(changed_tasks)
         delivered_event_additions = len(events)
         delivered_ancestry_additions = len(ancestry_nodes) if include_ancestry else 0
         delivered_newly_relevant_tasks = newly_relevant_tasks
+        delivered_evicted_event_positions = evicted_event_positions
         delivered_ancestry_nodes = [
             context_reference(node.get("reference"), node.get("kind")) for node in ancestry_nodes
         ]
@@ -619,6 +669,7 @@ def build_incremental_context(
         "event_additions": delivered_event_additions,
         "ancestry_additions": delivered_ancestry_additions,
         "newly_relevant_tasks": delivered_newly_relevant_tasks,
+        "evicted_event_positions": delivered_evicted_event_positions,
         "ancestry_nodes": delivered_ancestry_nodes,
         "ancestry_truncated": delivered_ancestry_truncated,
         "events_truncated": delivered_events_truncated,
