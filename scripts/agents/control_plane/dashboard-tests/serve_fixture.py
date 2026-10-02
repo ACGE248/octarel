@@ -27,6 +27,7 @@ import datetime as dt
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -38,10 +39,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import subprocess  # noqa: E402
-
-from scripts.agents.control_plane.commands import CommandContext  # noqa: E402
 from scripts.agents.control_plane import approvals as approvals_module  # noqa: E402
+from scripts.agents.control_plane.commands import CommandContext  # noqa: E402
 from scripts.agents.control_plane.context_cursor import (  # noqa: E402
     AncestryRequest,
     ContextIdentity,
