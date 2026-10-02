@@ -1,6 +1,6 @@
 # ENG-PC-09 — managed runtime service ownership and previews
 
-**Issue:** [#37](https://github.com/ACGE248/octarel/issues/37)  
+**Issue:** [#37](https://github.com/ACGE248/octarel/issues/37)
 **Implemented:** 2026-10-02
 
 ## Research provenance
