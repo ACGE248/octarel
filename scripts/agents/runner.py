@@ -232,7 +232,15 @@ def write_lock(worker: Worker, lock_dir: Path) -> Iterator[None]:
             holder = _active_lock_holder(lock_path) or "new holder"
             raise WriteSafetyError(f"another write-capable worker holds the checkout lock ({holder})") from None
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(f"{worker.name} pid={os.getpid()} at={int(time.time())}")
+        # ENG-PC-07: ``at`` is the lock acquisition boundary used to detect a
+        # recycled live PID. ``created`` is the stronger identity stamp when
+        # the platform exposes it; recovery truthfully records which proof it
+        # could use and never falls back to executable-name matching.
+        from .control_plane.recovery import process_create_time
+
+        created = process_create_time(os.getpid())
+        created_field = f" created={created:.6f}" if created is not None else ""
+        handle.write(f"{worker.name} pid={os.getpid()} at={int(time.time())}{created_field}")
     try:
         yield
     finally:

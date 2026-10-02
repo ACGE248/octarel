@@ -1283,6 +1283,14 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .run-detail-session-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: -4px 0 16px; min-width: 0; }
 .run-detail-session-control .hint { flex: 1 1 220px; margin: 0; overflow-wrap: anywhere; }
 .run-detail-session-control button { flex: 0 1 auto; max-width: 100%; white-space: normal; }
+.run-detail-recovery { margin-bottom: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); }
+.run-detail-recovery .recovery-explanation { margin: 0 0 6px; }
+.recovery-facts { margin-top: 12px; }
+.recovery-chain { display: grid; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none; font-size: 12px; }
+.recovery-chain li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; }
+.recovery-stage-status { color: var(--muted); overflow-wrap: anywhere; }
+.run-detail-recovery-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.run-detail-recovery-control .hint { flex: 1 1 220px; margin: 0; overflow-wrap: anywhere; }
 .run-detail-context { margin-bottom: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); }
 .context-inspector-facts { margin-bottom: 10px; }
 .context-savings-formula { margin: 0 0 6px; overflow-wrap: anywhere; }

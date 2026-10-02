@@ -612,8 +612,36 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   const fresh = detail.getByRole('button', { name: 'Start fresh next attempt' });
   await expect(fresh).toBeDisabled();
   await expect(detail.locator('.run-detail-session-reason')).toContainText('--no-session-persistence');
+  const recovery = detail.locator('.run-detail-recovery');
+  const unknownAttempts = recovery.locator('dt', { hasText: 'Recovery attempts' }).locator('xpath=following-sibling::dd[1]');
+  await expect(unknownAttempts).toHaveText('UNKNOWN');
+  await expect(unknownAttempts).not.toHaveText('0');
   await expect(detail).toContainText('lease.acquired');
   await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
+});
+
+test('Run Detail refuses recovery for an ambiguous ownership proof', async ({ page }) => {
+  const attention = page.locator('#overview-attention-list [data-attention-kind="recoverable_orphan"]');
+  await expect(attention).toContainText('Recoverable orphan');
+  await attention.getByRole('button', { name: 'Open runs for Recoverable orphan' }).click();
+  await expect(page.locator('#view-runs')).toBeVisible();
+  const detail = page.locator('#run-detail');
+  const orphan = page.locator('[data-runbook-id="fx-rb-recoverable"]');
+  await expect(orphan.getByRole('button', { name: 'Open live output for Fixture recoverable orphan run' })).toBeVisible();
+  await orphan.getByRole(
+    'button', { name: 'View detail for Fixture recoverable orphan run' }
+  ).click();
+  await expect(detail).toContainText('fx-rb-recoverable');
+  const ambiguous = detail.locator('.run-detail-recovery');
+  await expect(ambiguous).toContainText('AMBIGUOUS');
+  await expect(ambiguous).toContainText('PID_ONLY');
+  await expect(ambiguous).toContainText('Ownership is ambiguous, so Octarel cannot prove that recovery is safe.');
+  await expect(ambiguous).toContainText('Implementation');
+  await expect(ambiguous).toContainText('PRESERVED');
+  await expect(ambiguous).toContainText('INVALIDATED_BY_TREE_CHANGE');
+  const refused = ambiguous.getByRole('button', { name: 'Recover safely' });
+  await expect(refused).toBeDisabled();
+  await expect(ambiguous.locator('.run-detail-recovery-reason')).not.toBeEmpty();
 });
 
 test('Run Detail renders an unknown context saving as UNKNOWN rather than zero', async ({ page }) => {

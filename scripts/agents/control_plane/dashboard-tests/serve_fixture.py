@@ -478,6 +478,51 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
 
     state.upsert_task(
         Task(
+            id="fx-rb-recoverable-session",
+            task_ref="ENG-PC-07",
+            role="primary-implementation",
+            worker="claude-code",
+            state="RECOVERABLE_ORPHAN",
+            pid=1,
+            ownership_evidence_class="PID_ONLY",
+            recovery_attempts=0,
+            result="PASS",
+            launch_mode="session",
+            runbook_id="fx-rb-recoverable",
+            worktree=str(root),
+        ),
+        # A legacy epoch placeholder supplies no identity boundary. PID 1 is
+        # observable in the fixture process, leaving a deliberate PID_ONLY
+        # AMBIGUOUS proof for the disabled-control browser assertion. Keeping
+        # the placeholder chronologically old also prevents this presentation
+        # fixture from stealing the Live Workflow card from ENG-AGENT-02.
+        updated_at="1970-01-01T00:00:00+00:00",
+    )
+    recoverable_rb = Runbook(
+        id="fx-rb-recoverable",
+        name="Fixture recoverable orphan run",
+        preset="test-fix",
+        objective=test_fix_preset.objective_template.format(source_ref="ENG-PC-07"),
+        source_ref="ENG-PC-07",
+        branch=FIXTURE_BRANCH,
+        worktree=str(root),
+        parent_worker="claude-code",
+        max_duration_minutes=120,
+        phases=test_fix_preset.phases,
+        status="SUCCEEDED",
+        task_id="fx-rb-recoverable-session",
+        acceptance_stage="review",
+        acceptance_evidence={
+            "implementation": {"status": "PASS"},
+            "review": {"status": "PASS", "tree_sha": "fixture-old-tree"},
+            "test": {"status": "PASS", "tree_sha": "fixture-old-tree"},
+        },
+        report_markdown="# Recoverable orphan fixture\n",
+    )
+    state.upsert_runbook(recoverable_rb)
+
+    state.upsert_task(
+        Task(
             id="fx-rb-failed-session",
             task_ref="V1-01",
             role="primary-implementation",

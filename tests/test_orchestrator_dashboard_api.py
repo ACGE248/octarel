@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import uvicorn
@@ -154,6 +155,179 @@ def test_graphify_manual_refresh_queues_and_records_lifecycle_event(client, ctx,
     assert response.json()["status"] == "REFRESHING"
     assert captured == [(ctx.project_root, None, "manual")]
     assert any(event.category == "graphify" and "trigger=manual" in event.message for event in ctx.state.list_events())
+
+
+def test_recovery_detail_preserves_truthful_attempt_and_acceptance_evidence(
+    client, ctx, monkeypatch, tmp_path
+):
+    from scripts.agents.control_plane import recovery
+
+    task = ctx.state.get_task("t1")
+    assert task is not None
+    task.state = "RECOVERABLE_ORPHAN"
+    task.pid = 4321
+    task.ownership_evidence_class = recovery.EVIDENCE_PID_ONLY
+    task.recovery_attempts = 0
+    task.recovery_max_attempts = 3
+    task.last_error = "lock uncertain at /private/operator/recovery.lock"
+    task.command = ("RAW_PROMPT_MUST_NOT_APPEAR",)
+    task.runbook_id = "recovery-run"
+    ctx.state.upsert_task(task, updated_at="legacy-unknown")
+    ctx.state.upsert_runbook(Runbook(
+        id="recovery-run", name="recovery", preset="feature", objective="recover",
+        source_ref=task.task_ref, branch="eng/recovery", worktree=str(tmp_path),
+        parent_worker=task.worker, max_duration_minutes=30, task_id=task.id,
+        status="ACCEPTANCE_PENDING", acceptance_stage="review",
+        acceptance_evidence={
+            "implementation": {"status": "PASS"},
+            "review": {"status": "PASS", "tree_sha": "old-tree"},
+            "test": {"status": "PASS", "tree_sha": "old-tree"},
+        },
+    ))
+    monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(recovery, "process_create_time", lambda _pid: None)
+    monkeypatch.setattr(recovery, "_candidate_tree_sha", lambda _worktree: "new-tree")
+
+    response = client.get(f"/api/recovery/{task.task_ref}")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["ownership"] == {"verdict": "AMBIGUOUS", "evidence_class": "PID_ONLY"}
+    assert body["recover"]["enabled"] is False
+    assert body["recover"]["reason"]
+    assert body["attempts"] == {"value": 0, "class": "MEASURED", "maximum": 3}
+    stages = {row["stage"]: row for row in body["recovery_chain"]["stages"]}
+    assert stages["implementation"]["disposition"] == "PRESERVED"
+    assert stages["review"]["disposition"] == "INVALIDATED_BY_TREE_CHANGE"
+    assert stages["test"]["disposition"] == "INVALIDATED_BY_TREE_CHANGE"
+    assert "/private/operator" not in response.text
+    assert "RAW_PROMPT_MUST_NOT_APPEAR" not in response.text
+
+
+def test_recovery_detail_distinguishes_unknown_attempt_count_from_zero(client, ctx):
+    task = ctx.state.get_task("t1")
+    assert task is not None
+    task.state = "WAITING_EXTERNAL"
+    task.ownership_evidence_class = "NOT_REPORTED"
+    task.recovery_attempts = 0
+    ctx.state.upsert_task(task)
+
+    unknown = client.get(f"/api/recovery/{task.task_ref}").json()["attempts"]
+    task.ownership_evidence_class = "PID_ONLY"
+    ctx.state.upsert_task(task)
+    measured_zero = client.get(f"/api/recovery/{task.task_ref}").json()["attempts"]
+
+    assert unknown == {"value": None, "class": "UNKNOWN", "maximum": None}
+    assert measured_zero == {"value": 0, "class": "MEASURED", "maximum": 3}
+
+
+def test_recovery_endpoint_reverifies_and_audits_success_and_refusal(
+    client, ctx, monkeypatch
+):
+    from scripts.agents.control_plane import dashboard_api, recovery
+
+    live = {8101: False, 8102: False}
+    monkeypatch.setattr(recovery, "pid_is_alive", lambda pid: live[pid])
+    monkeypatch.setattr(recovery, "process_create_time", lambda _pid: None)
+    monkeypatch.setattr(
+        dashboard_api,
+        "_remote_identity_of",
+        lambda _request: SimpleNamespace(email="operator@example.com"),
+    )
+    for task_id, task_ref, pid in (
+        ("recover-success", "RECOVER-SUCCESS", 8101),
+        ("recover-refused", "RECOVER-REFUSED", 8102),
+    ):
+        ctx.state.upsert_task(Task(
+            id=task_id, task_ref=task_ref, role="primary-implementation",
+            worker="codex-build", state="RECOVERABLE_ORPHAN", pid=pid,
+            ownership_evidence_class="PID_ABSENT", recovery_attempts=0,
+        ))
+
+    stale_page = client.get("/api/recovery/RECOVER-REFUSED").json()
+    assert stale_page["recover"]["enabled"] is True
+    live[8102] = True
+
+    success = client.post("/api/recovery/RECOVER-SUCCESS/recover", json={})
+    refused = client.post("/api/recovery/RECOVER-REFUSED/recover", json={})
+
+    assert success.status_code == 200
+    assert success.json()["status"] == "QUEUED"
+    assert ctx.state.get_task("recover-success").state == "QUEUED"
+    assert refused.status_code == 409
+    assert ctx.state.get_task("recover-refused").state == "RECOVERABLE_ORPHAN"
+    messages = [
+        event.message for event in ctx.state.list_events(limit=50)
+        if event.category == "remote_audit"
+    ]
+    assert any("recover_orphan" in message and "OK" in message for message in messages)
+    assert any("recover_orphan" in message and "FAIL" in message for message in messages)
+
+
+def test_recovery_endpoint_audits_refusal_at_the_attempt_bound(client, ctx, monkeypatch):
+    from scripts.agents.control_plane import dashboard_api, recovery
+
+    ctx.state.upsert_task(Task(
+        id="recover-bound", task_ref="RECOVER-BOUND", role="primary-implementation",
+        worker="codex-build", state="RECOVERABLE_ORPHAN", pid=8201,
+        ownership_evidence_class="PID_ABSENT", recovery_attempts=3,
+        recovery_max_attempts=3,
+    ))
+    monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        dashboard_api,
+        "_remote_identity_of",
+        lambda _request: SimpleNamespace(email="operator@example.com"),
+    )
+
+    refused = client.post("/api/recovery/RECOVER-BOUND/recover", json={})
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "the bounded recovery-attempt limit has been reached"
+    task = ctx.state.get_task("recover-bound")
+    assert task is not None and task.state == "RECOVERABLE_ORPHAN"
+    assert task.recovery_attempts == task.recovery_max_attempts == 3
+    messages = [
+        event.message for event in ctx.state.list_events(limit=50)
+        if event.category == "remote_audit"
+    ]
+    assert any(
+        "recover_orphan(RECOVER-BOUND)" in message and "FAIL: HTTPException" in message
+        for message in messages
+    )
+
+
+def test_attention_keeps_each_recovery_wait_reason_and_next_action_distinct(
+    client, ctx, monkeypatch
+):
+    from scripts.agents.control_plane import recovery
+
+    states = (
+        "WAITING_EXTERNAL",
+        "WAITING_APPROVAL",
+        "WAITING_PROVIDER",
+        "OWNER_ACTION_REQUIRED",
+        "RECOVERABLE_ORPHAN",
+    )
+    for index, state_name in enumerate(states, start=1):
+        ctx.state.upsert_task(Task(
+            id=f"attention-{index}", task_ref=f"ATTENTION-{index}",
+            role="primary-implementation", worker="codex-build", state=state_name,
+            pid=9000 + index, ownership_evidence_class="PID_ONLY",
+        ))
+    monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(recovery, "process_create_time", lambda _pid: None)
+
+    response = client.get("/api/attention")
+    rows = {row["state"]: row for row in response.json()["recovery"]}
+
+    assert set(rows) == set(states)
+    assert "external dependency" in rows["WAITING_EXTERNAL"]["next_safe_action"]
+    assert "approve or reject" in rows["WAITING_APPROVAL"]["next_safe_action"]
+    assert "provider recovery" in rows["WAITING_PROVIDER"]["next_safe_action"]
+    assert "owner must decide" in rows["OWNER_ACTION_REQUIRED"]["next_safe_action"].lower()
+    assert rows["RECOVERABLE_ORPHAN"]["ownership"]["verdict"] == "AMBIGUOUS"
+    assert rows["RECOVERABLE_ORPHAN"]["recover"]["enabled"] is False
 
 
 def _context_policy(prompt: str = "MANDATORY POLICY BUNDLE\n") -> PolicyBundle:
