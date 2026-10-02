@@ -17,6 +17,14 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
 
+from .config_revisions import (
+    REVISIONABLE_SETTING_KEYS,
+    InvalidConfigurationError,
+    StaleConfigurationError,
+    validate_changes,
+    validate_configuration,
+    validate_revision_attribution,
+)
 from .models import (
     PERMISSION_STANDARD,
     Event,
@@ -745,6 +753,7 @@ class State:
             self._migrate_events_columns()
             self._migrate_usage_ledger()
             self._migrate_usage_budget_columns()
+            self._migrate_configuration_revisions()
         except Exception:
             self._conn.rollback()
             raise
@@ -830,6 +839,96 @@ class State:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_run_order "
             "ON events (project_id, run_id, run_sequence)"
+        )
+
+    @_serialized
+    def _migrate_configuration_revisions(self) -> None:
+        """Create ENG-PC-08 storage only when an older database needs it.
+
+        Healthy opens return before DDL so they do not take SQLite's exclusive
+        schema lock.  The revision-zero insert is separately conditional and
+        snapshots only the explicit runtime-editable allowlist.
+        """
+
+        table = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'configuration_revisions'"
+        ).fetchone()
+        if table is None:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS configuration_revisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    changed_fields TEXT NOT NULL,
+                    predecessor_id INTEGER,
+                    settings TEXT NOT NULL,
+                    FOREIGN KEY (predecessor_id) REFERENCES configuration_revisions(id)
+                )
+                """
+            )
+
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(configuration_revisions)")
+        }
+        migrated_columns = (
+            ("actor", "TEXT NOT NULL DEFAULT 'system:migration'"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("reason", "TEXT NOT NULL DEFAULT 'legacy configuration revision'"),
+            ("changed_fields", "TEXT NOT NULL DEFAULT '{}'"),
+            ("predecessor_id", "INTEGER"),
+            ("settings", "TEXT NOT NULL DEFAULT '{}'"),
+        )
+        for column, ddl in migrated_columns:
+            if column not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE configuration_revisions ADD COLUMN {column} {ddl}"
+                )
+
+        triggers = {
+            str(row["name"])
+            for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = 'configuration_revisions'"
+            )
+        }
+        if "configuration_revisions_no_update" not in triggers:
+            self._conn.execute(
+                "CREATE TRIGGER IF NOT EXISTS configuration_revisions_no_update "
+                "BEFORE UPDATE ON configuration_revisions "
+                "BEGIN SELECT RAISE(ABORT, 'configuration_revisions is append-only'); END"
+            )
+        if "configuration_revisions_no_delete" not in triggers:
+            self._conn.execute(
+                "CREATE TRIGGER IF NOT EXISTS configuration_revisions_no_delete "
+                "BEFORE DELETE ON configuration_revisions "
+                "BEGIN SELECT RAISE(ABORT, 'configuration_revisions is append-only'); END"
+            )
+
+        initial = self._conn.execute("SELECT 1 FROM configuration_revisions LIMIT 1").fetchone()
+        if initial is not None:
+            return
+        rows = self._conn.execute(
+            "SELECT key, value FROM control_settings WHERE key IN ({}) ORDER BY key".format(
+                ",".join("?" for _ in REVISIONABLE_SETTING_KEYS)
+            ),
+            tuple(sorted(REVISIONABLE_SETTING_KEYS)),
+        ).fetchall()
+        settings = validate_configuration({str(row["key"]): str(row["value"]) for row in rows})
+        changed = {key: {"before": None, "after": value} for key, value in settings.items()}
+        self._conn.execute(
+            "INSERT INTO configuration_revisions "
+            "(id, actor, created_at, reason, changed_fields, predecessor_id, settings) "
+            "VALUES (0, ?, ?, ?, ?, NULL, ?)",
+            (
+                "system:migration",
+                utc_now_iso(),
+                "initial revision migrated from existing runtime-editable settings",
+                json.dumps(changed, sort_keys=True),
+                json.dumps(settings, sort_keys=True),
+            ),
         )
 
     @_serialized
@@ -2744,8 +2843,175 @@ class State:
 
     # ------------------------------------------------------- control settings
 
+    @staticmethod
+    def _configuration_revision_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "actor": str(row["actor"]),
+            "created_at": str(row["created_at"]),
+            "reason": str(row["reason"]),
+            "changed_fields": json.loads(row["changed_fields"]),
+            "predecessor_id": int(row["predecessor_id"]) if row["predecessor_id"] is not None else None,
+            "settings": json.loads(row["settings"]),
+        }
+
+    def _current_configuration_revision_row(self) -> sqlite3.Row:
+        row = self._conn.execute(
+            "SELECT * FROM configuration_revisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:  # The migration always creates revision zero.
+            raise RuntimeError("configuration revision history is not initialized")
+        return row
+
+    @_serialized
+    def current_configuration_revision(self) -> dict[str, Any]:
+        return self._configuration_revision_from_row(self._current_configuration_revision_row())
+
+    @_serialized
+    def list_configuration_revisions(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 500))
+        rows = self._conn.execute(
+            "SELECT * FROM configuration_revisions ORDER BY id DESC LIMIT ?", (bounded_limit,)
+        ).fetchall()
+        return [self._configuration_revision_from_row(row) for row in rows]
+
+    def _insert_configuration_revision(
+        self,
+        *,
+        actor: str,
+        reason: str,
+        predecessor_id: int,
+        before: dict[str, str],
+        after: dict[str, str],
+    ) -> dict[str, Any]:
+        changed = {
+            key: {"before": before.get(key), "after": after.get(key)}
+            for key in sorted(set(before) | set(after))
+            if before.get(key) != after.get(key)
+        }
+        cursor = self._conn.execute(
+            "INSERT INTO configuration_revisions "
+            "(actor, created_at, reason, changed_fields, predecessor_id, settings) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                actor,
+                utc_now_iso(),
+                reason,
+                json.dumps(changed, sort_keys=True),
+                predecessor_id,
+                json.dumps(after, sort_keys=True),
+            ),
+        )
+        for key in REVISIONABLE_SETTING_KEYS:
+            if key not in after:
+                self._conn.execute("DELETE FROM control_settings WHERE key = ?", (key,))
+        for key, value in after.items():
+            self._conn.execute(
+                "INSERT INTO control_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+        row = self._conn.execute(
+            "SELECT * FROM configuration_revisions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("new configuration revision was not stored")
+        return self._configuration_revision_from_row(row)
+
+    @_serialized
+    def apply_configuration(
+        self,
+        changes: dict[str, str],
+        *,
+        actor: str,
+        reason: str,
+        predecessor_id: int,
+    ) -> dict[str, Any]:
+        """Atomically validate, compare-and-swap, apply, and append a revision."""
+
+        normalized_changes = validate_changes(changes)
+        normalized_actor, normalized_reason = validate_revision_attribution(actor, reason)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            current_row = self._current_configuration_revision_row()
+            current_id = int(current_row["id"])
+            if current_id != predecessor_id:
+                raise StaleConfigurationError(
+                    f"stale configuration predecessor {predecessor_id}; current revision is {current_id}"
+                )
+            before = validate_configuration(json.loads(current_row["settings"]))
+            after = validate_configuration({**before, **normalized_changes})
+            if after == before:
+                raise InvalidConfigurationError("configuration change has no effect")
+            revision = self._insert_configuration_revision(
+                actor=normalized_actor,
+                reason=normalized_reason,
+                predecessor_id=current_id,
+                before=before,
+                after=after,
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return revision
+
+    @_serialized
+    def rollback_configuration(
+        self,
+        target_revision_id: int,
+        *,
+        actor: str,
+        reason: str,
+        predecessor_id: int,
+    ) -> dict[str, Any]:
+        """Replay a valid historical snapshot as a new, CAS-guarded revision."""
+
+        normalized_actor, normalized_reason = validate_revision_attribution(actor, reason)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            current_row = self._current_configuration_revision_row()
+            current_id = int(current_row["id"])
+            if current_id != predecessor_id:
+                raise StaleConfigurationError(
+                    f"stale configuration predecessor {predecessor_id}; current revision is {current_id}"
+                )
+            target_row = self._conn.execute(
+                "SELECT * FROM configuration_revisions WHERE id = ?", (target_revision_id,)
+            ).fetchone()
+            if target_row is None:
+                raise InvalidConfigurationError(f"unknown configuration revision {target_revision_id}")
+            before = validate_configuration(json.loads(current_row["settings"]))
+            # Validation is intentionally repeated at rollback time.  A
+            # historical value can become invalid as runtime contracts evolve.
+            after = validate_configuration(json.loads(target_row["settings"]))
+            revision = self._insert_configuration_revision(
+                actor=normalized_actor,
+                reason=f"{normalized_reason} (rollback to revision {target_revision_id})",
+                predecessor_id=current_id,
+                before=before,
+                after=after,
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return revision
+
     @_serialized
     def set_control_setting(self, key: str, value: str) -> None:
+        if key in REVISIONABLE_SETTING_KEYS:
+            current = self._current_configuration_revision_row()
+            snapshot = json.loads(current["settings"])
+            if snapshot.get(key) == value:
+                return
+            self.apply_configuration(
+                {key: value},
+                actor="system:control-plane",
+                reason=f"control setting {key} updated",
+                predecessor_id=int(current["id"]),
+            )
+            return
         self._conn.execute(
             "INSERT INTO control_settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
