@@ -42,6 +42,7 @@ from ..graph_lifecycle import state_event_recorder as graphify_state_event_recor
 from ..redaction import redact_text
 from . import manager_chat as _manager_chat
 from . import pricing as _pricing
+from . import recovery as _recovery
 from . import usage_budgets as _usage_budgets
 from . import usage_ledger as _usage_ledger
 from . import usage_telemetry as _usage_telemetry
@@ -1371,7 +1372,11 @@ def create_app(
         """
 
         all_tasks = current_tasks()  # history (accepted/superseded) never becomes "the current task"
-        active_states = {"RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED"}
+        active_states = {
+            "RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED",
+            "WAITING_EXTERNAL", "WAITING_APPROVAL", "WAITING_PROVIDER",
+            "OWNER_ACTION_REQUIRED", "RECOVERABLE_ORPHAN",
+        }
         groups: dict[str, list[Any]] = {}
         for item in all_tasks:
             groups.setdefault(item.task_ref, []).append(item)
@@ -1934,6 +1939,89 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"unknown task {task_id!r}")
         return task
 
+    def _recovery_view(task_id: str, *, scoped_task: Any | None = None) -> dict[str, Any]:
+        """Safe recovery facts and a server-owned action decision."""
+
+        task = scoped_task if scoped_task is not None else _authorized_task_id(task_id)
+        state_name = str(task.state)
+        explanations = {
+            "WAITING_EXTERNAL": (
+                "Execution is waiting for a recorded external dependency or event.",
+                "Resolve or wait for the external dependency; Octarel will not reclaim an owner for this wait.",
+            ),
+            "WAITING_APPROVAL": (
+                "Execution is waiting for an explicit approval decision.",
+                "Review the pending approval and approve or reject it; recovery cannot replace that decision.",
+            ),
+            "WAITING_PROVIDER": (
+                "Execution is waiting because its provider is unavailable.",
+                "Wait for provider recovery or select an eligible configured route; do not reclaim the task owner.",
+            ),
+            "OWNER_ACTION_REQUIRED": (
+                "Automatic recovery stopped because ownership remained uncertain or the attempt bound was reached.",
+                "The owner must decide whether to leave the observed process alone or resolve its ownership outside automatic recovery.",
+            ),
+            "RECOVERABLE_ORPHAN": (
+                "Execution has an orphan-recovery record that requires a current ownership proof.",
+                "Use one-click recovery only if the current server proof marks the prior owner reclaimable.",
+            ),
+        }
+        explanation, next_action = explanations.get(
+            state_name,
+            (
+                "No recovery wait is recorded for this task.",
+                "No recovery action is available for the current task state.",
+            ),
+        )
+        eligible = False
+        control_reason = "the task is not in the recoverable-orphan state"
+        ownership_verdict = "NOT_APPLICABLE"
+        evidence_class = str(task.ownership_evidence_class or "NOT_REPORTED")
+        observed_reason = str(task.last_error or "")
+        if state_name == "RECOVERABLE_ORPHAN":
+            eligible, proof, control_reason = _recovery.orphan_recovery_eligibility(task)
+            ownership_verdict = proof.verdict
+            evidence_class = proof.evidence_class
+            observed_reason = proof.reason
+            if proof.verdict == _recovery.OWNERSHIP_AMBIGUOUS:
+                explanation = "Ownership is ambiguous, so Octarel cannot prove that recovery is safe."
+                next_action = "Leave the process untouched and resolve or strengthen the ownership evidence."
+            elif eligible:
+                explanation = "The prior owner is currently proven reclaimable."
+                next_action = "Queue the task once; the endpoint will re-check ownership before changing state."
+
+        attempts_known = not (
+            task.recovery_attempts == 0 and evidence_class == "NOT_REPORTED"
+        )
+        runbook = ctx.state.get_runbook(task.runbook_id) if task.runbook_id else None
+        chain = (
+            _recovery.acceptance_recovery_chain(runbook)
+            if runbook is not None
+            else {"minimum_remaining_stage": "NOT_REPORTED", "tree_observation": "UNKNOWN", "stages": []}
+        )
+        body = {
+            "task": task_id,
+            "state": state_name,
+            "explanation": explanation,
+            "observed_reason": observed_reason or "No specific recovery reason is recorded.",
+            "next_safe_action": next_action,
+            "ownership": {
+                "verdict": ownership_verdict,
+                "evidence_class": evidence_class,
+            },
+            "attempts": {
+                "value": task.recovery_attempts if attempts_known else None,
+                "class": "MEASURED" if attempts_known else "UNKNOWN",
+                "maximum": task.recovery_max_attempts if attempts_known else None,
+            },
+            "recovery_chain": chain,
+            "recover": {
+                "enabled": eligible,
+                "reason": None if eligible else control_reason,
+            },
+        }
+        return sanitize_data(body)
+
     def _session_fact(
         value: Any = None,
         *,
@@ -2198,6 +2286,51 @@ def create_app(
 
         return _context_inspector_view(task_id, consumer_id)
 
+    @app.get("/api/recovery/{task_id}")
+    def recovery_detail(task_id: str) -> dict[str, Any]:
+        """Current server-owned recovery facts for the existing Run Detail panel."""
+
+        return _recovery_view(task_id)
+
+    @app.post("/api/recovery/{task_id}/recover")
+    def recover_task(task_id: str, request: Request) -> dict[str, Any]:
+        """Queue a proven orphan after re-observing ownership at action time."""
+
+        try:
+            task = _authorized_task_id(task_id)
+            recovered, proof, refusal = _recovery.recover_orphan_task(ctx.state, task)
+            if not recovered:
+                raise HTTPException(
+                    status_code=409,
+                    detail=sanitize_text(refusal or "the server could not prove recovery eligibility"),
+                )
+        except Exception as exc:
+            _record_remote_audit(
+                ctx,
+                request,
+                verb="recover_orphan",
+                target=task_id,
+                result=f"FAIL: {type(exc).__name__}",
+            )
+            raise
+        _record_remote_audit(
+            ctx,
+            request,
+            verb="recover_orphan",
+            target=task_id,
+            result="OK",
+        )
+        return sanitize_data(
+            {
+                "status": "QUEUED",
+                "task": task_id,
+                "ownership": {
+                    "verdict": proof.verdict,
+                    "evidence_class": proof.evidence_class,
+                },
+            }
+        )
+
     @app.post("/api/agent-sessions/{task_id}/{worker}/start-fresh")
     def agent_session_start_fresh(task_id: str, worker: str, request: Request) -> dict[str, Any]:
         """Force exactly this task/worker session's next attempt to start fresh."""
@@ -2272,6 +2405,18 @@ def create_app(
             for t in scoped_tasks()
             if t.state in ("FAILED", "BLOCKED") and t.id not in old_tasks
         ]
+        recovery_attention = [
+            _recovery_view(t.task_ref, scoped_task=t)
+            for t in scoped_tasks()
+            if t.state in {
+                "WAITING_EXTERNAL",
+                "WAITING_APPROVAL",
+                "WAITING_PROVIDER",
+                "OWNER_ACTION_REQUIRED",
+                "RECOVERABLE_ORPHAN",
+            }
+            and t.id not in old_tasks
+        ]
         troubled_providers = [
             _provider_to_dict(p, registry=ctx.registry, tasks=scoped_tasks())
             for p in ctx.state.list_provider_states()
@@ -2302,6 +2447,7 @@ def create_app(
         ]
         return {
             "tasks": failed_or_blocked,
+            "recovery": recovery_attention,
             "providers": troubled_providers,
             "runbooks": troubled_runbooks,
             "execution_leases": troubled_leases,

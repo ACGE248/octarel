@@ -612,8 +612,39 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   const fresh = detail.getByRole('button', { name: 'Start fresh next attempt' });
   await expect(fresh).toBeDisabled();
   await expect(detail.locator('.run-detail-session-reason')).toContainText('--no-session-persistence');
+  const recovery = detail.locator('.run-detail-recovery');
+  const unknownAttempts = recovery.locator('dt', { hasText: 'Recovery attempts' }).locator('xpath=following-sibling::dd[1]');
+  await expect(unknownAttempts).toHaveText('UNKNOWN');
+  await expect(unknownAttempts).not.toHaveText('0');
   await expect(detail).toContainText('lease.acquired');
   await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
+});
+
+test('Run Detail shows server-proven recovery and refuses an ambiguous ownership proof', async ({ page }) => {
+  await navTo(page, 'view-runs');
+  const detail = page.locator('#run-detail');
+
+  await page.locator('[data-runbook-id="fx-rb-fallback"]').getByRole(
+    'button', { name: 'View detail for Fixture automatic fallback run' }
+  ).click();
+  const eligible = detail.locator('.run-detail-recovery');
+  await expect(eligible).toContainText('PID_ABSENT');
+  await expect(eligible).toContainText('0 of 3');
+  await expect(eligible.getByRole('button', { name: 'Recover safely' })).toBeEnabled();
+
+  await page.locator('[data-runbook-id="fx-rb-done"]').getByRole(
+    'button', { name: 'View detail for Fixture completed runbook' }
+  ).click();
+  const ambiguous = detail.locator('.run-detail-recovery');
+  await expect(ambiguous).toContainText('AMBIGUOUS');
+  await expect(ambiguous).toContainText('PID_ONLY');
+  await expect(ambiguous).toContainText('ownership is unproven');
+  await expect(ambiguous).toContainText('Implementation');
+  await expect(ambiguous).toContainText('PRESERVED');
+  await expect(ambiguous).toContainText('INVALIDATED_BY_TREE_CHANGE');
+  const refused = ambiguous.getByRole('button', { name: 'Recover safely' });
+  await expect(refused).toBeDisabled();
+  await expect(ambiguous.locator('.run-detail-recovery-reason')).not.toBeEmpty();
 });
 
 test('Run Detail renders an unknown context saving as UNKNOWN rather than zero', async ({ page }) => {

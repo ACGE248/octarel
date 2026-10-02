@@ -4782,6 +4782,9 @@
     const contextEvidence = el("div", { class: "run-detail-context" }, [
       el("p", { class: "hint", text: "Loading recorded context evidence…" }),
     ]);
+    const recoveryEvidence = el("div", { class: "run-detail-recovery" }, [
+      el("p", { class: "hint", text: "Loading recovery evidence…" }),
+    ]);
     root.append(
       el("header", { class: "run-detail-head" }, [
         el("div", {}, [el("span", { class: "eyebrow", text: "Run Detail" }), el("h3", { text: run.name })]),
@@ -4789,6 +4792,8 @@
       ]),
       facts,
       sessionControl,
+      el("h4", { text: "Recovery" }),
+      recoveryEvidence,
       el("h4", { text: "Context inspector" }),
       contextEvidence,
       el("h4", { text: "Usage & budget evidence" }),
@@ -4846,6 +4851,72 @@
     } else {
       contextEvidence.innerHTML = "";
       contextEvidence.appendChild(el("p", { class: "hint", text: "Context evidence is NOT_REPORTED for this run." }));
+    }
+
+    if (taskRef) {
+      const recoveryEndpoint = `/api/recovery/${encodeURIComponent(taskRef)}`;
+      getJSON(recoveryEndpoint).then((payload) => {
+        if (root.dataset.runId !== run.id) return;
+        recoveryEvidence.innerHTML = "";
+        const attempts = payload.attempts || { value: null, class: "UNKNOWN", maximum: null };
+        const attemptText = attempts.class === "MEASURED"
+          ? `${attempts.value} of ${attempts.maximum}`
+          : "UNKNOWN";
+        const ownership = payload.ownership || {};
+        const recoveryButton = el("button", {
+          type: "button",
+          class: "btn-secondary",
+          text: "Recover safely",
+        });
+        recoveryButton.disabled = !payload.recover?.enabled;
+        const controlReason = el("p", {
+          class: "hint run-detail-recovery-reason",
+          text: payload.recover?.reason || "The server currently proves this orphan is safe to recover.",
+        });
+        const chain = el("ul", { class: "recovery-chain" });
+        (payload.recovery_chain?.stages || []).forEach((stage) => {
+          chain.appendChild(el("li", {}, [
+            el("span", { text: displayName(String(stage.stage).replaceAll("_", "-")) }),
+            el("span", { class: "recovery-stage-status", text: `${stage.evidence_status} · ${stage.disposition}` }),
+          ]));
+        });
+        recoveryEvidence.append(
+          el("p", { class: "recovery-explanation", text: payload.explanation }),
+          el("p", { class: "hint", text: `Reason: ${payload.observed_reason}` }),
+          el("p", { class: "hint", text: `Next safe action: ${payload.next_safe_action}` }),
+          el("dl", { class: "run-detail-facts recovery-facts" }, [
+            el("dt", { text: "Recovery state" }), el("dd", { text: payload.state }),
+            el("dt", { text: "Ownership verdict" }), el("dd", { text: ownership.verdict || "NOT_REPORTED" }),
+            el("dt", { text: "Evidence class" }), el("dd", { text: ownership.evidence_class || "NOT_REPORTED" }),
+            el("dt", { text: "Recovery attempts" }), el("dd", { text: attemptText }),
+            el("dt", { text: "Minimum remaining stage" }),
+            el("dd", { text: payload.recovery_chain?.minimum_remaining_stage || "NOT_REPORTED" }),
+          ]),
+          chain,
+          el("div", { class: "run-detail-recovery-control" }, [recoveryButton, controlReason]),
+        );
+        recoveryButton.addEventListener("click", async () => {
+          recoveryButton.disabled = true;
+          controlReason.textContent = "Re-verifying ownership…";
+          const result = await postJSON(`${recoveryEndpoint}/recover`, {});
+          if (root.dataset.runId !== run.id) return;
+          if (result.ok) {
+            controlReason.textContent = "Recovery verified and the task was queued.";
+          } else {
+            controlReason.textContent = result.body?.detail || "Recovery was refused because eligibility changed.";
+          }
+        });
+      }).catch(() => {
+        if (root.dataset.runId !== run.id) return;
+        recoveryEvidence.innerHTML = "";
+        recoveryEvidence.appendChild(el("p", {
+          class: "hint",
+          text: "Recovery evidence is UNKNOWN because the read failed.",
+        }));
+      });
+    } else {
+      recoveryEvidence.innerHTML = "";
+      recoveryEvidence.appendChild(el("p", { class: "hint", text: "Recovery evidence is NOT_REPORTED for this run." }));
     }
 
     if (!taskRef || !worker) return;
@@ -5190,6 +5261,10 @@
     run: { label: "Run needs attention", glyph: "!", tone: "warn", view: "view-runs" },
     lease: { label: "Stale execution lease", glyph: "⚠", tone: "warn", view: "view-tasks" },
     wake: { label: "Poisoned wake", glyph: "☠", tone: "err", view: "view-history" },
+    waiting_external: { label: "Waiting on external dependency", glyph: "◷", tone: "warn", view: "view-runs" },
+    waiting_approval: { label: "Approval decision required", glyph: "?", tone: "warn", view: "view-runs" },
+    waiting_provider: { label: "Waiting on provider", glyph: "⊘", tone: "warn", view: "view-runs" },
+    recoverable_orphan: { label: "Recoverable orphan", glyph: "↻", tone: "warn", view: "view-runs" },
     budget_warning: { label: "Budget warning", glyph: "△", tone: "warn", view: "view-providers" },
     budget_block: { label: "Budget hard block", glyph: "■", tone: "err", view: "view-providers" },
   };
@@ -5211,6 +5286,21 @@
       }
       const waiting = (t.dependencies || []).length ? `Waiting on ${t.dependencies.join(", ")}` : "";
       add(kind, title, t.failure_reason_sanitized || t.last_error || t.admission_reason || waiting);
+    });
+    (data.recovery || []).forEach((item) => {
+      const kind = {
+        WAITING_EXTERNAL: "waiting_external",
+        WAITING_APPROVAL: "waiting_approval",
+        WAITING_PROVIDER: "waiting_provider",
+        OWNER_ACTION_REQUIRED: "owner",
+        RECOVERABLE_ORPHAN: "recoverable_orphan",
+      }[item.state] || "run";
+      add(
+        kind,
+        `Task ${item.task}: ${item.state}`,
+        `${item.explanation} Reason: ${item.observed_reason} Next safe action: ${item.next_safe_action} `
+          + `Evidence: ${item.ownership?.evidence_class || "NOT_REPORTED"}.`
+      );
     });
     (data.providers || []).forEach((p) => {
       const name = p.display_name || displayName(p.name);
@@ -5286,12 +5376,14 @@
 
   async function refreshAttention() {
     const data = await getJSON("/api/attention");
+    const recoveryAttention = data.recovery || [];
     const runbooksNeedingAttention = data.runbooks || [];
     const staleLeases = data.execution_leases || [];
     const poisonedWakes = data.wakes || [];
     const troubledBudgets = data.usage_budgets || [];
     renderKV("attention-body", [
       ["Tasks needing attention", data.tasks.length],
+      ["Recovery / wait conditions", recoveryAttention.length],
       ["Providers needing attention", data.providers.length],
       ["Runbooks needing attention", runbooksNeedingAttention.length],
       ["Stale execution leases", staleLeases.length],
@@ -5302,14 +5394,14 @@
     const list = document.getElementById("attention-list");
     const attentionSignature = JSON.stringify([data, items]);
     if (list.dataset.signature === attentionSignature) {
-      state.attentionCount = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
+      state.attentionCount = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
       return;
     }
     list.dataset.signature = attentionSignature;
     list.innerHTML = "";
     // The popover keeps one row per /api/attention entry; advancement-derived
     // rows appear on the Overview card only.
-    const base = data.tasks.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
+    const base = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
     items.slice(0, base).forEach((item) => list.appendChild(attentionRow(item, { action: true })));
     const card = document.getElementById("overview-attention-list");
     if (card) {

@@ -430,6 +430,61 @@ def _recorded_at(task: Task) -> float | None:
         return None
 
 
+def ownership_proof_for_task(task: Task) -> OwnershipProof:
+    """Observe the current owner using the canonical task identity evidence."""
+
+    return classify_process_owner(
+        task.pid,
+        recorded_create_time=task.pid_create_time,
+        recorded_at=_recorded_at(task),
+    )
+
+
+def orphan_recovery_eligibility(task: Task) -> tuple[bool, OwnershipProof, str | None]:
+    """Return server-owned one-click eligibility for one persisted task.
+
+    This is intentionally stricter than merely checking the task's state.  A
+    dashboard can be stale, so every caller receives a newly observed
+    :class:`OwnershipProof`; only a currently reclaimable orphan is eligible.
+    """
+
+    proof = ownership_proof_for_task(task)
+    if task.state != TASK_RECOVERABLE_ORPHAN:
+        return False, proof, "the task is not in the recoverable-orphan state"
+    if task.recovery_attempts >= task.recovery_max_attempts:
+        return False, proof, "the bounded recovery-attempt limit has been reached"
+    if proof.verdict != OWNERSHIP_RECLAIMABLE:
+        return False, proof, proof.reason
+    return True, proof, None
+
+
+def recover_orphan_task(state: State, task: Task) -> tuple[bool, OwnershipProof, str | None]:
+    """Re-verify and queue one orphan, refusing every unproven ownership case."""
+
+    eligible, proof, refusal = orphan_recovery_eligibility(task)
+    if not eligible:
+        return False, proof, refusal
+    previous = task.state
+    task.recovery_attempts += 1
+    task.state = TASK_QUEUED
+    task.pid = None
+    task.pid_create_time = None
+    task.ownership_evidence_class = proof.evidence_class
+    task.stale_recovered = True
+    task.last_error = f"operator recovery queued after ownership proof: {proof.reason}"
+    state.upsert_task(task)
+    _sync_runbook_recovery_state(state, task)
+    _emit_transition(state, task, previous=previous, current=task.state, proof=proof)
+    state.record_event(
+        category="recovery",
+        task_id=task.id,
+        level="warning",
+        message="operator recovery queued a task after re-verifying its prior owner is reclaimable",
+        project_id=task.project_id,
+    )
+    return True, proof, None
+
+
 def reconcile_tasks(state: State, *, project_id: str | None = None) -> dict[str, int]:
     """Reclaim tasks marked ``RUNNING`` whose recorded PID is no longer alive.
 
@@ -445,11 +500,7 @@ def reconcile_tasks(state: State, *, project_id: str | None = None) -> dict[str,
     candidates = state.list_tasks(state=TASK_RUNNING, project_id=project_id)
     candidates.extend(state.list_tasks(state=TASK_RECOVERABLE_ORPHAN, project_id=project_id))
     for task in candidates:
-        proof = classify_process_owner(
-            task.pid,
-            recorded_create_time=task.pid_create_time,
-            recorded_at=_recorded_at(task),
-        )
+        proof = ownership_proof_for_task(task)
         task.ownership_evidence_class = proof.evidence_class
         if proof.verdict == OWNERSHIP_LIVE:
             if task.state == TASK_RECOVERABLE_ORPHAN:
@@ -574,6 +625,44 @@ def _candidate_tree_sha(worktree: str) -> str | None:
         return tree or None
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def acceptance_recovery_chain(runbook: Runbook) -> dict[str, object]:
+    """Project preserved and remaining stages without exposing tree/path data."""
+
+    stages = ("implementation", "review", "test", "checkpoint", "pr_readiness")
+    tree_sha = _candidate_tree_sha(runbook.worktree)
+    remaining = (
+        minimum_remaining_acceptance_stage(runbook, tree_sha=tree_sha)
+        if tree_sha is not None
+        else runbook.acceptance_stage or "UNKNOWN"
+    )
+    remaining_index = stages.index(remaining) if remaining in stages else len(stages)
+    rows: list[dict[str, str]] = []
+    for index, stage in enumerate(stages):
+        evidence = runbook.acceptance_evidence.get(stage, {})
+        status = str(evidence.get("status") or "NOT_REPORTED")
+        if stage in {"review", "test"} and status == "PASS":
+            if tree_sha is None:
+                disposition = "VALIDITY_UNKNOWN"
+            elif evidence.get("tree_sha") != tree_sha:
+                disposition = "INVALIDATED_BY_TREE_CHANGE"
+            elif index < remaining_index or remaining == "DONE":
+                disposition = "PRESERVED"
+            else:
+                disposition = "REMAINS"
+        elif status in {"PASS", "NOT_APPLICABLE"} and (index < remaining_index or remaining == "DONE"):
+            disposition = "PRESERVED"
+        elif status in {"PASS", "NOT_APPLICABLE"}:
+            disposition = "RECHECK_REQUIRED"
+        else:
+            disposition = "REMAINS"
+        rows.append({"stage": stage, "evidence_status": status, "disposition": disposition})
+    return {
+        "minimum_remaining_stage": remaining,
+        "tree_observation": "OBSERVED" if tree_sha is not None else "UNKNOWN",
+        "stages": rows,
+    }
 
 
 def reconcile_acceptance_recovery(state: State, *, project_id: str | None = None) -> int:

@@ -451,12 +451,19 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             task_ref="ENG-AGENT-02-S5",
             role="primary-implementation",
             worker="claude-code",
-            state="SUCCEEDED",
+            state="RECOVERABLE_ORPHAN",
+            pid=1,
+            ownership_evidence_class="PID_ONLY",
+            recovery_attempts=0,
             result="PASS",
             launch_mode="session",
+            runbook_id="fx-rb-done",
             worktree=str(root),
         ),
-        updated_at=other_ref_at,
+        # An unparseable legacy timestamp supplies no identity boundary. PID 1
+        # is observable in the fixture process, leaving a deliberate PID_ONLY
+        # AMBIGUOUS proof for the disabled-control browser assertion.
+        updated_at="legacy-unknown",
     )
     test_fix_preset = PRESETS["test-fix"]
     done_rb = Runbook(
@@ -472,6 +479,12 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
         phases=test_fix_preset.phases,
         status="SUCCEEDED",
         task_id="fx-rb-done-session",
+        acceptance_stage="review",
+        acceptance_evidence={
+            "implementation": {"status": "PASS"},
+            "review": {"status": "PASS", "tree_sha": "fixture-old-tree"},
+            "test": {"status": "PASS", "tree_sha": "fixture-old-tree"},
+        },
         report_markdown="# Morning report — fixture\n\n- Final status: SUCCEEDED\n",
     )
     state.upsert_runbook(done_rb)
@@ -524,8 +537,10 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             task_ref="ENG-AGENT-07",
             role="primary-implementation",
             worker="codex-build",
-            state="RUNNING",
-            pid=4242,
+            state="RECOVERABLE_ORPHAN",
+            pid=99999999,
+            ownership_evidence_class="PID_ABSENT",
+            recovery_attempts=0,
             failed_worker_id="claude-code",
             failure_execution_system="Claude Code",
             failure_provider="Anthropic",
