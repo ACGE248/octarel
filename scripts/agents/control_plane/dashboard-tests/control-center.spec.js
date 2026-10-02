@@ -925,12 +925,17 @@ test('ENG-PC-08 Settings shows ownership, history, diffs, and validated rollback
   await expect(repository.locator('input, select, textarea, button')).toHaveCount(0);
 
   const history = page.locator('#configuration-history');
-  const current = history.locator('[data-revision-id="2"]');
-  await expect(current).toContainText('Revision #2 — CURRENT');
-  await expect(current).toContainText('Actor: fixture:operator');
-  await expect(current).toContainText('Reason: restore valid runtime configuration');
-  await expect(current.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('UNKNOWN — not set');
-  await expect(current.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('4');
+  const initialRevisions = (await (await request.get('/api/configuration/revisions')).json()).revisions;
+  const initialCurrentId = initialRevisions[0].id;
+  await expect(history.locator(`[data-revision-id="${initialCurrentId}"]`))
+    .toContainText(`Revision #${initialCurrentId} — CURRENT`);
+  await expect(history.locator('h4', { hasText: '— CURRENT' })).toHaveCount(1);
+
+  const restored = history.locator('[data-revision-id="2"]');
+  await expect(restored).toContainText('Actor: fixture:operator');
+  await expect(restored).toContainText('Reason: restore valid runtime configuration');
+  await expect(restored.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('UNKNOWN — not set');
+  await expect(restored.locator('.configuration-diff', { hasText: 'max_write_workers' })).toContainText('4');
 
   const legacy = history.locator('[data-revision-id="1"]');
   const emptyDiff = legacy.locator('.configuration-diff', { hasText: 'held_task_ids' });
@@ -961,10 +966,13 @@ test('ENG-PC-08 Settings shows ownership, history, diffs, and validated rollback
   await preview.click();
   await expect(apply).toBeEnabled();
   await apply.click();
-  await expect(result).toContainText('ROLLBACK APPLIED — NEW REVISION #3');
-  await expect(history.locator('[data-revision-id="3"]')).toContainText('CURRENT');
-  const countAfterApply = (await (await request.get('/api/configuration/revisions')).json()).revisions.length;
-  expect(countAfterApply).toBe(countBefore + 1);
+  await expect(result).toContainText(/ROLLBACK APPLIED — NEW REVISION #\d+/);
+  const revisionsAfterApply = (await (await request.get('/api/configuration/revisions')).json()).revisions;
+  const appliedRevisionId = revisionsAfterApply[0].id;
+  await expect(result).toContainText(`ROLLBACK APPLIED — NEW REVISION #${appliedRevisionId}`);
+  await expect(history.locator(`[data-revision-id="${appliedRevisionId}"]`))
+    .toContainText(`Revision #${appliedRevisionId} — CURRENT`);
+  expect(revisionsAfterApply).toHaveLength(countBefore + 1);
 });
 
 test('mobile bottom navigation and vertical workflow render at phone width', async ({ page }) => {
