@@ -28,6 +28,7 @@
     providers: [],
     models: [],
     worktrees: [],
+    runtimeServices: [],
     events: [],
     telemetry: { providers: [], quota_windows: [], checkpoints: [] },
     attentionCount: 0,
@@ -4034,6 +4035,92 @@
     renderAgentCards(models);
   }
 
+  function runtimeServiceForWorktree(path) {
+    return (state.runtimeServices || []).find((service) =>
+      !service.runbook_id && (service.worktree_path === path || service.cwd === path)
+    ) || null;
+  }
+
+  function runtimeServiceForRun(run) {
+    return (state.runtimeServices || []).find((service) => service.runbook_id === run.id) || null;
+  }
+
+  function runtimeAction(service, action) {
+    const payload = {
+      worktree_path: service.worktree_path || null,
+      runbook_id: service.runbook_id || null,
+      confirm: ["stop", "restart"].includes(action),
+    };
+    const execute = async () => {
+      const result = await postJSON(
+        `/api/runtime-services/${encodeURIComponent(service.id)}/${action}`,
+        payload,
+      );
+      if (!result.ok) throw new Error(result.body?.detail || `Runtime service ${action} was refused.`);
+      await Promise.all([refreshRuntimeServices(), refreshAppLifecycle()]);
+    };
+    if (["stop", "restart"].includes(action)) {
+      return confirmAndRun(
+        `${action === "stop" ? "Stop" : "Restart"} only the verified Octarel-owned process for ${service.name}?`,
+        () => execute().catch((error) => window.alert(error.message)),
+      );
+    }
+    return execute().catch((error) => window.alert(error.message));
+  }
+
+  function renderRuntimeService(target, service, emptyText) {
+    target.innerHTML = "";
+    if (!service) {
+      target.appendChild(el("p", { class: "hint", text: emptyText || "No runtime service is declared for this scope." }));
+      return;
+    }
+    const actions = el("div", { class: "card-actions runtime-service-actions" });
+    ["start", "restart", "stop"].forEach((action) => {
+      const button = el("button", {
+        type: "button",
+        text: action[0].toUpperCase() + action.slice(1),
+        class: action === "stop" ? "danger" : "",
+        "data-runtime-focus": `${service.id}:${action}`,
+      });
+      button.disabled = !service.actions?.[action];
+      button.addEventListener("click", () => runtimeAction(service, action));
+      actions.appendChild(button);
+    });
+    if (service.health === "HEALTHY") {
+      actions.appendChild(el("a", {
+        class: "button-link",
+        href: service.preview_url,
+        target: "_blank",
+        rel: "noreferrer",
+        "aria-label": `Open preview for ${service.name}`,
+        "data-runtime-focus": `${service.id}:open-preview`,
+        text: "Open preview",
+      }));
+    } else {
+      actions.appendChild(el("button", {
+        type: "button",
+        text: "Open preview",
+        disabled: "disabled",
+        title: "Preview opens only after loopback health is confirmed.",
+      }));
+    }
+    target.append(
+      el("div", { class: "runtime-service-summary" }, [
+        el("strong", { text: service.name }),
+        el("span", { class: `status-pill ${statusClass(service.health)}`, text: service.health }),
+      ]),
+      el("dl", { class: "run-detail-facts runtime-service-facts" }, [
+        el("dt", { text: "Ownership" }), el("dd", { text: service.ownership }),
+        el("dt", { text: "Port" }), el("dd", { text: String(service.port) }),
+        el("dt", { text: "PID / session" }), el("dd", { text: service.pid ? `${service.pid} / ${service.process_session_id || "NOT_REPORTED"}` : "—" }),
+        el("dt", { text: "Preview" }), el("dd", { text: `${service.preview_url} · operational metadata only` }),
+        el("dt", { text: "Logs" }), el("dd", {}, [el("code", { text: service.log_pointer })]),
+        el("dt", { text: "Reason" }), el("dd", { text: service.status_reason || "NOT_REPORTED" }),
+      ]),
+      actions,
+    );
+  }
+
   // Condition: one plain-language word for "what state is this checkout in".
   function worktreeCondition(w) {
     const cls = w.classification || "UNKNOWN";
@@ -4050,6 +4137,7 @@
     const managedRoot = document.getElementById("worktrees-managed");
     const discoveredRoot = document.getElementById("worktrees-discovered");
     if (!managedRoot || !discoveredRoot) return;
+    const runtimeFocusKey = document.activeElement?.dataset?.runtimeFocus || null;
     managedRoot.innerHTML = "";
     discoveredRoot.innerHTML = "";
     const flagged = (w) => {
@@ -4124,6 +4212,13 @@
         actions.appendChild(button);
       });
 
+      const runtime = el("section", {
+        class: "worktree-runtime-service",
+        "data-runtime-worktree": w.path,
+        "aria-label": `Runtime service for ${w.display_name || w.branch || w.path}`,
+      });
+      renderRuntimeService(runtime, runtimeServiceForWorktree(w.path), "No project-declared runtime service is available for this worktree.");
+
       appendAll(card, [
         el("header", {}, [
           el("div", { class: "truncate-wrap" }, [el("h3", { text: w.display_name || w.branch || "UNKNOWN", title: w.branch || w.path }), el("div", { class: "entity-id truncate", text: w.path, title: w.path })]),
@@ -4132,18 +4227,44 @@
         flags,
         primary,
         actions,
+        runtime,
         details,
       ]);
       (w.management === "MANAGED" ? managedRoot : discoveredRoot).appendChild(card);
     });
     if (!worktrees.some((w) => w.management === "MANAGED")) managedRoot.appendChild(el("p", { class: "hint", text: "No orchestrator-managed worktrees." }));
     if (!worktrees.some((w) => w.management === "DISCOVERED")) discoveredRoot.appendChild(el("p", { class: "hint", text: "No unregistered Git worktrees discovered." }));
+    if (runtimeFocusKey) {
+      [...document.querySelectorAll("[data-runtime-focus]")]
+        .find((node) => node.dataset.runtimeFocus === runtimeFocusKey)?.focus({ preventScroll: true });
+    }
   }
 
   async function refreshWorktrees() {
     const worktrees = await getJSON("/api/worktrees");
     state.worktrees = worktrees;
     renderWorktreeCards(worktrees, state.telemetry.checkpoints);
+  }
+
+  async function refreshRuntimeServices() {
+    const focusKey = document.activeElement?.dataset?.runtimeFocus || null;
+    state.runtimeServices = await getJSON("/api/runtime-services?include_scopes=true");
+    document.querySelectorAll("[data-runtime-worktree]").forEach((target) => {
+      renderRuntimeService(
+        target,
+        runtimeServiceForWorktree(target.dataset.runtimeWorktree),
+        "No project-declared runtime service is available for this worktree.",
+      );
+    });
+    const runTarget = document.querySelector(".run-detail-runtime[data-runtime-runbook]");
+    if (runTarget) {
+      const run = state.runbooks.find((item) => item.id === runTarget.dataset.runtimeRunbook);
+      renderRuntimeService(runTarget, run && runtimeServiceForRun(run), "No project-declared runtime service is available for this run.");
+    }
+    if (focusKey) {
+      [...document.querySelectorAll("[data-runtime-focus]")]
+        .find((node) => node.dataset.runtimeFocus === focusKey)?.focus({ preventScroll: true });
+    }
   }
 
   async function previewWorktreeCleanup(confirm) {
@@ -4951,6 +5072,9 @@
   function renderRunDetail(run) {
     const root = document.getElementById("run-detail");
     if (!root) return;
+    const runtimeFocusKey = root.contains(document.activeElement)
+      ? document.activeElement?.dataset?.runtimeFocus || null
+      : null;
     root.innerHTML = "";
     if (!run) {
       root.appendChild(el("p", { class: "hint", text: "No run is selected." }));
@@ -5006,6 +5130,15 @@
     const recoveryEvidence = el("div", { class: "run-detail-recovery" }, [
       el("p", { class: "hint", text: "Loading recovery evidence…" }),
     ]);
+    const runtimeEvidence = el("div", {
+      class: "run-detail-runtime runtime-service-panel",
+      "data-runtime-runbook": run.id,
+    });
+    renderRuntimeService(
+      runtimeEvidence,
+      runtimeServiceForRun(run),
+      "No project-declared runtime service is available for this run.",
+    );
     root.append(
       el("header", { class: "run-detail-head" }, [
         el("div", {}, [el("span", { class: "eyebrow", text: "Run Detail" }), el("h3", { text: run.name })]),
@@ -5019,12 +5152,18 @@
       contextEvidence,
       el("h4", { text: "Usage & budget evidence" }),
       usageEvidence,
+      el("h4", { text: "Runtime service" }),
+      runtimeEvidence,
       el("h4", { text: "Execution timeline" })
     );
     const list = el("ul", { class: "events-list event-feed run-detail-events" });
     if (events.length) renderEventItems(list, events.slice().reverse(), true);
     else list.appendChild(el("li", { class: "event-empty" }, [el("span", { text: "No events are recorded for this run yet." })]));
     root.appendChild(list);
+    if (runtimeFocusKey) {
+      [...root.querySelectorAll("[data-runtime-focus]")]
+        .find((node) => node.dataset.runtimeFocus === runtimeFocusKey)?.focus({ preventScroll: true });
+    }
 
     if (linkedTask) {
       getJSON(`/api/usage-telemetry?task=${encodeURIComponent(linkedTask.id)}`).then((payload) => {
@@ -5795,12 +5934,12 @@
 
   async function refreshAppLifecycle() {
     const data = await getJSON("/api/app-status");
-    renderKV("app-lifecycle-body", [["State", data.status], ["PID", data.pid || "—"], ["Port", data.port], ["Uptime", data.uptime_seconds == null ? "—" : `${data.uptime_seconds}s`], ["Started", data.started_at || "—"], ["Launch", data.launch_source], ["Last exit", data.last_exit_code ?? "—"], ["Observation", data.note || data.port_probe]]);
+    renderKV("app-lifecycle-body", [["State", data.status], ["Health", data.health || "NOT_REPORTED"], ["Ownership", data.ownership || "NOT_REPORTED"], ["PID", data.pid || "—"], ["Port", data.port ?? "—"], ["Uptime", data.uptime_seconds == null ? "—" : `${data.uptime_seconds}s`], ["Started", data.started_at || "—"], ["Launch", data.launch_source], ["Logs", data.log_pointer || "—"], ["Last exit", data.last_exit_code ?? "—"], ["Observation", data.note || "—"]]);
     state.appStatus = data;
     renderSystemHealth();
-    document.getElementById("app-start").disabled = data.status === "RUNNING" || data.status === "UNKNOWN";
-    document.getElementById("app-stop").disabled = data.status !== "RUNNING";
-    document.getElementById("app-restart").disabled = data.status !== "RUNNING";
+    document.getElementById("app-start").disabled = !data.actions?.start;
+    document.getElementById("app-stop").disabled = !data.actions?.stop;
+    document.getElementById("app-restart").disabled = !data.actions?.restart;
   }
 
   async function refreshRepositoryHealth() {
@@ -5922,6 +6061,7 @@
         refreshProviders,
         refreshModels,
         refreshWorktrees,
+        refreshRuntimeServices,
         refreshOperations,
         refreshAppLifecycle,
         refreshRepositoryHealth,
@@ -6112,9 +6252,9 @@
     document.getElementById("terminal-history-limit")?.addEventListener("change", refreshTerminalHistory);
     document.getElementById("terminal-history-search")?.addEventListener("input", refreshTerminalHistory);
     document.getElementById("terminal-history-clear")?.addEventListener("click", () => confirmAndRun("Clear local Control Center terminal command metadata?", () => postCommand("terminal_history_clear", { confirm: true }).then(refreshTerminalHistory)));
-    document.getElementById("app-start")?.addEventListener("click", () => postJSON("/api/app-lifecycle/start", {}).then(refreshAppLifecycle));
-    document.getElementById("app-stop")?.addEventListener("click", () => confirmAndRun("Stop only the OctaScene development process started by Control Center?", () => postJSON("/api/app-lifecycle/stop", { confirm: true }).then(refreshAppLifecycle)));
-    document.getElementById("app-restart")?.addEventListener("click", () => confirmAndRun("Restart the managed local OctaScene development process?", () => postJSON("/api/app-lifecycle/restart", { confirm: true }).then(refreshAppLifecycle)));
+    document.getElementById("app-start")?.addEventListener("click", () => postJSON("/api/app-lifecycle/start", {}).then(() => Promise.all([refreshAppLifecycle(), refreshRuntimeServices()])));
+    document.getElementById("app-stop")?.addEventListener("click", () => confirmAndRun("Stop only the selected project's verified Octarel-owned runtime process?", () => postJSON("/api/app-lifecycle/stop", { confirm: true }).then(() => Promise.all([refreshAppLifecycle(), refreshRuntimeServices()]))));
+    document.getElementById("app-restart")?.addEventListener("click", () => confirmAndRun("Restart the selected project's verified Octarel-owned runtime process?", () => postJSON("/api/app-lifecycle/restart", { confirm: true }).then(() => Promise.all([refreshAppLifecycle(), refreshRuntimeServices()]))));
     document.getElementById("graphify-refresh")?.addEventListener("click", async () => {
       const result = await postJSON("/api/graphify/refresh", {});
       document.getElementById("graphify-action-result").textContent = result.reason || result.status;

@@ -1292,6 +1292,14 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .run-detail-recovery-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .run-detail-recovery-control .hint { flex: 1 1 220px; margin: 0; overflow-wrap: anywhere; }
 .run-detail-context { margin-bottom: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); }
+.runtime-service-panel, .worktree-runtime-service { margin: 10px 0 14px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); min-width: 0; }
+.runtime-service-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.runtime-service-facts { margin-bottom: 10px; }
+.runtime-service-facts code { overflow-wrap: anywhere; }
+.runtime-service-actions { flex-wrap: wrap; }
+.button-link { display: inline-flex; align-items: center; min-height: 34px; padding: 0 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); text-decoration: none; background: var(--surface); }
+.button-link:hover, .button-link:focus-visible { border-color: var(--accent); color: var(--accent); }
+.worktree-runtime-service { width: 100%; }
 .context-inspector-facts { margin-bottom: 10px; }
 .context-savings-formula { margin: 0 0 6px; overflow-wrap: anywhere; }
 .context-graphify-note { margin: 0 0 12px; }

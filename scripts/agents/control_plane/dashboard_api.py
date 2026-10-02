@@ -1074,7 +1074,7 @@ def create_app(
             "provider_count": len(providers),
             "configured_provider_count": sum(1 for p in providers if p.configured),
             "stop_after_current": ctx.stop_after_current,
-            "octascene_app_status": probe_octascene_app(),
+            "octascene_app_status": app_lifecycle.status()["status"],
             # ENG-PC-03 (issue #31): local state only, zero AI/provider calls.
             "wake_queue": wake_queue_depth(ctx.state, project_id=ctx.selected_project_id).as_dict(),
         }
@@ -2694,12 +2694,62 @@ def create_app(
 
     @app.get("/api/app-status")
     def app_status() -> dict[str, Any]:
-        body = app_lifecycle.status()
-        body["port_probe"] = probe_octascene_app()
-        if body["status"] == "STOPPED" and body["port_probe"] == "RUNNING":
-            body["status"] = "UNKNOWN"
-            body["note"] = "Port 8765 is active, but Control Center did not start that process and will not stop it."
-        return body
+        return sanitize_data(app_lifecycle.status())
+
+    @app.get("/api/runtime-services")
+    def runtime_services(include_scopes: bool = True) -> list[dict[str, Any]]:
+        """Selected-project runtime services; local observation only, zero providers."""
+
+        # Worktree paths are needed to join this projection to the existing
+        # /api/worktrees inspector. They are already exposed there under the
+        # same authenticated boundary; runtime argv is declaration-validated
+        # and cannot contain secret-bearing arguments.
+        return app_lifecycle.list_services(include_scopes=include_scopes)
+
+    @app.post("/api/runtime-services/{service_id}/{action}")
+    def runtime_service_action(
+        service_id: str,
+        action: str,
+        request: Request,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = dict(payload or {})
+        confirm = body.get("confirm") is True
+        if action in {"stop", "restart"} and not confirm:
+            raise HTTPException(status_code=409, detail=f"{action} requires confirm=true")
+        worktree_path = body.get("worktree_path")
+        runbook_id = body.get("runbook_id")
+        if worktree_path is not None and not isinstance(worktree_path, str):
+            raise HTTPException(status_code=400, detail="worktree_path must be a string")
+        if runbook_id is not None and not isinstance(runbook_id, str):
+            raise HTTPException(status_code=400, detail="runbook_id must be a string")
+        remote_identity = _remote_identity_of(request)
+        actor = remote_identity.email if remote_identity else "local"
+        try:
+            result = app_lifecycle.action(
+                action,
+                actor,
+                worktree_path=worktree_path,
+                runbook_id=runbook_id,
+                service_id=service_id,
+            )
+        except OperationError as exc:
+            _record_remote_audit(
+                ctx,
+                request,
+                verb=f"runtime_service_{action}",
+                target=service_id,
+                result=f"FAIL: {exc}",
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        _record_remote_audit(
+            ctx,
+            request,
+            verb=f"runtime_service_{action}",
+            target=service_id,
+            result="OK",
+        )
+        return result
 
     @app.post("/api/app-lifecycle/{action}")
     def app_lifecycle_action(action: str, request: Request, payload: dict[str, Any] | None = None) -> dict[str, Any]:

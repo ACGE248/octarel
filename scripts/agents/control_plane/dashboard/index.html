@@ -824,10 +824,10 @@
           <div class="system-group-head"><h2 id="sys-services-title">Services &amp; processes</h2><p class="hint">Processes this Control Center starts and can stop.</p></div>
           <div class="grid">
             <div class="card" id="card-app-lifecycle">
-              <h3>OctaScene development app</h3>
+              <h3>Selected-project runtime service</h3>
               <div class="kv" id="app-lifecycle-body">Loading…</div>
               <div class="card-actions"><button id="app-start" type="button">Start</button><button id="app-restart" type="button">Restart</button><button id="app-stop" class="danger" type="button">Stop</button></div>
-              <p class="hint">Only the canonical local <code>make run</code> process started by this Control Center can be stopped.</p>
+              <p class="hint">Only a project-declared fixed argv on loopback can start. Stop and restart require a complete matching process identity; preview URLs are operational metadata, not validation evidence.</p>
             </div>
           </div>
         </section>

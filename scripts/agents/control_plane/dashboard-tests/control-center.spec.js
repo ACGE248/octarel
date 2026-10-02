@@ -620,6 +620,21 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
 });
 
+test('ENG-PC-09 Run Detail shows external runtime ownership without unsafe controls', async ({ page }) => {
+  await navTo(page, 'view-runs');
+  const running = page.locator('[data-runbook-id="fx-rb-running"]');
+  await running.getByRole('button', { name: 'View detail for Fixture overnight run' }).click();
+  const runtime = page.locator('#run-detail .run-detail-runtime');
+  await expect(runtime).toContainText('Fixture development app');
+  await expect(runtime).toContainText('EXTERNAL_UNOWNED');
+  await expect(runtime).toContainText('operational metadata only');
+  await expect(runtime).toContainText('runtime-services/');
+  await expect(runtime.getByRole('button', { name: 'Start', exact: true })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Restart' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Stop' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Open preview' })).toBeDisabled();
+});
+
 test('Run Detail refuses recovery for an ambiguous ownership proof', async ({ page }) => {
   const attention = page.locator('#overview-attention-list [data-attention-kind="recoverable_orphan"]');
   await expect(attention).toContainText('Recoverable orphan');
@@ -1028,6 +1043,20 @@ test('S9 worktrees distinguish managed and discovered Git worktrees with safe ac
   await expect(page.locator('#worktrees-refresh')).toHaveText(/Refresh status/i);
   const buttons = page.locator('.worktree-card .worktree-actions button');
   expect(await buttons.count()).toBeGreaterThan(0);
+  expect(await pageOverflows(page)).toBe(false);
+});
+
+test('ENG-PC-09 Worktree inspector exposes scoped runtime health and log pointer', async ({ page }) => {
+  await navTo(page, 'view-worktrees');
+  const runtime = page.locator('.worktree-runtime-service').first();
+  await expect(runtime).toContainText('Fixture development app');
+  await expect(runtime).toContainText('OCTAREL_DECLARED');
+  await expect(runtime).toContainText('operational metadata only');
+  await expect(runtime).toContainText('runtime-services/');
+  await expect(runtime.getByRole('button', { name: 'Start', exact: true })).toBeEnabled();
+  await expect(runtime.getByRole('button', { name: 'Restart' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Stop' })).toBeDisabled();
+  await expect(runtime.getByRole('button', { name: 'Open preview' })).toBeDisabled();
   expect(await pageOverflows(page)).toBe(false);
 });
 

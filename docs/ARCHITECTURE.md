@@ -198,3 +198,31 @@ Delegated workers, terminal shells, test lanes, and managed development apps
 start in owned process sessions. Cancellation and shutdown terminate only
 process groups whose PID/session handle or durable PID/create-time/cwd/argv
 metadata proves Octarel ownership. Octarel never kills by executable name.
+
+### Managed runtime services
+
+ENG-PC-09 generalizes the former single `AppLifecycleManager` state into one
+`RuntimeServiceManager` and one durable `runtime_services` contract; the old
+`/api/app-status` and `/api/app-lifecycle/{action}` routes remain compatibility
+adapters over that manager, not a second supervisor. Each service is scoped to
+a selected project and optionally to a server-validated project worktree and
+runbook. Its command and port come only from the managed project's explicit
+fixed-argv/loopback-port declaration. There is no arbitrary command, shell,
+public-bind, or implicit-cwd input.
+
+Launch preserves the project's declared fixed argv as intent and separately
+captures the stable argv the OS reports after exec normalization. The only
+permitted normalization is an absolute replacement for argv[0], with every
+remaining argument unchanged. Before stop, restart, or shutdown, the manager
+re-proves PID, process create time, exact cwd, that captured process argv, and
+process-session identity. Missing or changed evidence, PID reuse, and external
+listeners fail closed. A port collision is reported as `EXTERNAL_UNOWNED` and
+never signalled. Crash reconciliation keeps the durable identity, exit state,
+and append-only log pointer so an eligible scope can be restarted without
+discarding evidence.
+
+`GET /api/runtime-services` is a local selected-project read model. Run Detail
+and Worktree inspectors show health, ownership, loopback preview metadata, log
+pointer, and only the actions the server currently proves safe. Preview URLs
+are explicitly operational metadata and never validation evidence. Dashboard
+polling observes local process/port/state facts only and makes no provider call.
