@@ -1526,6 +1526,41 @@
     "view-steering": () => refreshManagerRoute(),
     "view-providers": () => refreshUsageTelemetry(),
   };
+  const viewScopedRefreshInFlight = new Map();
+
+  function refreshViewScoped(viewId) {
+    const view = document.getElementById(viewId);
+    const scoped = VIEW_SCOPED_REFRESH[viewId];
+    if (!scoped) {
+      if (view) view.dataset.refreshReady = "true";
+      return Promise.resolve();
+    }
+    // Hidden views are outside the scoped readiness boundary. In particular,
+    // a polling refresh must not publish a no-op promise that navigation can
+    // mistake for the active view's fetch.
+    if (!isViewActive(viewId)) return undefined;
+    const existing = viewScopedRefreshInFlight.get(viewId);
+    if (existing) return existing;
+    view?.setAttribute("aria-busy", "true");
+    if (view) view.dataset.refreshReady = "false";
+    let refreshPromise;
+    try {
+      // Invoke synchronously while the view is known to be active, then track
+      // the returned promise as the readiness boundary.
+      refreshPromise = Promise.resolve(scoped());
+    } catch (err) {
+      refreshPromise = Promise.reject(err);
+    }
+    refreshPromise = refreshPromise
+      .finally(() => {
+        if (viewScopedRefreshInFlight.get(viewId) !== refreshPromise) return;
+        viewScopedRefreshInFlight.delete(viewId);
+        view?.removeAttribute("aria-busy");
+        if (view) view.dataset.refreshReady = "true";
+      });
+    viewScopedRefreshInFlight.set(viewId, refreshPromise);
+    return refreshPromise;
+  }
 
   function showView(viewId) {
     document.querySelectorAll(".view").forEach((node) => {
@@ -1561,10 +1596,7 @@
     if (viewId === "view-terminal" && connectTerminalView) connectTerminalView();
     // Populate a view-scoped panel now rather than waiting for the next poll,
     // since it is skipped entirely while its view is hidden.
-    const scoped = VIEW_SCOPED_REFRESH[viewId];
-    if (scoped) {
-      try { scoped(); } catch (err) { console.warn(err); }
-    }
+    refreshViewScoped(viewId).catch((err) => console.warn(err));
   }
 
   function initNav() {
@@ -6097,9 +6129,9 @@
         refreshEvents,
         refreshRunEvidence,
         refreshRoadmap,
-        refreshPriorityMatrix,
-        refreshManagerRoute,
-        refreshUsageTelemetry,
+        () => refreshViewScoped("view-priority"),
+        () => refreshViewScoped("view-steering"),
+        () => refreshViewScoped("view-providers"),
         refreshTelemetry,
         refreshUsageRouting,
       ];

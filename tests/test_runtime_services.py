@@ -107,6 +107,24 @@ def test_declaration_rejects_shell_interpolation_and_secret_arguments(tmp_path: 
 
 
 @pytest.mark.parametrize(
+    "launcher",
+    [
+        "sh", "bash", "dash", "ash", "zsh", "fish", "ksh", "mksh", "csh", "tcsh",
+        "pwsh", "powershell", "cmd", "cmd.exe", "env", "sudo", "doas", "su", "runuser",
+    ],
+)
+def test_declaration_rejects_shell_command_and_privilege_wrappers(
+    tmp_path: Path, launcher: str
+) -> None:
+    project = _project(
+        tmp_path,
+        runtime_service_argv=json.dumps([launcher, "python3", "-m", "http.server", "43123"]),
+    )
+    with pytest.raises(RuntimeServiceError, match="shell, command, env, or privilege wrapper"):
+        _manager(tmp_path, project)._declaration()
+
+
+@pytest.mark.parametrize(
     "bind_arg",
     [
         "0.0.0.0:8765",
@@ -294,6 +312,76 @@ def test_start_persists_complete_identity_and_stop_signals_only_verified_session
     assert stopped["exit_code"] == -15
 
 
+def test_identity_capture_retries_transient_untrusted_facts_until_stably_valid(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = manager._declared_row()
+
+    class Process:
+        pid = 8229
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    valid = {
+        "create_time": 455.0,
+        "cwd": row["cwd"],
+        "argv": row["argv"],
+        "session_id": Process.pid,
+        "alive": True,
+    }
+    transient = iter(
+        [
+            dict(valid, cwd=str(tmp_path / "pre-exec-cwd")),
+            dict(valid, session_id=Process.pid + 1),
+            dict(valid, argv=["unexpected-launcher", *row["argv"][1:]]),
+        ]
+    )
+    probes = 0
+
+    def process_facts(_pid: int) -> dict[str, object]:
+        nonlocal probes
+        probes += 1
+        return next(transient, valid)
+
+    monkeypatch.setattr(manager, "_process_facts", process_facts)
+    captured = manager._capture_process_identity(Process(), row)
+
+    assert captured == valid
+    assert probes > 3
+
+
+def test_identity_capture_never_accepts_persistently_invalid_facts(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = manager._declared_row()
+
+    class Process:
+        pid = 8230
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    monkeypatch.setattr(
+        manager,
+        "_process_facts",
+        lambda _pid: {
+            "create_time": 455.5,
+            "cwd": row["cwd"],
+            "argv": ["unexpected-launcher", *row["argv"][1:]],
+            "session_id": Process.pid,
+            "alive": True,
+        },
+    )
+
+    with pytest.raises(RuntimeServiceError, match="argv is not a permitted normalization"):
+        manager._capture_process_identity(Process(), row)
+
+
 def test_failed_identity_capture_terminates_group_waits_reaps_and_forgets_handle(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -412,6 +500,40 @@ def test_live_retained_failed_launch_handle_blocks_new_popen_without_signal(
 
     assert polls == 1
     assert manager._processes[row["id"]] is process
+
+
+def test_public_actions_refuse_live_retained_child_but_allow_exited_handle(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _manager(tmp_path)
+    row = manager._declared_row()
+
+    class LiveRetainedProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    class ExitedRetainedProcess:
+        @staticmethod
+        def poll() -> int:
+            return -signal.SIGTERM
+
+    monkeypatch.setattr(
+        "os.killpg",
+        lambda *_args: pytest.fail("public action derivation must never signal a retained child"),
+    )
+    live = LiveRetainedProcess()
+    manager._processes[row["id"]] = live
+    observed = manager._public(row, port_active=False)
+    assert observed["actions"] == {"start": False, "stop": False, "restart": False}
+    assert "previously launched child is still alive" in observed["status_reason"]
+    assert manager._processes[row["id"]] is live
+
+    exited = ExitedRetainedProcess()
+    manager._processes[row["id"]] = exited
+    observed = manager._public(row, port_active=False)
+    assert observed["actions"] == {"start": True, "stop": False, "restart": False}
+    assert manager._processes[row["id"]] is exited
 
 
 def test_exited_retained_failed_launch_handle_is_reaped_before_new_popen(

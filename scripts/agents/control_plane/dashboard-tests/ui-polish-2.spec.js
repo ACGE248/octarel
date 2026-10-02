@@ -231,17 +231,22 @@ test('mobile: the session bar and bottom nav never cover content on any view', a
   for (const view of views) {
     await navTo(page, `view-${view}`);
     /* Polling can replace a tall view after two equal height samples. Wait for
-       the app's refresh boundary, then scroll and measure in one browser task
-       so no late render can land between those two operations. */
+       this view's promise-backed refresh boundary, then scroll and measure in
+       one browser task so no late scoped render lands between them. */
+    const activeView = page.locator(`#view-${view}`);
     await expect(page.locator('body')).not.toHaveAttribute('aria-busy', 'true');
+    await expect(activeView).toHaveAttribute('data-refresh-ready', 'true');
+    await expect(activeView).not.toHaveAttribute('aria-busy', 'true');
     const m = await page.evaluate(() => new Promise((resolve) => {
       const measureWhenIdle = () => {
-        if (document.body.hasAttribute('aria-busy')) {
+        const active = document.querySelector('.view.active');
+        if (document.body.hasAttribute('aria-busy') || active?.getAttribute('aria-busy') === 'true') {
           requestAnimationFrame(measureWhenIdle);
           return;
         }
         requestAnimationFrame(() => {
-          if (document.body.hasAttribute('aria-busy')) {
+          const current = document.querySelector('.view.active');
+          if (document.body.hasAttribute('aria-busy') || current?.getAttribute('aria-busy') === 'true') {
             measureWhenIdle();
             return;
           }

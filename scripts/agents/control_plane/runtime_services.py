@@ -28,7 +28,29 @@ from typing import Any, TypeVar, cast
 from .models import utc_now_iso
 
 RUNTIME_ACTIONS = frozenset({"start", "stop", "restart"})
-_FORBIDDEN_LAUNCHERS = frozenset({"sh", "bash", "zsh", "fish", "env", "sudo"})
+_FORBIDDEN_LAUNCHERS = frozenset(
+    {
+        "sh",
+        "bash",
+        "dash",
+        "ash",
+        "zsh",
+        "fish",
+        "ksh",
+        "mksh",
+        "csh",
+        "tcsh",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "cmd.exe",
+        "env",
+        "sudo",
+        "doas",
+        "su",
+        "runuser",
+    }
+)
 _SHELL_SYNTAX = frozenset({";", "|", "&", "<", ">", "`", "\n", "\r", "\x00"})
 _SENSITIVE_ARG = re.compile(r"(?i)(password|passwd|token|api[_-]?key|authorization|private[_-]?key|secret)")
 _PUBLIC_BIND_ARG = re.compile(
@@ -104,7 +126,9 @@ class RuntimeServiceManager:
                 f"project {project.project_id!r} does not declare a fixed runtime_service_argv"
             )
         if Path(argv[0]).name.lower() in _FORBIDDEN_LAUNCHERS:
-            raise RuntimeServiceError("runtime service argv may not invoke a shell, env wrapper, or privilege wrapper")
+            raise RuntimeServiceError(
+                "runtime service argv may not invoke a shell, command, env, or privilege wrapper"
+            )
         if any(any(token in part for token in _SHELL_SYNTAX) for part in argv):
             raise RuntimeServiceError("runtime service argv contains forbidden shell syntax")
         if any(_SENSITIVE_ARG.search(part) for part in argv):
@@ -292,20 +316,25 @@ class RuntimeServiceManager:
                 if process.poll() is not None:
                     failure_reason = "launched process exited before its identity became stable"
                     break
+                stable_fingerprint = None
+                stable_since = None
             elif not facts["alive"]:
                 failure_reason = "launched process exited before its identity became stable"
                 break
             elif facts["cwd"] != str(Path(row["cwd"]).resolve()):
                 failure_reason = "launched process did not retain the declared cwd"
-                break
+                stable_fingerprint = None
+                stable_since = None
             elif int(facts["session_id"]) != process.pid:
                 failure_reason = "launched process did not retain its dedicated process session"
-                break
+                stable_fingerprint = None
+                stable_since = None
             elif not self._observed_argv_matches_declaration(
                 list(row["argv"]), list(facts["argv"])
             ):
                 failure_reason = "launched process argv is not a permitted normalization of the declaration"
-                break
+                stable_fingerprint = None
+                stable_since = None
             else:
                 now = time.monotonic()
                 fingerprint = (
@@ -453,8 +482,21 @@ class RuntimeServiceManager:
             body["ownership"] = "EXTERNAL_UNOWNED"
             body["status_reason"] = "declared loopback port is occupied by an external or unverified listener"
         body["last_health_at"] = utc_now_iso()
+        retained_child_alive = False
+        if body["health"] in {"STOPPED", "CRASHED", "EXITED"} and not port_active:
+            retained_process = self._processes.get(body["id"])
+            retained_child_alive = retained_process is not None and retained_process.poll() is None
+        if retained_child_alive:
+            body["status_reason"] = (
+                "a previously launched child is still alive after failed cleanup; "
+                "the exact handle remains tracked and start is refused"
+            )
         body["actions"] = {
-            "start": body["health"] in {"STOPPED", "CRASHED", "EXITED"} and not port_active,
+            "start": (
+                body["health"] in {"STOPPED", "CRASHED", "EXITED"}
+                and not port_active
+                and not retained_child_alive
+            ),
             "stop": body["ownership"] == "OWNED_VERIFIED",
             "restart": body["ownership"] == "OWNED_VERIFIED",
         }
