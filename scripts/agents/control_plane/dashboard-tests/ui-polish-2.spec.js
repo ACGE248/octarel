@@ -359,7 +359,7 @@ test('worktrees lead with branch, path, condition and owner; git detail is discl
   await expect(card.locator('.entity-more')).not.toHaveAttribute('open', '');
   await expect(card.locator('.entity-more')).toContainText('Upstream');
   // The card and its status pill stay inside the viewport (no page overflow from long paths).
-  const right = await card.locator('.status-pill').evaluate((n) => n.getBoundingClientRect().right);
+  const right = await card.locator(':scope > *:has(h3) > .status-pill').evaluate((n) => n.getBoundingClientRect().right);
   expect(right).toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth));
   expect(await overflows(page)).toBe(false);
   // Stale/dirty checkouts are called out with words, not only a border.
