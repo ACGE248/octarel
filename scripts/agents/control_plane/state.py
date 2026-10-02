@@ -442,6 +442,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sessions_live_task_worker
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_identity
     ON agent_sessions (identity_fingerprint, active);
 
+-- ENG-PC-06 (issue #34): delivery cursors contain identities and event
+-- positions only. They deliberately do not cache policy, roadmap, task, or
+-- event content; repository truth and the existing events table are reread for
+-- every delivery. A cursor is owned by exactly one project/task/consumer.
+CREATE TABLE IF NOT EXISTS context_cursors (
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    consumer_id TEXT NOT NULL,
+    tree_sha TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    task_contract_digest TEXT NOT NULL,
+    identity_fingerprint TEXT NOT NULL,
+    bundle_identity TEXT NOT NULL,
+    preserved_policy_identity TEXT NOT NULL,
+    delivered_task_identities TEXT NOT NULL DEFAULT '{}',
+    delivered_event_positions TEXT NOT NULL DEFAULT '{}',
+    delivered_ancestry_identity TEXT NOT NULL DEFAULT '',
+    last_event_id INTEGER NOT NULL DEFAULT 0,
+    last_outcome TEXT NOT NULL DEFAULT 'DELIVERED',
+    last_attempted_characters INTEGER NOT NULL DEFAULT 0,
+    inspection_summary TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, task_id, consumer_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_cursors_identity
+    ON context_cursors (identity_fingerprint);
+
 CREATE TABLE IF NOT EXISTS overnight_sessions (
     session_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -530,6 +559,13 @@ _EXECUTION_LEASES_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
 _AGENT_SESSIONS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("state_reason", "TEXT"),
 )
+_CONTEXT_CURSORS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("delivered_event_positions", "TEXT NOT NULL DEFAULT '{}'"),
+    ("delivered_ancestry_identity", "TEXT NOT NULL DEFAULT ''"),
+    ("last_outcome", "TEXT NOT NULL DEFAULT 'DELIVERED'"),
+    ("last_attempted_characters", "INTEGER NOT NULL DEFAULT 0"),
+    ("inspection_summary", "TEXT NOT NULL DEFAULT '{}'"),
+)
 _EVENTS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("run_id", "TEXT"),
     ("run_sequence", "INTEGER"),
@@ -603,6 +639,11 @@ _PROJECT_SCOPED_TABLES: tuple[str, ...] = (
     "execution_leases",
     "wake_queue",
     "agent_sessions",
+    # Context cursors are included because every identity, event position, and
+    # ancestry reference belongs to one selected project. Adoption supports a
+    # hypothetical pre-project ENG-PC-06 database; current rows are NOT NULL
+    # and every read/write additionally requires the exact project id.
+    "context_cursors",
     "usage_ledger",
 )
 
@@ -691,6 +732,7 @@ class State:
             self._migrate_runbooks_columns()
             self._migrate_execution_leases_columns()
             self._migrate_agent_sessions_columns()
+            self._migrate_context_cursors_columns()
             self._migrate_project_id_columns()
             self._migrate_events_columns()
             self._migrate_usage_ledger()
@@ -742,6 +784,23 @@ class State:
         for column, ddl in _AGENT_SESSIONS_MIGRATED_COLUMNS:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE agent_sessions ADD COLUMN {column} {ddl}")
+
+    @_serialized
+    def _migrate_context_cursors_columns(self) -> None:
+        """Upgrade only an actually older cursor table.
+
+        The early return is intentional: even idempotent DDL takes SQLite's
+        schema lock, so healthy opens must not run ALTER statements.
+        """
+
+        existing = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(context_cursors)").fetchall()
+        }
+        missing = [item for item in _CONTEXT_CURSORS_MIGRATED_COLUMNS if item[0] not in existing]
+        if not missing:
+            return
+        for column, ddl in missing:
+            self._conn.execute(f"ALTER TABLE context_cursors ADD COLUMN {column} {ddl}")
 
     @_serialized
     def _migrate_events_columns(self) -> None:
@@ -1440,6 +1499,8 @@ class State:
         project_id: str | None = None,
         run_id: str | None = None,
         event_class: str | None = None,
+        after_id: int | None = None,
+        task_ids: Iterable[str] | None = None,
         ascending: bool = True,
     ) -> list[Event]:
         """Read the one events table as a chronological typed timeline.
@@ -1460,6 +1521,15 @@ class State:
         if event_class is not None:
             clauses.append("COALESCE(event_class, category) = ?")
             values.append(event_class)
+        if after_id is not None:
+            clauses.append("id > ?")
+            values.append(max(0, int(after_id)))
+        if task_ids is not None:
+            selected_task_ids = tuple(task_ids)
+            if not selected_task_ids:
+                return []
+            clauses.append(f"task_id IN ({', '.join('?' for _ in selected_task_ids)})")
+            values.extend(selected_task_ids)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         direction = "ASC" if ascending else "DESC"
         values.append(max(1, min(int(limit), 1_000)))
@@ -1467,6 +1537,106 @@ class State:
             f"SELECT * FROM events{where} ORDER BY id {direction} LIMIT ?", values
         ).fetchall()
         return [Event.from_row(dict(row)) for row in rows]
+
+    # ------------------------------------------------------ context cursors
+
+    @staticmethod
+    def _context_cursor_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        for key in (
+            "bundle_identity",
+            "preserved_policy_identity",
+            "delivered_task_identities",
+            "delivered_event_positions",
+            "inspection_summary",
+        ):
+            item[key] = json.loads(item[key])
+        return item
+
+    @_serialized
+    def get_context_cursor(
+        self, *, project_id: str, task_id: str, consumer_id: str
+    ) -> dict[str, Any] | None:
+        """Return only the cursor owned by the exact project/task/consumer."""
+
+        row = self._conn.execute(
+            "SELECT * FROM context_cursors "
+            "WHERE project_id = ? AND task_id = ? AND consumer_id = ?",
+            (project_id, task_id, consumer_id),
+        ).fetchone()
+        return self._context_cursor_from_row(row) if row else None
+
+    @_serialized
+    def upsert_context_cursor(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Persist identity/event positions, never authoritative content."""
+
+        now = utc_now_iso()
+        payload = {
+            "project_id": row["project_id"],
+            "task_id": row["task_id"],
+            "consumer_id": row["consumer_id"],
+            "tree_sha": row["tree_sha"],
+            "policy_digest": row["policy_digest"],
+            "task_contract_digest": row["task_contract_digest"],
+            "identity_fingerprint": row["identity_fingerprint"],
+            "bundle_identity": json.dumps(
+                row["bundle_identity"], sort_keys=True, separators=(",", ":")
+            ),
+            "preserved_policy_identity": json.dumps(
+                row["preserved_policy_identity"], sort_keys=True, separators=(",", ":")
+            ),
+            "delivered_task_identities": json.dumps(
+                row.get("delivered_task_identities", {}), sort_keys=True, separators=(",", ":")
+            ),
+            "delivered_event_positions": json.dumps(
+                row.get("delivered_event_positions", {}), sort_keys=True, separators=(",", ":")
+            ),
+            "delivered_ancestry_identity": row.get("delivered_ancestry_identity", ""),
+            "last_event_id": int(row.get("last_event_id", 0)),
+            "last_outcome": row.get("last_outcome", "DELIVERED"),
+            "last_attempted_characters": int(row.get("last_attempted_characters", 0)),
+            "inspection_summary": json.dumps(
+                row.get("inspection_summary", {}), sort_keys=True, separators=(",", ":")
+            ),
+            "created_at": row.get("created_at") or now,
+            "updated_at": now,
+        }
+        self._conn.execute(
+            "INSERT INTO context_cursors "
+            "(project_id, task_id, consumer_id, tree_sha, policy_digest, task_contract_digest, "
+            "identity_fingerprint, bundle_identity, preserved_policy_identity, "
+            "delivered_task_identities, delivered_event_positions, "
+            "delivered_ancestry_identity, last_event_id, "
+            "last_outcome, last_attempted_characters, inspection_summary, created_at, updated_at) "
+            "VALUES (:project_id, :task_id, :consumer_id, :tree_sha, :policy_digest, "
+            ":task_contract_digest, :identity_fingerprint, :bundle_identity, "
+            ":preserved_policy_identity, :delivered_task_identities, :delivered_event_positions, "
+            ":delivered_ancestry_identity, :last_event_id, :last_outcome, "
+            ":last_attempted_characters, :inspection_summary, :created_at, :updated_at) "
+            "ON CONFLICT(project_id, task_id, consumer_id) DO UPDATE SET "
+            "tree_sha=excluded.tree_sha, policy_digest=excluded.policy_digest, "
+            "task_contract_digest=excluded.task_contract_digest, "
+            "identity_fingerprint=excluded.identity_fingerprint, "
+            "bundle_identity=excluded.bundle_identity, "
+            "preserved_policy_identity=excluded.preserved_policy_identity, "
+            "delivered_task_identities=excluded.delivered_task_identities, "
+            "delivered_event_positions=excluded.delivered_event_positions, "
+            "delivered_ancestry_identity=excluded.delivered_ancestry_identity, "
+            "last_event_id=excluded.last_event_id, last_outcome=excluded.last_outcome, "
+            "last_attempted_characters=excluded.last_attempted_characters, "
+            "inspection_summary=excluded.inspection_summary, "
+            "updated_at=excluded.updated_at",
+            payload,
+        )
+        self._conn.commit()
+        stored = self._conn.execute(
+            "SELECT * FROM context_cursors "
+            "WHERE project_id = ? AND task_id = ? AND consumer_id = ?",
+            (payload["project_id"], payload["task_id"], payload["consumer_id"]),
+        ).fetchone()
+        if stored is None:  # pragma: no cover - insert/select share one serialized connection
+            raise RuntimeError("context cursor write completed without a readable row")
+        return self._context_cursor_from_row(stored)
 
     # --------------------------------------------------------------- runbooks
 

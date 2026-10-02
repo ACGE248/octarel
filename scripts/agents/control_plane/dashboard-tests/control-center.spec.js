@@ -580,11 +580,52 @@ test('Runs uses one shared Run Detail surface with recorded execution events', a
   await expect(detail).toContainText('NOT_REPORTED');
   await expect(detail).toContainText('Unsupported');
   await expect(detail).toContainText('DERIVED');
+  const context = detail.locator('.run-detail-context');
+  await expect(detail).toContainText('Context inspector');
+  await expect(context).toContainText('Authoritative bundle size');
+  await expect(context).toContainText('Incremental size');
+  await expect(context).toContainText('Event window truncated');
+  await expect(context).toContainText('Measured 0 newly relevant tasks.');
+  await expect(context).toContainText('Measured 0 evicted event positions.');
+  const measuredZero = context.locator('dt', { hasText: 'Task additions' }).locator('xpath=following-sibling::dd[1]');
+  const unknownInvalidation = context.locator('dt', { hasText: 'Invalidated component' }).locator('xpath=following-sibling::dd[1]');
+  await expect(measuredZero).toContainText('0');
+  await expect(measuredZero).toContainText('MEASURED');
+  await expect(unknownInvalidation).toContainText('UNKNOWN');
+  await expect(measuredZero).not.toHaveText(await unknownInvalidation.innerText());
+  const savings = context.locator('dt', { hasText: 'Context savings' }).locator('xpath=following-sibling::dd[1]');
+  await expect(savings).toContainText('DERIVED');
+  await expect(context.locator('.context-savings-formula')).toContainText(
+    'full_refresh_characters - required_incremental_characters'
+  );
+  await expect(context).toContainText('Graphify supplied');
+  await expect(context).toContainText('Yes');
+  await expect(context).toContainText('READY');
+  await expect(context).toContainText('Graphify is advisory');
+  await expect(context.locator('.context-truncated')).toContainText('Ancestry truncated');
+  const source = context.getByRole('link', {
+    name: 'Open source reference https://github.com/ACGE248/octarel/issues/34',
+  });
+  await expect(source).toHaveAttribute('href', 'https://github.com/ACGE248/octarel/issues/34');
+  await expect(context).not.toContainText('FIXTURE_RAW_COMPOSED_PROMPT_MUST_NOT_APPEAR');
+  await expect(context).not.toContainText('FIXTURE_GRAPH_TEXT_MUST_NOT_APPEAR');
   const fresh = detail.getByRole('button', { name: 'Start fresh next attempt' });
   await expect(fresh).toBeDisabled();
   await expect(detail.locator('.run-detail-session-reason')).toContainText('--no-session-persistence');
   await expect(detail).toContainText('lease.acquired');
   await expect(detail).toContainText('control_plane.execution_lease · MEASURED · #1');
+});
+
+test('Run Detail renders an unknown context saving as UNKNOWN rather than zero', async ({ page }) => {
+  await navTo(page, 'view-runs');
+  await page.locator('[data-runbook-id="fx-rb-fallback"]').getByRole(
+    'button', { name: 'View detail for Fixture automatic fallback run' }
+  ).click();
+  const context = page.locator('#run-detail .run-detail-context');
+  const savings = context.locator('dt', { hasText: 'Context savings' }).locator('xpath=following-sibling::dd[1]');
+  await expect(savings).toContainText('UNKNOWN');
+  await expect(savings).not.toContainText(/^0/);
+  await expect(context.locator('.context-savings-formula')).toContainText('full_refresh_characters=UNKNOWN');
 });
 
 test('Execution Events filters typed classes and opens bounded evidence', async ({ page }) => {

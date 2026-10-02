@@ -1283,6 +1283,15 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .run-detail-session-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: -4px 0 16px; min-width: 0; }
 .run-detail-session-control .hint { flex: 1 1 220px; margin: 0; overflow-wrap: anywhere; }
 .run-detail-session-control button { flex: 0 1 auto; max-width: 100%; white-space: normal; }
+.run-detail-context { margin-bottom: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); }
+.context-inspector-facts { margin-bottom: 10px; }
+.context-savings-formula { margin: 0 0 6px; overflow-wrap: anywhere; }
+.context-graphify-note { margin: 0 0 12px; }
+.context-ancestry h5 { margin: 0 0 8px; }
+.context-ancestry-list { display: grid; gap: 6px; margin: 0; padding-left: 18px; font-size: 12px; }
+.context-ancestry-list li { overflow-wrap: anywhere; }
+.context-reference-kind { display: inline-block; min-width: 96px; margin-right: 8px; color: var(--muted); }
+.context-truncated { margin: 10px 0 0; color: var(--warn); font-size: 12px; }
 .run-detail-events { max-height: 440px; }
 .events-list li.event-group-lifecycle { border-left: 3px solid var(--ok); padding-left: 8px; }
 .events-list li.event-group-model_tool { border-left: 3px solid var(--info); padding-left: 8px; }

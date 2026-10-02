@@ -4614,6 +4614,119 @@
     }
   }
 
+  function contextFact(label, cell, formatter = (value) => String(value)) {
+    const fact = cell || { value: null, class: "UNKNOWN" };
+    const known = ["MEASURED", "DERIVED"].includes(fact.class)
+      && fact.value !== null && fact.value !== undefined;
+    return [
+      el("dt", { text: label }),
+      el("dd", { class: "session-fact context-fact" }, [
+        el("span", { class: "session-fact-value", text: known ? formatter(fact.value) : "UNKNOWN" }),
+        el("span", { class: "session-fact-class", text: fact.class || "UNKNOWN" }),
+      ]),
+    ];
+  }
+
+  function renderContextInspector(target, payload) {
+    target.innerHTML = "";
+    const facts = el("dl", { class: "run-detail-facts context-inspector-facts" });
+    [
+      ...contextFact("Bundle identity", payload.bundle_identity),
+      ...contextFact("Authoritative bundle size", payload.bundle_characters, (value) => `${value} characters`),
+      ...contextFact("Incremental size", payload.incremental_characters, (value) => `${value} characters`),
+      ...contextFact("Task additions", payload.task_additions),
+      ...contextFact("Event additions", payload.event_additions),
+      ...contextFact("Event window truncated", payload.events_truncated, (value) => value ? "Yes" : "No"),
+      ...contextFact("Ancestry additions", payload.ancestry_additions),
+      ...contextFact("Invalidated component", payload.invalidation_component),
+      ...contextFact("Graphify supplied", payload.graphify_supplied, (value) => value ? "Yes" : "No"),
+      ...contextFact("Graphify status", payload.graphify_status),
+    ].forEach((node) => facts.appendChild(node));
+    const savings = payload.context_savings_characters || { value: null, class: "UNKNOWN" };
+    contextFact("Context savings", savings, (value) => `${value} characters`).forEach((node) => facts.appendChild(node));
+    target.append(
+      facts,
+      el("p", {
+        class: "hint context-savings-formula",
+        text: `DERIVED formula: ${savings.formula || "full_refresh_characters - required_incremental_characters"}. `
+          + `Inputs: full_refresh_characters=${savings.inputs?.full_refresh_characters ?? "UNKNOWN"}; `
+          + `required_incremental_characters=${savings.inputs?.required_incremental_characters ?? "UNKNOWN"}.`,
+      }),
+      el("p", {
+        class: "hint context-graphify-note",
+        text: "Graphify is advisory and never substitutes for authoritative policy or task contracts.",
+      }),
+    );
+    const newlyRelevant = payload.newly_relevant_tasks || [];
+    const admissionWrap = el("div", { class: "context-ancestry" }, [
+      el("h5", { text: "Newly relevant tasks" }),
+    ]);
+    if (!newlyRelevant.length) {
+      admissionWrap.appendChild(el("p", { class: "hint", text: "Measured 0 newly relevant tasks." }));
+    } else {
+      const list = el("ul", { class: "context-ancestry-list" });
+      newlyRelevant.forEach((item) => {
+        list.appendChild(el("li", {}, [
+          el("span", { class: "context-reference-kind", text: item.task_id }),
+          el("span", { text: item.reason }),
+        ]));
+      });
+      admissionWrap.appendChild(list);
+    }
+    target.appendChild(admissionWrap);
+    const evictedPositions = payload.evicted_event_positions || [];
+    const evictionWrap = el("div", { class: "context-ancestry" }, [
+      el("h5", { text: "Evicted event positions" }),
+    ]);
+    if (!evictedPositions.length) {
+      evictionWrap.appendChild(el("p", { class: "hint", text: "Measured 0 evicted event positions." }));
+    } else {
+      const list = el("ul", { class: "context-ancestry-list" });
+      evictedPositions.forEach((item) => {
+        list.appendChild(el("li", {}, [
+          el("span", { class: "context-reference-kind", text: item.task_id }),
+          el("span", { text: item.reason }),
+        ]));
+      });
+      evictionWrap.appendChild(list);
+    }
+    target.appendChild(evictionWrap);
+    const ancestry = payload.ancestry || {};
+    const ancestryWrap = el("div", { class: "context-ancestry" }, [
+      el("h5", { text: "Ancestry & source references" }),
+    ]);
+    if (ancestry.class !== "MEASURED") {
+      ancestryWrap.appendChild(el("p", { class: "hint", text: "Ancestry node count is UNKNOWN." }));
+    } else if (!(ancestry.nodes || []).length) {
+      ancestryWrap.appendChild(el("p", { class: "hint", text: "Measured 0 ancestry/source nodes." }));
+    } else {
+      const list = el("ul", { class: "context-ancestry-list" });
+      ancestry.nodes.forEach((node) => {
+        const content = node.href
+          ? el("a", {
+            href: node.href,
+            target: "_blank",
+            rel: "noreferrer",
+            "aria-label": `Open source reference ${node.reference}`,
+            text: node.reference,
+          })
+          : el("span", { text: node.reference });
+        list.appendChild(el("li", {}, [el("span", { class: "context-reference-kind", text: node.kind }), content]));
+      });
+      ancestryWrap.appendChild(list);
+    }
+    if (ancestry.truncated === true) {
+      ancestryWrap.appendChild(el("p", {
+        class: "context-truncated",
+        role: "status",
+        text: "Ancestry truncated: the explicit ancestry node limit was reached.",
+      }));
+    } else if (ancestry.truncated === null || ancestry.truncated === undefined) {
+      ancestryWrap.appendChild(el("p", { class: "hint", text: "Ancestry truncation is UNKNOWN." }));
+    }
+    target.appendChild(ancestryWrap);
+  }
+
   function renderRunDetail(run) {
     const root = document.getElementById("run-detail");
     if (!root) return;
@@ -4666,6 +4779,9 @@
     const usageEvidence = el("div", { class: "run-detail-usage" }, [
       el("p", { class: "hint", text: "Loading durable usage evidence…" }),
     ]);
+    const contextEvidence = el("div", { class: "run-detail-context" }, [
+      el("p", { class: "hint", text: "Loading recorded context evidence…" }),
+    ]);
     root.append(
       el("header", { class: "run-detail-head" }, [
         el("div", {}, [el("span", { class: "eyebrow", text: "Run Detail" }), el("h3", { text: run.name })]),
@@ -4673,6 +4789,8 @@
       ]),
       facts,
       sessionControl,
+      el("h4", { text: "Context inspector" }),
+      contextEvidence,
       el("h4", { text: "Usage & budget evidence" }),
       usageEvidence,
       el("h4", { text: "Execution timeline" })
@@ -4711,6 +4829,23 @@
     } else {
       usageEvidence.innerHTML = "";
       usageEvidence.appendChild(el("p", { class: "hint", text: "Usage evidence is NOT_REPORTED for this run." }));
+    }
+
+    if (taskRef && worker) {
+      getJSON(`/api/context-inspector/${encodeURIComponent(taskRef)}/${encodeURIComponent(worker)}`).then((payload) => {
+        if (root.dataset.runId !== run.id) return;
+        renderContextInspector(contextEvidence, payload);
+      }).catch(() => {
+        if (root.dataset.runId !== run.id) return;
+        contextEvidence.innerHTML = "";
+        contextEvidence.appendChild(el("p", {
+          class: "hint",
+          text: "Context evidence is UNKNOWN because the read failed.",
+        }));
+      });
+    } else {
+      contextEvidence.innerHTML = "";
+      contextEvidence.appendChild(el("p", { class: "hint", text: "Context evidence is NOT_REPORTED for this run." }));
     }
 
     if (!taskRef || !worker) return;
