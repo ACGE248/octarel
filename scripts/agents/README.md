@@ -432,6 +432,13 @@ under `Test gaps` when a counterfactual would decide the verdict. An eligible te
 a new review dispatch presents the result. This prompt is descriptive only: `.opencode/agents/reviewer.md` and
 provider-native sandboxes remain the enforcement boundary and their allowlists are unchanged.
 
+ENG-AO-15 makes the whole-worktree `session` verb write-capable-only, matching its documented contract. Admission
+rejects every read-only worker before command construction under both the standard and unattended profiles. As a
+second, independent layer, `run_delegation` and `run_session` now share one worktree-change classifier: if a
+read-only worker ever reaches completion and changed any tracked/unignored path, the run sets the typed
+`read_only_violation` flag and fails as `READ_ONLY_VIOLATION`. This defense does not rely on prose or provider
+boundary output. Authorized changes from a write-capable session remain ordinary successful changes.
+
 ENG-AO-16 makes unattended write support a separate required registry fact. Every write/focused-edit worker
 declares `unattended_write.supported`, an exact `permission_profile` when supported, and a concrete reason.
 The typed adapter contract exposes the same object. `session`, managed dispatch, Quick Start, retry, and fallback
