@@ -49,6 +49,19 @@ are read-only (`plan`/`sandbox`/`read-only` as declared). An implementer must
 not be its own final independent reviewer. Exact-tree high-risk gates reject
 Claude/Anthropic and Codex as the independent review provider.
 
+Reviewer command execution is a separate typed capability. Every worker serving `diff-review` or
+`doc-drift-review` declares one `review_execution` object in `workers.json`; `AdapterCapabilities.review_execution`
+exposes the same facts without probing or inference. The object names the standard permission profile, execution
+mode, test-execution support, guaranteed read-only command prefixes, and reason. Current review routes do not
+support test execution. OpenCode reviewers guarantee only `git diff`, `git status`, `git show`, and `rg`; Grok
+review receives prompt context with tools disabled; Codex and Antigravity use their declared read-only sandboxes,
+with no shell/test command guarantee. The disabled Antigravity diff reviewer reports `unavailable`.
+
+Every review prompt carries these facts. A reviewer reasons from the bounded diff and supplied evidence and never
+runs an unsupported test or counterfactual. If an unsupplied counterfactual decides the verdict, the reviewer names
+the exact command under `Test gaps`; an eligible orchestrator/test route runs it and a subsequent review receives
+the redacted result as caller/orchestrator evidence. Prompt guidance never widens the native preset or sandbox.
+
 Unattended write eligibility is separately declared for every write/focused-edit worker and exposed through
 `AdapterCapabilities.unattended_write`. A `session` launch, managed dispatch, Quick Start, retry, and automatic
 fallback all require that fact and its exact permission profile; ordinary write capability is insufficient.

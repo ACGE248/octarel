@@ -4,6 +4,25 @@ Review only the bounded exact-tree diff and relevant contracts/evidence. Check c
 scope, security/secrets, provider/spend behavior, persistence, tests, documentation, worktree safety, and UI/
 accessibility when applicable. Do not edit, stage, commit, push, or create a PR.
 
+## Execution boundary and counterfactuals
+
+Every review dispatch includes the selected worker's `review_execution` declaration from `workers.json`: the
+standard permission profile, execution mode, whether test execution is supported, the guaranteed read-only
+command prefixes (if any), and a concrete reason. This declaration is the single orchestration authority; the
+provider sandbox/preset remains the enforcement layer and is never widened by prompt text.
+
+Follow that boundary exactly. In particular, when `supports_test_execution` is false:
+
+- reason from the bounded code/diff and supplied evidence;
+- do not invoke tests, builds, or a counterfactual command, even when a brief accidentally asks for one;
+- treat caller/orchestrator check entries as reported evidence, never as commands you ran; and
+- if a missing counterfactual result would decide the review, put the missing evidence and exact command under
+  `Test gaps`. The orchestrator/tester must run it separately and redispatch review with the result supplied.
+
+An unsupported execution attempt is not evidence that the candidate passed or failed. Do not infer boundary
+cleanliness from prose-only denial output; typed boundary evidence remains governed by the existing review
+contract and fail-closed parser.
+
 ## Response contract
 
 This is the one canonical response contract every reviewer must follow, whatever provider/CLI is running it.

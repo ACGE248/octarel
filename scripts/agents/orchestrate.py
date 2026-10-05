@@ -32,7 +32,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import model_catalog, native_models, subagents
-from .adapter_contract import capabilities_for, classify_finished_run
+from .adapter_contract import (
+    capabilities_for,
+    classify_finished_run,
+    review_execution_guidance,
+)
 from .graph_context import build_graph_context
 from .manifest import (
     RESULT_BLOCKED,
@@ -387,6 +391,10 @@ def run_delegation(
     bounded_prompt = _attach_graph_context(
         bundle.prompt, root=root, seeds=resolved_scopes, project_id=project_id, policy_manifest=policy_manifest
     ) + task_prompt
+    adapter_capabilities = capabilities_for(worker)
+    review_guidance = review_execution_guidance(adapter_capabilities.review_execution, tests_or_checks or ())
+    if review_guidance:
+        bounded_prompt += "\n\n" + review_guidance
     bot_plan, bot_policy_prompt = _plan_bots(
         registry=registry, root=root, worker=worker, task_class=bot_task_class, scope_paths=resolved_scopes,
         objective=user_prompt, contract_paths=contract_paths, policy_manifest=policy_manifest,
@@ -1011,7 +1019,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--check",
         action="append",
         default=[],
-        help="test/check the worker was asked to run (repeatable; recorded in the manifest)",
+        help=(
+            "test/check request or result evidence (repeatable; review workers receive it as caller/orchestrator "
+            "evidence, never as a command to execute; recorded in the manifest)"
+        ),
     )
     p_run.add_argument(
         "--scope",
