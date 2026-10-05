@@ -27,6 +27,7 @@ from scripts.agents.manifest import (
 from scripts.agents.redaction import PLACEHOLDER, redact_command, redact_text
 from scripts.agents.registry import REVIEW_ROLES, Registry, RegistryError, load_registry
 from scripts.agents.runner import (
+    first_structured_result,
     run_worker_process,
     structured_actual_model,
     structured_actual_model_report,
@@ -1029,6 +1030,44 @@ def test_structured_cancelled_result_is_failure():
 
 
 @pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"is_error": True, "result": "provider failed"}, "provider failed"),
+        ({"isError": True}, "structured worker result reported an error"),
+        ({"stopReason": "cancelled"}, "structured worker result reported stopReason=cancelled"),
+        ({"subtype": "failed"}, "structured worker result reported subtype=failed"),
+        ({"status": "SUCCESS", "response": ""}, "structured worker result contained an empty response"),
+    ],
+)
+def test_structured_failure_reads_a_result_after_diagnostic_preamble(payload, expected):
+    output = "starting worker...\n" + json.dumps(payload)
+    assert first_structured_result(output) == payload
+    assert structured_failure(output) == expected
+
+
+def test_structured_result_survives_trailing_diagnostic_prose():
+    payload = {"is_error": True, "result": "provider failed after launch"}
+    output = "jetski: initializing\n" + json.dumps(payload) + "\ntransport closed"
+    assert first_structured_result(output) == payload
+    assert structured_failure(output) == "provider failed after launch"
+
+
+def test_last_recognized_result_wins_across_multiple_structured_records():
+    progress = {"type": "progress", "message": "starting"}
+    stale = {"is_error": True, "result": "intermediate failure"}
+    final = {"stopReason": "complete", "result": "finished"}
+    output = "\n".join(json.dumps(value) for value in (progress, stale, final))
+    assert first_structured_result(output) == final
+    assert structured_failure(output) is None
+
+
+def test_json_example_embedded_in_model_prose_is_not_a_transport_result():
+    output = 'The reviewed code includes this example: {"is_error":true,"result":"not transport"}'
+    assert first_structured_result(output) is None
+    assert structured_failure(output) is None
+
+
+@pytest.mark.parametrize(
     "output",
     [
         "The requested command was denied in an earlier example; I did not invoke a tool.",
@@ -1217,6 +1256,7 @@ def test_structured_empty_response_is_failure():
 def test_structured_actual_model_prefers_reported_identifier():
     output = '{"modelUsage":{"grok-4.6-build":{"modelCalls":1}}}'
     assert structured_actual_model(output, "grok-4.6") == "grok-4.6-build"
+    assert structured_actual_model("diagnostic\n" + output, "grok-4.6") == "grok-4.6-build"
     assert structured_actual_model("plain output", "requested-model") == "requested-model"
 
 
