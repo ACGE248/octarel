@@ -566,8 +566,11 @@ the ENG-PC-04 event stream; there is no parallel approval history.
 The server derives risk, safe impact summary, selected-project attribution and
 an action-specific state fingerprint. Resolution uses `BEGIN IMMEDIATE` plus a
 `PENDING` compare-and-swap, re-derives current classification/state, and calls
-only the fixed handler mapped to that class. Expired, changed, cross-project or
-already-resolved requests fail closed. Client `safe`/`destructive`/`risk`
+only the fixed handler mapped to that class. The cleanup handler pins the exact
+server-derived project/root/path set into the removal operation, and the
+premium override compares and writes runbook/usage state in one immediate
+transaction; post-claim changes fail safely. Expired, changed, cross-project
+or already-resolved requests fail closed. Client `safe`/`destructive`/`risk`
 claims and arbitrary commands are rejected. Approval never enables an API
 credential or paid fallback, clears a provider/budget block, weakens sandbox or
 ownership proof, or replaces deterministic review/gate policy. See
@@ -578,8 +581,10 @@ decision classes directly: confirmed finished-clean worktree cleanup, premium
 route override, and authenticated remote runtime start/stop/restart (including
 the legacy app-lifecycle endpoints). Creation has no operational side effect;
 only later approved, current-state-revalidated resolution reaches the existing
-fixed internal handler. Trusted-local runtime controls and direct trusted-local
-CLI commands remain deterministic boundaries rather than routine approvals.
+fixed internal handler. Attention contains pending decisions and cannot lose
+them behind Overview-only advancement rows; terminal outcomes remain in Run
+Detail. Trusted-local runtime controls and direct trusted-local CLI commands
+remain deterministic boundaries rather than routine approvals.
 
 ### Control Center finish (`ENG-AGENT-02-S8`)
 

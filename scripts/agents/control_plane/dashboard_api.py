@@ -2864,11 +2864,7 @@ def create_app(
                 public_approval(row)
                 for row in ctx.state.list_approval_requests(
                     project_id=ctx.selected_project_id,
-                    states=[
-                        _approvals.STATE_PENDING,
-                        _approvals.STATE_EXECUTING,
-                        _approvals.STATE_FAILED_SAFE,
-                    ],
+                    states=[_approvals.STATE_PENDING],
                     limit=100,
                 )
             ]

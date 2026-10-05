@@ -5795,11 +5795,13 @@
     (state.runbooks || []).forEach((r) => {
       const a = r.advancement;
       if (!a) return;
-      if (a.state === "OWNER_DECISION_REQUIRED") add("owner", `Next task for ${r.name}: owner decision`, a.reason);
+      if (a.state === "OWNER_DECISION_REQUIRED") add(
+        "owner", `Next task for ${r.name}: owner decision`, a.reason, { advancementDerived: true },
+      );
       else if (a.state === "BLOCKED") {
         const kind = a.stop_kind === "stale_repository_state" ? "stale"
           : a.stop_kind === "provider_unavailable" ? "quota" : "blocked";
-        add(kind, `Next task for ${r.name}: blocked`, a.reason);
+        add(kind, `Next task for ${r.name}: blocked`, a.reason, { advancementDerived: true });
       }
     });
     // ENG-PC-01 (issue #29): a genuinely stale execution lease (owner pid
@@ -5883,6 +5885,7 @@
 
   function approvalCard(approval, { interactive = false, afterResolve = async () => {} } = {}) {
     const summary = approval.safe_payload_summary || {};
+    const result = approval.result_summary || {};
     const summaryRows = Object.entries(summary)
       .filter(([key]) => !["operation", "impact"].includes(key))
       .flatMap(([key, value]) => [
@@ -5908,6 +5911,11 @@
         el("dt", { text: "Expires" }), el("dd", { text: approval.expires_at }),
         el("dt", { text: "Resolved by" }), el("dd", { text: approval.resolved_by || "NOT_REPORTED" }),
         el("dt", { text: "Resolution" }), el("dd", { text: approval.resolution_note || "NOT_REPORTED" }),
+        ...(approval.result_summary ? [
+          el("dt", { text: "Result" }), el("dd", { text: result.message || "NOT_REPORTED" }),
+          el("dt", { text: "Removed" }), el("dd", { text: String((result.removed || []).length) }),
+          el("dt", { text: "Failed" }), el("dd", { text: String((result.failed || []).length) }),
+        ] : []),
       ]),
     ]);
     if (interactive && approval.state === "PENDING") {
@@ -5969,9 +5977,11 @@
     list.dataset.signature = attentionSignature;
     list.innerHTML = "";
     // The popover keeps one row per /api/attention entry; advancement-derived
-    // rows appear on the Overview card only.
+    // rows appear on the Overview card only. Filter by provenance rather than
+    // slicing by count because derived rows are interleaved before approvals.
     const base = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length + approvalAttention.length;
-    items.slice(0, base).forEach((item) => list.appendChild(attentionRow(item, { action: true })));
+    items.filter((item) => !item.advancementDerived)
+      .forEach((item) => list.appendChild(attentionRow(item, { action: true })));
     const card = document.getElementById("overview-attention-list");
     if (card) {
       card.innerHTML = "";

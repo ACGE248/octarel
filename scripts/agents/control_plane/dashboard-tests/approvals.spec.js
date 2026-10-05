@@ -35,6 +35,28 @@ test('Attention previews impact and Run Detail retains the typed resolution', as
   await expect(detail).toContainText('fixture-operator');
 });
 
+test('Attention popover keeps pending approval controls when advancement adds a derived row', async ({ page }) => {
+  await page.route('**/api/runbooks', async (route) => {
+    const response = await route.fetch();
+    const rows = await response.json();
+    rows[0].advancement = {
+      state: 'OWNER_DECISION_REQUIRED',
+      reason: 'Synthetic advancement row must remain Overview-only',
+    };
+    await route.fulfill({ response, json: rows });
+  });
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15_000 });
+
+  await page.locator('#notif-bell').click();
+  const popoverApproval = page.locator('#attention-list [data-attention-kind="approval"]');
+  await expect(popoverApproval).toBeVisible();
+  await expect(popoverApproval.getByLabel('Approval resolution note')).toBeVisible();
+  await expect(popoverApproval.getByRole('button', { name: 'Approve' })).toBeVisible();
+  await expect(page.locator('#attention-list')).not.toContainText('Synthetic advancement row');
+  await expect(page.locator('#overview-attention-list')).toContainText('Synthetic advancement row');
+});
+
 test('Premium override creates an approval request without claiming routing changed', async ({ page }) => {
   await navTo(page, 'view-providers');
   const routing = page.locator('#usage-routing-body');

@@ -2180,6 +2180,123 @@ class State:
         return Runbook.from_row(dict(row)) if row else None
 
     @_serialized
+    def apply_usage_override(
+        self,
+        runbook_id: str,
+        *,
+        reason: str,
+        default_usage: dict[str, Any],
+        expected_state: dict[str, Any] | None = None,
+    ) -> tuple[Runbook, dict[str, Any]]:
+        """Atomically revalidate and apply one bounded premium-route override.
+
+        An approval passes the server-derived state captured on its immutable
+        request.  ``BEGIN IMMEDIATE`` keeps the comparison and both policy
+        writes in one transaction, so a concurrent runbook/usage mutation
+        cannot land in the old check-then-act window.
+        """
+
+        now = utc_now_iso()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            runbook_row = self._conn.execute(
+                "SELECT * FROM runbooks WHERE id = ?", (runbook_id,)
+            ).fetchone()
+            if runbook_row is None:
+                raise ValueError(f"unknown runbook {runbook_id!r}")
+            usage_row = self._conn.execute(
+                "SELECT * FROM usage_governance WHERE runbook_id = ?", (runbook_id,)
+            ).fetchone()
+            actual_state = {
+                "project_id": runbook_row["project_id"],
+                "runbook_id": runbook_row["id"],
+                "status": runbook_row["status"],
+                "updated_at": runbook_row["updated_at"],
+                "codex_policy": runbook_row["codex_policy"],
+                "codex_auto_eligible": bool(runbook_row["codex_auto_eligible"]),
+                "max_codex_invocations": int(runbook_row["max_codex_invocations"]),
+                "codex_invocations": int(usage_row["codex_invocations"]) if usage_row else 0,
+                "escalation_state": usage_row["escalation_state"] if usage_row else None,
+            }
+            if expected_state is not None and actual_state != expected_state:
+                raise ValueError("approved premium-route state changed before execution")
+
+            max_invocations = max(
+                int(runbook_row["max_codex_invocations"]),
+                actual_state["codex_invocations"] + 1,
+            )
+            self._conn.execute(
+                "UPDATE runbooks SET codex_policy = 'unrestricted', codex_auto_eligible = 1, "
+                "max_codex_invocations = ?, updated_at = ? WHERE id = ?",
+                (max_invocations, now, runbook_id),
+            )
+
+            if usage_row is None:
+                usage = dict(default_usage)
+                usage.update(
+                    codex_policy="unrestricted",
+                    codex_auto_eligible=True,
+                    max_codex_invocations=max_invocations,
+                    escalation_state="operator-override",
+                    escalation_reason=reason,
+                    escalation_history=[
+                        {"kind": "premium-override", "reason": reason, "at": now}
+                    ],
+                )
+                encoded = {
+                    "runbook_id": runbook_id,
+                    "task_id": usage.get("task_id"),
+                    "classification": usage.get("classification", "routine"),
+                    "codex_policy": "unrestricted",
+                    "codex_auto_eligible": 1,
+                    "max_codex_invocations": max_invocations,
+                    "codex_invocations": int(usage.get("codex_invocations", 0)),
+                    "telemetry_quality": usage.get("telemetry_quality", "unknown"),
+                    "input_tokens": usage.get("input_tokens"),
+                    "output_tokens": usage.get("output_tokens"),
+                    "escalation_state": "operator-override",
+                    "escalation_reason": reason,
+                    "route_history": json.dumps(usage.get("route_history", []), sort_keys=True),
+                    "escalation_history": json.dumps(usage["escalation_history"], sort_keys=True),
+                    "context_manifest": json.dumps(usage.get("context_manifest", {}), sort_keys=True),
+                    "updated_at": now,
+                }
+                columns = ", ".join(encoded)
+                placeholders = ", ".join(f":{key}" for key in encoded)
+                self._conn.execute(
+                    f"INSERT INTO usage_governance ({columns}) VALUES ({placeholders})",
+                    encoded,
+                )
+            else:
+                history = json.loads(usage_row["escalation_history"] or "[]")
+                history.append({"kind": "premium-override", "reason": reason, "at": now})
+                self._conn.execute(
+                    "UPDATE usage_governance SET codex_policy = 'unrestricted', "
+                    "codex_auto_eligible = 1, max_codex_invocations = ?, "
+                    "escalation_state = 'operator-override', escalation_reason = ?, "
+                    "escalation_history = ?, updated_at = ? WHERE runbook_id = ?",
+                    (max_invocations, reason, json.dumps(history, sort_keys=True), now, runbook_id),
+                )
+
+            updated_runbook = self._conn.execute(
+                "SELECT * FROM runbooks WHERE id = ?", (runbook_id,)
+            ).fetchone()
+            updated_usage = self._conn.execute(
+                "SELECT * FROM usage_governance WHERE runbook_id = ?", (runbook_id,)
+            ).fetchone()
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+
+        usage = dict(updated_usage)
+        usage["codex_auto_eligible"] = bool(usage["codex_auto_eligible"])
+        for key in ("route_history", "escalation_history", "context_manifest"):
+            usage[key] = json.loads(usage[key])
+        return Runbook.from_row(dict(updated_runbook)), usage
+
+    @_serialized
     def list_runbooks(self, *, project_id: str | None = None) -> list[Runbook]:
         if project_id is not None:
             rows = self._conn.execute(

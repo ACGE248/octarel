@@ -159,6 +159,39 @@ def test_all_five_classes_have_server_derived_risk_and_fixed_payloads(
 
 
 @pytest.mark.parametrize(
+    ("action_type", "payload"),
+    [
+        (
+            approvals.ACTION_DESTRUCTIVE_CLEANUP,
+            {
+                "approved_project_id": "project-a",
+                "approved_project_root": "/caller/chosen",
+                "approved_paths": ["/caller/chosen/worktree"],
+            },
+        ),
+        (
+            approvals.ACTION_METERED_OVERFLOW_ROUTE,
+            {"runbook_id": "run-1", "approved_state": {"status": "safe"}},
+        ),
+    ],
+)
+def test_server_execution_identity_cannot_be_supplied_at_request_creation(
+    tmp_path: Path, action_type: str, payload: dict[str, object]
+) -> None:
+    ctx = _context(tmp_path)
+    _seed_run(ctx)
+    with pytest.raises(approvals.ApprovalError, match="unsupported approval payload"):
+        approvals.create_request(
+            ctx,
+            action_type=action_type,
+            payload=payload,
+            reason="Attempt to choose server-owned execution identity",
+            requested_by="local-operator",
+        )
+    assert ctx.state.list_approval_requests(project_id="project-a") == []
+
+
+@pytest.mark.parametrize(
     "unsafe",
     [
         {"question_ref": "ADR-10", "decision": "token=abcdefghijklmnop"},
@@ -546,7 +579,17 @@ def test_confirmed_cleanup_hands_off_without_removal_until_approved_revalidation
 
     assert resolved.status_code == 200
     assert resolved.json()["state"] == "APPROVED"
-    assert handler_calls == [("worktree_cleanup", {"confirm": True})]
+    assert handler_calls == [
+        (
+            "worktree_cleanup",
+            {
+                "confirm": True,
+                "approved_project_id": "project-a",
+                "approved_project_root": str(tmp_path.resolve()),
+                "approved_paths": [str(Path(eligible_path).resolve())],
+            },
+        )
+    ]
 
 
 def test_steering_cleanup_never_calls_command_handler_before_later_approval(
@@ -611,7 +654,179 @@ def test_steering_cleanup_never_calls_command_handler_before_later_approval(
     assert resolved.status_code == 200
     assert resolved.json()["state"] == "APPROVED"
     assert direct_calls == []
-    assert approved_calls == [("worktree_cleanup", {"confirm": True})]
+    assert approved_calls == [
+        (
+            "worktree_cleanup",
+            {
+                "confirm": True,
+                "approved_project_id": "project-a",
+                "approved_project_root": str(tmp_path.resolve()),
+                "approved_paths": [str(Path(eligible_path).resolve())],
+            },
+        )
+    ]
+
+
+def test_cleanup_project_switch_after_resolution_claim_fails_safe_before_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.agents.control_plane import operations
+
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    ctx = _context(root_a)
+    ctx.state.upsert_project(
+        contract_to_row(
+            ProjectContract(project_id="project-b", display_name="project-b", local_repo_root=root_b)
+        )
+    )
+    eligible_path = root_a / "finished-clean"
+    rows = [
+        {
+            "path": str(eligible_path),
+            "branch": "eng/finished-clean",
+            "classification": "FINISHED_CLEAN",
+            "dirty": False,
+            "cleanup_eligible": True,
+            "canonical_checkout": False,
+        }
+    ]
+    monkeypatch.setattr(operations, "refresh_worktree_statuses", lambda _ctx: rows)
+    removals: list[list[str]] = []
+    monkeypatch.setattr(
+        operations,
+        "_run",
+        lambda argv, *_args, **_kwargs: removals.append(argv)
+        or SimpleNamespace(returncode=0, stderr="", stdout=""),
+    )
+    created = approvals.create_request(
+        ctx,
+        action_type=approvals.ACTION_DESTRUCTIVE_CLEANUP,
+        payload={},
+        reason="Remove only the current project preview",
+        requested_by="local-operator",
+    )
+    original_claim = ctx.state.claim_approval_resolution
+
+    def switch_after_claim(*args, **kwargs):
+        claimed = original_claim(*args, **kwargs)
+        select_project(ctx.state, "project-b")
+        return claimed
+
+    monkeypatch.setattr(ctx.state, "claim_approval_resolution", switch_after_claim)
+    with pytest.raises(approvals.ApprovalConflict, match="failed safely"):
+        approvals.resolve_request(
+            ctx,
+            approval_id=created["id"],
+            decision="APPROVE",
+            resolved_by="local-operator",
+            resolution_note="Apply the approved Project A preview",
+        )
+
+    stored = ctx.state.get_approval_request(created["id"], project_id="project-a")
+    assert stored["state"] == "FAILED_SAFE"
+    assert "project selection" in stored["result_summary"]["message"]
+    assert removals == []
+
+
+def test_cleanup_removal_failure_is_failed_safe_and_terminal_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.agents.control_plane import operations
+
+    ctx = _context(tmp_path)
+    eligible_path = tmp_path / "finished-clean"
+    rows = [
+        {
+            "path": str(eligible_path),
+            "branch": "eng/finished-clean",
+            "classification": "FINISHED_CLEAN",
+            "dirty": False,
+            "cleanup_eligible": True,
+            "canonical_checkout": False,
+        }
+    ]
+    monkeypatch.setattr(operations, "refresh_worktree_statuses", lambda _ctx: rows)
+
+    def fail_remove(argv, *_args, **_kwargs):
+        if "remove" in argv:
+            return SimpleNamespace(returncode=1, stderr="worktree is unexpectedly busy", stdout="")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(operations, "_run", fail_remove)
+    monkeypatch.setattr(operations, "refresh_repository_health", lambda _ctx: {})
+    created = approvals.create_request(
+        ctx,
+        action_type=approvals.ACTION_DESTRUCTIVE_CLEANUP,
+        payload={},
+        reason="Remove the server-proven finished worktree",
+        requested_by="local-operator",
+    )
+    with pytest.raises(approvals.ApprovalConflict, match="failed safely"):
+        approvals.resolve_request(
+            ctx,
+            approval_id=created["id"],
+            decision="APPROVE",
+            resolved_by="local-operator",
+            resolution_note="Apply the current cleanup preview",
+        )
+
+    stored = ctx.state.get_approval_request(created["id"])
+    assert stored["state"] == "FAILED_SAFE"
+    assert stored["result_summary"]["ok"] is False
+    assert stored["result_summary"]["failed"] == [
+        {
+            "path": str(eligible_path.resolve()),
+            "classification": "FINISHED_CLEAN",
+            "reason": "worktree is unexpectedly busy",
+        }
+    ]
+    client = TestClient(create_app(ctx, roadmap_path=tmp_path / "missing.md"))
+    assert client.get("/api/attention").json()["approvals"] == []
+    assert client.get("/api/approvals").json()[0]["state"] == "FAILED_SAFE"
+
+
+def test_route_state_change_after_resolution_claim_fails_safe_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = _context(tmp_path)
+    runbook = _seed_run(ctx)
+    created = approvals.create_request(
+        ctx,
+        action_type=approvals.ACTION_METERED_OVERFLOW_ROUTE,
+        payload={"runbook_id": runbook.id},
+        reason="Authorize one bounded premium invocation",
+        requested_by="local-operator",
+        task_id=runbook.task_id,
+        run_id=runbook.id,
+    )
+    original_claim = ctx.state.claim_approval_resolution
+
+    def mutate_after_claim(*args, **kwargs):
+        claimed = original_claim(*args, **kwargs)
+        changed = ctx.state.get_runbook(runbook.id)
+        changed.status = "PAUSED"
+        ctx.state.upsert_runbook(changed)
+        return claimed
+
+    monkeypatch.setattr(ctx.state, "claim_approval_resolution", mutate_after_claim)
+    with pytest.raises(approvals.ApprovalConflict, match="failed safely"):
+        approvals.resolve_request(
+            ctx,
+            approval_id=created["id"],
+            decision="APPROVE",
+            resolved_by="local-operator",
+            resolution_note="Apply only if the approved route state remains current",
+        )
+
+    stored = ctx.state.get_approval_request(created["id"])
+    assert stored["state"] == "FAILED_SAFE"
+    assert "premium-route state changed" in stored["result_summary"]["message"]
+    unchanged = ctx.state.get_runbook(runbook.id)
+    assert unchanged.status == "PAUSED"
+    assert unchanged.codex_policy == "conserve"
+    assert unchanged.codex_auto_eligible is False
+    assert ctx.state.get_usage_governance(runbook.id) is None
 
 
 def test_remote_sensitive_handler_rechecks_supervisor_and_fails_safe(

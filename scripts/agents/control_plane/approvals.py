@@ -161,13 +161,30 @@ def _decision_scope(
     *,
     action_type: str,
     raw_payload: Mapping[str, Any] | None,
+    revalidation: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     if action_type == ACTION_DESTRUCTIVE_CLEANUP:
-        body = _payload(raw_payload, set())
+        # The public creation contract accepts no cleanup target.  Resolution
+        # receives the server-derived execution identity persisted on the row,
+        # but discards and re-derives it below so a client can never choose a
+        # project root or worktree path.
+        _payload(
+            raw_payload,
+            {"approved_project_id", "approved_project_root", "approved_paths"}
+            if revalidation
+            else set(),
+        )
         from .operations import refresh_worktree_statuses
 
         rows = refresh_worktree_statuses(ctx)
         eligible = [row for row in rows if row.get("cleanup_eligible") and not row.get("canonical_checkout")]
+        project_id = _selected_project_id(ctx)
+        approved_paths = sorted(str(row.get("path")) for row in eligible)
+        body = {
+            "approved_project_id": project_id,
+            "approved_project_root": str(ctx.project_root.resolve()),
+            "approved_paths": approved_paths,
+        }
         state = {
             "eligible": [
                 {
@@ -192,15 +209,18 @@ def _decision_scope(
         return body, summary, state
 
     if action_type == ACTION_METERED_OVERFLOW_ROUTE:
-        body = _payload(raw_payload, {"runbook_id"})
+        body = _payload(
+            raw_payload,
+            {"runbook_id", "approved_state"} if revalidation else {"runbook_id"},
+        )
         runbook_id = _stable_token("runbook_id", body.get("runbook_id"))
         project_id = _selected_project_id(ctx)
         runbook = ctx.state.get_runbook(runbook_id)
         if runbook is None or runbook.project_id != project_id:
             raise ApprovalError("route-override run does not belong to the selected project")
         usage = ctx.state.get_usage_governance(runbook_id) or {}
-        body = {"runbook_id": runbook_id}
         state = {
+            "project_id": runbook.project_id,
             "runbook_id": runbook.id,
             "status": runbook.status,
             "updated_at": runbook.updated_at,
@@ -210,6 +230,7 @@ def _decision_scope(
             "codex_invocations": int(usage.get("codex_invocations", 0)),
             "escalation_state": usage.get("escalation_state"),
         }
+        body = {"runbook_id": runbook_id, "approved_state": state}
         summary = {
             "operation": "Authorize one additional existing premium route invocation",
             "runbook_id": runbook_id,
@@ -305,6 +326,7 @@ def build_plan(
     payload: Mapping[str, Any] | None,
     task_id: str | None,
     run_id: str | None,
+    revalidation: bool = False,
 ) -> ApprovalPlan:
     """Derive classification, impact and current-state identity on the server."""
 
@@ -315,7 +337,10 @@ def build_plan(
     task_scope = _task_scope(ctx, project_id, task_id)
     run_scope = _run_scope(ctx, project_id, run_id)
     normalized, summary, action_state = _decision_scope(
-        ctx, action_type=action_type, raw_payload=payload
+        ctx,
+        action_type=action_type,
+        raw_payload=payload,
+        revalidation=revalidation,
     )
     fingerprint_payload = {
         "project_id": project_id,
@@ -414,14 +439,27 @@ def _execute(ctx: Any, request: Mapping[str, Any], actor: str) -> dict[str, Any]
     action_type = request["action_type"]
     payload = request["action_payload"]
     if action_type == ACTION_DESTRUCTIVE_CLEANUP:
-        result = apply_command(ctx, "worktree_cleanup", confirm=True)
-        return {"ok": result.ok, "message": result.message}
+        result = apply_command(
+            ctx,
+            "worktree_cleanup",
+            confirm=True,
+            approved_project_id=payload["approved_project_id"],
+            approved_project_root=payload["approved_project_root"],
+            approved_paths=payload["approved_paths"],
+        )
+        return {
+            "ok": result.ok,
+            "message": result.message,
+            "removed": (result.data or {}).get("removed", []),
+            "failed": (result.data or {}).get("failed", []),
+        }
     if action_type == ACTION_METERED_OVERFLOW_ROUTE:
         result = apply_command(
             ctx,
             "usage_override",
             runbook_id=payload["runbook_id"],
             reason=request["reason"],
+            expected_state=payload["approved_state"],
         )
         return {"ok": result.ok, "message": result.message}
     if action_type in {
@@ -482,6 +520,7 @@ def resolve_request(
                 payload=current["action_payload"],
                 task_id=current.get("task_id"),
                 run_id=current.get("run_id"),
+                revalidation=True,
             )
         except ApprovalError:
             # Missing/deleted scope or newly ineligible handler state is itself
@@ -525,16 +564,20 @@ def resolve_request(
     if claimed["state"] != STATE_EXECUTING:
         raise ApprovalConflict(f"approval is already {claimed['state']}")
 
+    result: dict[str, Any] | None = None
     try:
         result = _execute(ctx, claimed, resolved_by)
         if not result.get("ok"):
             raise ApprovalError(str(result.get("message") or "typed approval handler failed"))
     except Exception as exc:  # noqa: BLE001 - every handler failure must become FAILED_SAFE
+        failure_summary = dict(result or {})
+        failure_summary["ok"] = False
+        failure_summary["message"] = sanitize_text(str(exc))[:1_000]
         failed = ctx.state.finalize_approval_request(
             approval_id,
             project_id=project_id,
             state=STATE_FAILED_SAFE,
-            result_summary={"ok": False, "message": sanitize_text(str(exc))[:1_000]},
+            result_summary=failure_summary,
         )
         _record_event(ctx, failed, "approval.failed_safe", resolved_by, "approved action failed safely")
         raise ApprovalConflict(f"approved action failed safely: {sanitize_text(str(exc))}") from None

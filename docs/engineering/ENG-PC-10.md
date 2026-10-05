@@ -62,6 +62,15 @@ Resolution follows one fail-closed path:
    as `APPROVED`; a handler refusal becomes `FAILED_SAFE`. A crash cannot make
    the request pending again or authorize a second execution.
 
+The handler boundary repeats the destructive/current-state proof after that
+claim. Cleanup carries a non-public, server-derived project id, resolved
+project root, and exact eligible path set into `cleanup_worktrees`; a project
+switch, target-set change, dirty checkout, or failed removal becomes
+`FAILED_SAFE` and the recorded result lists removals and failures. The premium
+route compares its approved runbook/usage snapshot and writes both rows inside
+one `BEGIN IMMEDIATE` transaction, so a concurrent mutation cannot land
+between comparison and effect.
+
 Expiry and stale-state failures are terminal. The operator creates a fresh
 request from current server state instead of reviving old authority. Every
 request and resolution writes the existing ENG-PC-04 `RunEvent` envelope with
@@ -85,6 +94,12 @@ The route decision deliberately delegates to the existing bounded usage
 override and leaves provider state unchanged. The cleanup and runtime handlers
 re-run their operation-layer proof at execution time even after the approval
 fingerprint matched.
+
+Schema version 7 creates the approval table and triggers through the ordinary
+idempotent schema bootstrap. The older one-time project-adoption migration is
+gated by its dedicated `legacy_project_migration` marker rather than the
+general schema version, so upgrading a version-6 database cannot relabel a
+later invalid `project_id IS NULL` row as OctaScene state.
 
 ## API and Control Center
 
@@ -116,9 +131,10 @@ fingerprint matched.
   eligibility and process identity before using the existing supervisor.
 - Attention shows each pending request with risk, reason, expiry, impact
   preview, note field, and approve/reject controls. Run Detail shows related
-  pending and terminal request/resolution evidence. Both extend the existing
-  responsive Glass Studio structure; no approval page or history store was
-  added.
+  pending and terminal request/resolution evidence, including failed cleanup
+  outcome details. Advancement-derived Overview rows cannot displace approval
+  controls from the Attention popover. Both extend the existing responsive
+  Glass Studio structure; no approval page or history store was added.
 
 Ordinary trusted-local runtime actions intentionally retain their existing
 deterministic confirmation and supervisor safeguards, so normal local work is
@@ -133,13 +149,14 @@ handlers can run.
 Deterministic coverage includes schema/immutability, the exact five-class
 allowlist, client-flag rejection, redaction and safe summaries, expiry,
 changed-state invalidation, concurrent/double resolution, rejection,
-cross-project isolation, verified remote identity/audit, hard-safeguard
-non-bypass, API projections, RunEvent continuity, Attention actions, Run Detail
-resolution history, responsive layout, and the existing state/dashboard/
-runtime-service contracts. No validation path invokes an AI provider or a
-billable route.
+post-claim project/state changes, schema-upgrade non-readoption, failed
+destructive execution, cross-project isolation, verified remote identity/audit,
+hard-safeguard non-bypass, API projections, RunEvent continuity, Attention
+actions, Run Detail resolution history, responsive layout, and the existing
+state/dashboard/runtime-service contracts. No validation path invokes an AI
+provider or a billable route.
 
-Candidate evidence on 2026-10-02:
+Initial candidate evidence on 2026-10-02:
 
 - All 224 focused approval, remote-access, dashboard API, and runtime-service
   tests passed outside the implementation worker's restricted sandbox,
@@ -154,3 +171,10 @@ Candidate evidence on 2026-10-02:
   approval spec passed both desktop-1280 tests: request resolution persisted in
   Run Detail, and Premium override created a pending request without claiming
   routing had already changed.
+
+Post-review focused evidence on 2026-10-05:
+
+- All 175 approval, usage-policy, project-registry, and remote-dashboard tests
+  passed after the handler-bound revalidation fixes.
+- Ruff, JavaScript syntax, and the three-test desktop-1280 approval browser
+  slice passed, including the advancement/Attention displacement regression.

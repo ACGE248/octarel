@@ -754,14 +754,13 @@ def bootstrap_registry(state: State, repo_root: Path | str | None = None) -> dic
 
     octascene = ensure_octascene_project(state, repo_root)
     migration: dict[str, Any] | None = None
-    if octascene is not None and state.schema_version() < CURRENT_SCHEMA_VERSION:
-        # Legacy adoption runs exactly once, gated on the persisted schema
-        # version rather than re-running blindly on every start. An independent
-        # review (Grok/xAI) noted that an unconditional re-run would attribute
-        # *any* later ``project_id IS NULL`` row to OctaScene -- including work
-        # that ran while a different project was selected. After this one-time
-        # migration, a NULL row is a bug in a writer, not something to silently
-        # relabel; every writer is now stamped at creation instead.
+    migration_complete = state.get_control_setting(MIGRATION_MARKER_SETTING) is not None
+    if octascene is not None and not migration_complete:
+        # Legacy adoption runs exactly once, gated on its dedicated durable
+        # marker.  The general schema version advances for later table changes
+        # (including ENG-PC-10), so using it as the adoption marker would rerun
+        # this migration after every version bump and could misattribute a
+        # later buggy NULL row to OctaScene.
         migration = migrate_legacy_state_to_project(state, octascene.project_id)
 
     current = selected_project_id(state)
@@ -773,7 +772,8 @@ def bootstrap_registry(state: State, repo_root: Path | str | None = None) -> dic
             )
             select_project(state, preferred["project_id"])
 
-    # Only record the new schema version once legacy adoption has actually run.
+    # Only record the new schema version once legacy adoption has actually run
+    # (or its dedicated marker proves an earlier version already ran it).
     # An independent review (Grok/xAI) caught that bumping it unconditionally
     # meant a start where the OctaScene checkout could not be resolved (the
     # documented "still start so the operator can fix it" path) would mark the
@@ -781,7 +781,10 @@ def bootstrap_registry(state: State, repo_root: Path | str | None = None) -> dic
     # row as invisible for the life of the database, because the now-gated
     # adoption would never run again. Leaving the version alone lets the next
     # successful start complete the migration.
-    if octascene is not None:
+    if octascene is not None and (
+        migration is not None
+        or state.get_control_setting(MIGRATION_MARKER_SETTING) is not None
+    ):
         state.set_schema_version(CURRENT_SCHEMA_VERSION)
     return {
         "octascene_project_id": octascene.project_id if octascene else None,
