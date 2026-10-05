@@ -859,6 +859,32 @@ def test_read_only_review_can_receive_redacted_scoped_diff(git_repo):
     assert PLACEHOLDER in command
 
 
+def test_grok_review_prompt_always_requires_structured_response_without_caller_wording(git_repo):
+    (git_repo / "seed.txt").write_text("candidate change\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "seed.txt"], check=True)
+    registry = _registry_with(
+        name="grok-build-review",
+        cli_bin="grok-not-installed-for-dry-run",
+    )
+
+    result = _run(
+        registry,
+        git_repo,
+        "grok-build-review",
+        role="diff-review",
+        prompt_args=["review the candidate"],
+        include_diff=True,
+        dry_run=True,
+    )
+
+    prompt = " ".join(result.record.requested_command)
+    assert "For `grok-build-review` only, never use the bare `READY` response option" in prompt
+    assert "Always return the structured four-field shape" in prompt
+    assert "Blockers: None" in prompt
+    assert "Test gaps: None" in prompt
+    assert "standalone `BLOCKED`" in prompt
+
+
 def test_review_prompt_carries_authoritative_execution_boundary_and_check_evidence(git_repo):
     (git_repo / "seed.txt").write_text("candidate change\n")
     subprocess.run(["git", "-C", str(git_repo), "add", "seed.txt"], check=True)
