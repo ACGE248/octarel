@@ -5771,7 +5771,7 @@
     budget_warning: { label: "Budget warning", glyph: "△", tone: "warn", view: "view-providers" },
     budget_block: { label: "Budget hard block", glyph: "■", tone: "err", view: "view-providers" },
     approval: { label: "Typed approval", glyph: "?", tone: "warn", view: "view-runs" },
-    approval_failure: { label: "Approval execution result", glyph: "✕", tone: "err", view: "view-overview" },
+    approval_failure: { label: "Approval execution result", glyph: "✕", tone: "err", view: "view-worktrees" },
   };
 
   function attentionItems(data) {
@@ -6008,7 +6008,7 @@
           await Promise.all([refreshAttention(), refreshEvents(), refreshRunbooks()]);
         })
       );
-    } else if (opts && opts.action && !item.historical) {
+    } else if (opts && opts.action) {
       const go = el("button", { type: "button", class: "attn-action", text: "Open", "aria-label": `Open ${spec.view.replace("view-", "")} for ${spec.label}` });
       go.addEventListener("click", () => { closeAttention(); showView(spec.view); });
       row.appendChild(go);

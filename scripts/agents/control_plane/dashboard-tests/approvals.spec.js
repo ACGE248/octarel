@@ -6,6 +6,10 @@
 import { test, expect } from '@playwright/test';
 import { navTo } from './nav-helper.js';
 
+async function openAttention(page) {
+  await page.locator('.bell-btn:visible').first().click();
+}
+
 test.beforeEach(async ({ page, request }) => {
   const reset = await request.post('/__fixture__/reset');
   expect(reset.ok()).toBeTruthy();
@@ -48,7 +52,7 @@ test('Attention popover keeps pending approval controls when advancement adds a 
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15_000 });
 
-  await page.locator('#notif-bell').click();
+  await openAttention(page);
   const popoverApproval = page.locator('#attention-list [data-attention-kind="approval"]');
   await expect(popoverApproval).toBeVisible();
   await expect(popoverApproval.getByLabel('Approval resolution note')).toBeVisible();
@@ -143,6 +147,7 @@ test('Overview retains failed unscoped cleanup targets and reasons without bell 
   const result = page.locator('#overview-attention-list [data-attention-kind="approval_failure"]');
   await expect(result).toContainText('/fixture/still-busy');
   await expect(result).toContainText('worktree is unexpectedly busy');
-  await page.locator('#notif-bell').click();
+  await expect(result.getByRole('button', { name: 'Open worktrees for Approval execution result' })).toBeVisible();
+  await openAttention(page);
   await expect(page.locator('#attention-list [data-attention-kind="approval_failure"]')).toHaveCount(0);
 });
