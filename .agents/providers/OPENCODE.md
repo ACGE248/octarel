@@ -12,6 +12,9 @@ supplement, and never replace, the configured Gemini/Antigravity/Grok/Codex rout
   `unknown`; none of these enter automatic free fallback. No API-key billing, purchase, or top-up is ever used.
 - **Qualification before trust.** A free model must pass one bounded, cached probe (launch, agent preset, read-only
   permissions, unchanged tree, strict review contract, no billing signal) before it may serve unattended.
+- **Review execution stays bounded.** The review workers' typed `review_execution` declaration mirrors the enforced
+  `reviewer` preset: only `git diff`, `git status`, `git show`, and `rg` are guaranteed; pytest, builds, and other
+  test commands are unsupported. Review prompts describe this boundary and never widen the preset.
 - **Provider diversity holds.** A candidate from the vendor that produced the change is rejected whenever independent
   review is required, even when it is free.
 - **No silent escalation.** A quota/rate/context/outage failure cools that model down so the next attempt uses another

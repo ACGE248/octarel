@@ -24,7 +24,7 @@ from scripts.agents.manifest import (
     write_artifacts,
 )
 from scripts.agents.redaction import PLACEHOLDER, redact_command, redact_text
-from scripts.agents.registry import Registry, RegistryError, load_registry
+from scripts.agents.registry import REVIEW_ROLES, Registry, RegistryError, load_registry
 from scripts.agents.runner import (
     run_worker_process,
     structured_actual_model,
@@ -68,7 +68,61 @@ def test_registry_is_well_formed():
                 assert worker.supports_permission_profile(worker.unattended_write_permission_profile)
             else:
                 assert worker.unattended_write_permission_profile is None
+        if REVIEW_ROLES.intersection(worker.roles):
+            assert worker.review_execution is not None
+            assert worker.review_execution.permission_profile == "standard"
+            assert worker.review_execution.supports_test_execution is False
+            assert worker.review_execution.reason
+        else:
+            assert worker.review_execution is None
     assert registry.intensities == ("low", "medium", "high")
+
+
+def test_review_execution_declarations_match_enforced_opencode_reviewer_allowlist():
+    registry = load_registry()
+    preset = (REPO_ROOT / ".opencode" / "agents" / "reviewer.md").read_text()
+    for name in ("opencode2-gemini-flash-lite-review", "opencode-free-review"):
+        declared = registry.get(name).review_execution
+        assert declared is not None
+        assert declared.mode == "allowlisted-read-only"
+        assert declared.allowed_command_prefixes == ("git diff", "git status", "git show", "rg")
+        for prefix in declared.allowed_command_prefixes:
+            preset_pattern = f"{prefix}*" if " " in prefix else f"{prefix} *"
+            assert f'"{preset_pattern}": allow' in preset
+    assert "pytest" in preset and "Do not invoke" in preset
+
+
+def test_registry_requires_review_execution_for_every_reviewer(tmp_path):
+    raw = json.loads((REPO_ROOT / "scripts" / "agents" / "workers.json").read_text())
+    raw["workers"]["grok-build-review"].pop("review_execution")
+    path = tmp_path / "workers.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(RegistryError, match="must declare a review_execution"):
+        load_registry(path)
+
+
+def test_registry_rejects_review_execution_on_non_review_worker(tmp_path):
+    raw = json.loads((REPO_ROOT / "scripts" / "agents" / "workers.json").read_text())
+    raw["workers"]["grok-build-bot"]["review_execution"] = {
+        "permission_profile": "standard",
+        "mode": "prompt-context-only",
+        "supports_test_execution": False,
+        "allowed_command_prefixes": [],
+        "reason": "invalid test fixture",
+    }
+    path = tmp_path / "workers.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(RegistryError, match="non-review worker.*must not declare"):
+        load_registry(path)
+
+
+def test_registry_rejects_empty_allowlist_for_allowlisted_reviewer(tmp_path):
+    raw = json.loads((REPO_ROOT / "scripts" / "agents" / "workers.json").read_text())
+    raw["workers"]["opencode-free-review"]["review_execution"]["allowed_command_prefixes"] = []
+    path = tmp_path / "workers.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(RegistryError, match="must declare command prefixes"):
+        load_registry(path)
 
 
 def test_opencode2_gemini_flash_lite_route_is_preserved():
@@ -798,6 +852,39 @@ def test_read_only_review_can_receive_redacted_scoped_diff(git_repo):
     assert "scoped diff below" in command
     assert "sk-ABCDEFGHIJKLMNOP1234567890" not in command
     assert PLACEHOLDER in command
+
+
+def test_review_prompt_carries_authoritative_execution_boundary_and_check_evidence(git_repo):
+    (git_repo / "seed.txt").write_text("candidate change\n")
+    subprocess.run(["git", "-C", str(git_repo), "add", "seed.txt"], check=True)
+    result = _run(
+        load_registry(),
+        git_repo,
+        "opencode2-gemini-flash-lite-review",
+        role="diff-review",
+        include_diff=True,
+        dry_run=True,
+        tests_or_checks=[
+            "pytest tests/test_agents_orchestration.py: PASS",
+            "API_TOKEN=super-secret-review-evidence",
+        ],
+    )
+
+    prompt = " ".join(result.record.requested_command)
+    assert "REVIEW EXECUTION CAPABILITY" in prompt
+    assert "Mode: allowlisted-read-only" in prompt
+    assert "Guaranteed read-only command prefixes: `git diff`, `git status`, `git show`, `rg`" in prompt
+    assert "Test execution is not supported for this reviewer" in prompt
+    assert "pytest tests/test_agents_orchestration.py: PASS" in prompt
+    assert "never claim you executed these checks" in prompt
+    assert "exact command the orchestrator should run under Test gaps" in prompt
+    assert "super-secret-review-evidence" not in prompt
+    assert PLACEHOLDER in prompt
+
+
+def test_non_review_prompt_does_not_receive_review_execution_guidance(git_repo):
+    result = _run(load_registry(), git_repo, "antigravity-focused-tests", dry_run=True)
+    assert "REVIEW EXECUTION CAPABILITY" not in " ".join(result.record.requested_command)
 
 
 def test_diff_review_scope_accepts_a_path_the_candidate_deleted(git_repo):

@@ -149,6 +149,40 @@ def test_opencode_free_review_reports_runtime_pool_model_discovery():
     assert caps.can_write is False
 
 
+def test_review_execution_capability_is_typed_and_serialized_without_inference():
+    opencode = capabilities_for(REGISTRY.get("opencode2-gemini-flash-lite-review"))
+    assert opencode.review_execution.applicable is True
+    assert opencode.review_execution.mode == "allowlisted-read-only"
+    assert opencode.review_execution.supports_test_execution is False
+    assert opencode.review_execution.allowed_command_prefixes == ("git diff", "git status", "git show", "rg")
+    assert opencode.as_dict()["review_execution"] == {
+        "applicable": True,
+        "permission_profile": "standard",
+        "mode": "allowlisted-read-only",
+        "supports_test_execution": False,
+        "allowed_command_prefixes": ["git diff", "git status", "git show", "rg"],
+        "reason": opencode.review_execution.reason,
+    }
+
+    grok = capabilities_for(REGISTRY.get("grok-build-review"))
+    assert grok.review_execution.mode == "prompt-context-only"
+    assert grok.review_execution.allowed_command_prefixes == ()
+
+    codex = capabilities_for(REGISTRY.get("codex-review"))
+    assert codex.review_execution.mode == "sandboxed-read-only"
+    assert codex.review_execution.allowed_command_prefixes == ()
+
+
+def test_non_reviewer_reports_review_execution_as_explicitly_not_applicable():
+    caps = capabilities_for(REGISTRY.get("claude-code"))
+    assert caps.review_execution.applicable is False
+    assert caps.review_execution.permission_profile is None
+    assert caps.review_execution.mode is None
+    assert caps.review_execution.supports_test_execution is False
+    assert caps.review_execution.allowed_command_prefixes == ()
+    assert "no review role" in caps.review_execution.reason
+
+
 # --------------------------------------------------------------------------- explicit-not-inferred invariant
 
 

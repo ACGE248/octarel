@@ -226,6 +226,13 @@
       "allow_api_billing": false,
       "requires_isolated_worktree": false,
       "roles": ["diff-review"],
+      "review_execution": {
+        "permission_profile": "standard",
+        "mode": "prompt-context-only",
+        "supports_test_execution": false,
+        "allowed_command_prefixes": [],
+        "reason": "The native Grok review invocation disables tools and receives the bounded diff in prompt context; tests and shell commands are not supported."
+      },
       "cli": {
         "bin": "grok",
         "version_args": ["--version"],
@@ -292,6 +299,13 @@
       "allow_api_billing": false,
       "requires_isolated_worktree": false,
       "roles": ["diff-review"],
+      "review_execution": {
+        "permission_profile": "standard",
+        "mode": "sandboxed-read-only",
+        "supports_test_execution": false,
+        "allowed_command_prefixes": [],
+        "reason": "Octarel supports code and diff assessment in Codex's read-only sandbox but does not guarantee arbitrary shell or test execution as a reviewer capability."
+      },
       "cli": {
         "bin": "codex",
         "version_args": ["--version"],
@@ -347,6 +361,13 @@
       "allow_api_billing": false,
       "requires_isolated_worktree": false,
       "roles": ["diff-review"],
+      "review_execution": {
+        "permission_profile": "standard",
+        "mode": "allowlisted-read-only",
+        "supports_test_execution": false,
+        "allowed_command_prefixes": ["git diff", "git status", "git show", "rg"],
+        "reason": "The OpenCode reviewer preset denies bash by default and permits only bounded read-only git inspection and ripgrep prefixes; pytest, builds, and other test commands are not supported."
+      },
       "cli": {
         "bin": "opencode",
         "version_args": ["--version"],
@@ -371,6 +392,13 @@
       "allow_api_billing": false,
       "requires_isolated_worktree": false,
       "roles": ["diff-review", "doc-drift-review"],
+      "review_execution": {
+        "permission_profile": "standard",
+        "mode": "allowlisted-read-only",
+        "supports_test_execution": false,
+        "allowed_command_prefixes": ["git diff", "git status", "git show", "rg"],
+        "reason": "The OpenCode reviewer preset denies bash by default and permits only bounded read-only git inspection and ripgrep prefixes; pytest, builds, and other test commands are not supported."
+      },
       "model_pool": "opencode-free",
       "cli": {
         "bin": "opencode",
@@ -477,6 +505,13 @@
       "allow_api_billing": false,
       "requires_isolated_worktree": false,
       "roles": ["doc-drift-review"],
+      "review_execution": {
+        "permission_profile": "standard",
+        "mode": "sandboxed-read-only",
+        "supports_test_execution": false,
+        "allowed_command_prefixes": [],
+        "reason": "The Antigravity documentation reviewer runs in plan mode with its sandbox enabled; Octarel does not guarantee test execution for this review route."
+      },
       "cli": {
         "bin": "agy",
         "version_args": ["--version"],
@@ -505,6 +540,13 @@
       "allow_api_billing": false,
       "requires_isolated_worktree": false,
       "roles": ["diff-review"],
+      "review_execution": {
+        "permission_profile": "standard",
+        "mode": "unavailable",
+        "supports_test_execution": false,
+        "allowed_command_prefixes": [],
+        "reason": "The current headless Antigravity transport auto-denies the command permission needed to inspect the diff, so this review route remains disabled."
+      },
       "enabled": false,
       "cli": {
         "bin": "agy",

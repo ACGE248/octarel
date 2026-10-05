@@ -55,6 +55,14 @@ PERMISSION_REPO_CONFIGURED_AUTO = "repo_configured_auto"
 
 KNOWN_PERMISSION_PROFILES = frozenset({PERMISSION_STANDARD, PERMISSION_REPO_CONFIGURED_AUTO})
 
+# ENG-AO-17 (#63): review command execution is a separate capability from
+# filesystem read-only/write access. These modes describe the command boundary
+# Octarel has actually configured for a reviewer; they never widen it.
+REVIEW_ROLES = frozenset({"diff-review", "doc-drift-review"})
+REVIEW_EXECUTION_MODES = frozenset(
+    {"prompt-context-only", "allowlisted-read-only", "sandboxed-read-only", "unavailable"}
+)
+
 # ENG-AGENT-02-S7 (issue #97): a truthful reason a worker is not currently
 # usable, replacing the previous binary "CLI present or NOT_CONFIGURED" model.
 # A worker's own `check_auth()` (below) is the only thing that can report
@@ -153,6 +161,17 @@ class RegistryError(ValueError):
 
 
 @dataclass(frozen=True)
+class ReviewExecution:
+    """One reviewer's declared command boundary under one permission profile."""
+
+    permission_profile: str
+    mode: str
+    supports_test_execution: bool
+    allowed_command_prefixes: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
 class Worker:
     name: str
     execution_system: str
@@ -182,6 +201,10 @@ class Worker:
     supports_unattended_write: bool
     unattended_write_permission_profile: str | None
     unattended_write_reason: str
+    # Explicit only for workers serving a review role. ``None`` for all other
+    # workers so callers cannot infer reviewer command powers from capability,
+    # provider, CLI name, or sandbox prose.
+    review_execution: ReviewExecution | None
     permission_profile_templates: dict[str, tuple[str, ...]] = field(default_factory=dict)
     auth_check_args: tuple[str, ...] = ()
     auth_check_success_pattern: str | None = None
@@ -496,6 +519,76 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             unattended_supported = False
             unattended_profile = None
             unattended_reason = f"{name} is read-only and cannot run an unattended write session"
+        roles = tuple(data.get("roles", ()))
+        review_roles = REVIEW_ROLES.intersection(roles)
+        review_raw = data.get("review_execution")
+        if review_roles:
+            if not isinstance(review_raw, dict):
+                raise RegistryError(
+                    f"review worker {name!r} must declare a review_execution capability object"
+                )
+            review_profile = review_raw.get("permission_profile")
+            if review_profile != PERMISSION_STANDARD:
+                raise RegistryError(
+                    f"review worker {name!r} review_execution.permission_profile must be 'standard'"
+                )
+            review_mode = review_raw.get("mode")
+            if review_mode not in REVIEW_EXECUTION_MODES:
+                raise RegistryError(
+                    f"review worker {name!r} has unknown review_execution.mode {review_mode!r}"
+                )
+            review_tests = review_raw.get("supports_test_execution")
+            if type(review_tests) is not bool:
+                raise RegistryError(
+                    f"review worker {name!r} review_execution.supports_test_execution must be boolean"
+                )
+            review_commands = review_raw.get("allowed_command_prefixes")
+            if (
+                not isinstance(review_commands, list)
+                or not all(isinstance(command, str) and command.strip() for command in review_commands)
+            ):
+                raise RegistryError(
+                    f"review worker {name!r} review_execution.allowed_command_prefixes "
+                    "must be a unique list of non-empty strings"
+                )
+            review_commands = [command.strip() for command in review_commands]
+            if len(set(review_commands)) != len(review_commands):
+                raise RegistryError(
+                    f"review worker {name!r} review_execution.allowed_command_prefixes "
+                    "must be a unique list of non-empty strings"
+                )
+            if review_mode == "allowlisted-read-only" and not review_commands:
+                raise RegistryError(
+                    f"review worker {name!r} in allowlisted-read-only mode must declare command prefixes"
+                )
+            if review_mode != "allowlisted-read-only" and review_commands:
+                raise RegistryError(
+                    f"review worker {name!r} may declare command prefixes only in allowlisted-read-only mode"
+                )
+            if review_tests and review_mode in {"prompt-context-only", "unavailable"}:
+                raise RegistryError(
+                    f"review worker {name!r} cannot support test execution in {review_mode!r} mode"
+                )
+            if review_mode == "unavailable" and data.get("enabled", True):
+                raise RegistryError(
+                    f"review worker {name!r} in unavailable mode must be disabled"
+                )
+            review_reason = review_raw.get("reason")
+            if not isinstance(review_reason, str) or not review_reason.strip():
+                raise RegistryError(
+                    f"review worker {name!r} review_execution.reason must be a non-empty string"
+                )
+            review_execution = ReviewExecution(
+                permission_profile=review_profile,
+                mode=review_mode,
+                supports_test_execution=review_tests,
+                allowed_command_prefixes=tuple(review_commands),
+                reason=review_reason.strip(),
+            )
+        else:
+            if review_raw is not None:
+                raise RegistryError(f"non-review worker {name!r} must not declare review_execution")
+            review_execution = None
         auth_check_raw = cli.get("auth_check") or {}
         launch_probe_raw = cli.get("launch_probe") or {}
         resume_raw = cli.get("resume")
@@ -524,7 +617,7 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             default_intensity=data.get("default_intensity", "low"),
             capability=capability,
             cost_class=data["cost_class"],
-            roles=tuple(data.get("roles", ())),
+            roles=roles,
             allowed_policy_roles=tuple(data.get("allowed_policy_roles", ())),
             provider_policy=data.get("provider_policy", ""),
             auth_mode=data.get("auth_mode", "unspecified"),
@@ -540,6 +633,7 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             supports_unattended_write=unattended_supported,
             unattended_write_permission_profile=unattended_profile,
             unattended_write_reason=unattended_reason.strip(),
+            review_execution=review_execution,
             permission_profile_templates={k: tuple(v) for k, v in permission_profiles_raw.items()},
             auth_check_args=tuple(auth_check_raw.get("args", ())),
             auth_check_success_pattern=auth_check_raw.get("success_pattern"),

@@ -24,6 +24,7 @@ point of the task:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -86,6 +87,28 @@ NATIVE_SUBAGENTS_NOT_IMPLEMENTED_REASON = (
 
 
 @dataclass(frozen=True)
+class ReviewExecutionCapabilities:
+    """Authoritative command/test boundary for one review worker."""
+
+    applicable: bool
+    permission_profile: str | None
+    mode: str | None
+    supports_test_execution: bool
+    allowed_command_prefixes: tuple[str, ...]
+    reason: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "applicable": self.applicable,
+            "permission_profile": self.permission_profile,
+            "mode": self.mode,
+            "supports_test_execution": self.supports_test_execution,
+            "allowed_command_prefixes": list(self.allowed_command_prefixes),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class AdapterCapabilities:
     """Explicit, worker-scoped capability facts for the typed adapter contract.
 
@@ -122,6 +145,7 @@ class AdapterCapabilities:
     cancellation_unavailable_reason: str | None
     supports_native_subagents: bool
     native_subagents_reason: str | None
+    review_execution: ReviewExecutionCapabilities
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -147,6 +171,7 @@ class AdapterCapabilities:
             },
             "cancellation": {"supported": self.supports_cancellation, "reason": self.cancellation_unavailable_reason},
             "native_subagents": {"supported": self.supports_native_subagents, "reason": self.native_subagents_reason},
+            "review_execution": self.review_execution.as_dict(),
         }
 
 
@@ -216,6 +241,26 @@ def capabilities_for(worker: Worker) -> AdapterCapabilities:
     else:
         resume_reason = f"{worker.name} declares no cli.resume block"
 
+    if worker.review_execution is None:
+        review_execution = ReviewExecutionCapabilities(
+            applicable=False,
+            permission_profile=None,
+            mode=None,
+            supports_test_execution=False,
+            allowed_command_prefixes=(),
+            reason=f"{worker.name} declares no review role",
+        )
+    else:
+        declared_review = worker.review_execution
+        review_execution = ReviewExecutionCapabilities(
+            applicable=True,
+            permission_profile=declared_review.permission_profile,
+            mode=declared_review.mode,
+            supports_test_execution=declared_review.supports_test_execution,
+            allowed_command_prefixes=declared_review.allowed_command_prefixes,
+            reason=declared_review.reason,
+        )
+
     return AdapterCapabilities(
         worker=worker.name,
         provider=worker.provider,
@@ -246,6 +291,58 @@ def capabilities_for(worker: Worker) -> AdapterCapabilities:
         cancellation_unavailable_reason=CANCELLATION_NOT_IMPLEMENTED_REASON,
         supports_native_subagents=False,
         native_subagents_reason=NATIVE_SUBAGENTS_NOT_IMPLEMENTED_REASON,
+        review_execution=review_execution,
+    )
+
+
+def review_execution_guidance(
+    capabilities: ReviewExecutionCapabilities, tests_or_checks: Sequence[str] = ()
+) -> str:
+    """Render the declared reviewer boundary and caller-supplied check evidence.
+
+    This prompt section consumes the typed adapter view rather than re-reading
+    registry or provider facts. It tells a reviewer what Octarel supports
+    without granting any command that the native preset or sandbox does not.
+    """
+
+    if not capabilities.applicable:
+        return ""
+
+    commands = (
+        ", ".join(f"`{command}`" for command in capabilities.allowed_command_prefixes)
+        if capabilities.allowed_command_prefixes
+        else "none"
+    )
+    if capabilities.supports_test_execution:
+        test_instruction = (
+            "Test execution is supported only within the declared command boundary; "
+            "do not infer any broader shell access."
+        )
+    else:
+        test_instruction = (
+            "Test execution is not supported for this reviewer. Do not attempt tests, builds, "
+            "or counterfactual commands. Reason from the supplied code, diff, and evidence."
+        )
+
+    evidence = [redact_text(item).strip() for item in tests_or_checks if item.strip()]
+    if evidence:
+        evidence_section = (
+            "\nCaller/orchestrator-supplied check evidence (not commands run by this reviewer):\n"
+            + "\n".join(f"- {item}" for item in evidence)
+            + "\nAssess this evidence as reported; never claim you executed these checks."
+        )
+    else:
+        evidence_section = "\nNo caller/orchestrator check evidence was supplied."
+
+    return (
+        "--- REVIEW EXECUTION CAPABILITY ---\n"
+        f"Permission profile: {capabilities.permission_profile}. Mode: {capabilities.mode}. "
+        f"Guaranteed read-only command prefixes: {commands}.\n"
+        f"{test_instruction}\n"
+        f"Boundary reason: {capabilities.reason}"
+        f"{evidence_section}\n"
+        "If a counterfactual test would decide the review and its result is not supplied, do not run it. "
+        "Report the missing evidence and the exact command the orchestrator should run under Test gaps."
     )
 
 

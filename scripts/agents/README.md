@@ -416,6 +416,22 @@ explicit write-capable implementation fallback. Each entry references one provid
 canonical allowed roles, auth mode, repository-data authorization mode, API-billing prohibition, and
 worktree-isolation requirement; explanatory behavior lives under `.agents/providers/`.
 
+ENG-AO-17 makes reviewer execution support equally explicit without widening it. Every `diff-review` or
+`doc-drift-review` worker has one required `review_execution` declaration in `workers.json`; non-review workers
+must not declare one. `AdapterCapabilities.review_execution` exposes the typed permission profile, mode,
+test-execution boolean, guaranteed command prefixes, and reason. Registry validation fails closed on missing,
+misplaced, or inconsistent declarations. Current reviewers all declare `supports_test_execution: false`:
+OpenCode's enforced reviewer preset permits only `git diff`, `git status`, `git show`, and `rg`; Grok's review
+template disables tools; Codex and Antigravity provide no Octarel-guaranteed test command surface; disabled
+Antigravity diff review declares `unavailable`.
+
+`run_delegation` derives a review-only prompt section from that declaration for the actual selected worker. It
+instructs the reviewer to reason from code/diff, never attempt unsupported tests or counterfactuals, assess any
+redacted caller/orchestrator check evidence without claiming to have run it, and put the exact missing command
+under `Test gaps` when a counterfactual would decide the verdict. An eligible test route runs that command before
+a new review dispatch presents the result. This prompt is descriptive only: `.opencode/agents/reviewer.md` and
+provider-native sandboxes remain the enforcement boundary and their allowlists are unchanged.
+
 ENG-AO-16 makes unattended write support a separate required registry fact. Every write/focused-edit worker
 declares `unattended_write.supported`, an exact `permission_profile` when supported, and a concrete reason.
 The typed adapter contract exposes the same object. `session`, managed dispatch, Quick Start, retry, and fallback
