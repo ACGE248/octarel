@@ -355,29 +355,6 @@ def kill_process_group(pgid: int) -> None:
         pass
 
 
-def _first_json_object(output: str) -> dict[str, object] | None:
-    """Decode a leading CLI JSON object even when stderr follows it."""
-
-    try:
-        payload, _ = json.JSONDecoder().raw_decode(output.lstrip())
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def first_structured_result(output: str) -> dict[str, object] | None:
-    """Decode a worker's leading structured-CLI-result JSON object, if any.
-
-    Public wrapper around this module's own JSON extraction so a caller such
-    as ``scripts.agents.adapter_contract`` reads a worker's structured result
-    the exact same way ``structured_failure``/``structured_actual_model``
-    already do below, instead of re-implementing the same parsing a second
-    time.
-    """
-
-    return _first_json_object(output)
-
-
 BOUNDARY_EVIDENCE_MEASURED = "MEASURED"
 BOUNDARY_EVIDENCE_UNKNOWN = "UNKNOWN"
 
@@ -441,6 +418,33 @@ def _structured_values(output: str) -> list[object]:
     return values
 
 
+_STRUCTURED_RESULT_KEYS = frozenset(
+    {"is_error", "isError", "result", "response", "text", "stopReason", "subtype"}
+)
+
+
+def first_structured_result(output: str) -> dict[str, object] | None:
+    """Select one terminal CLI result from line-anchored structured values.
+
+    The last dictionary carrying a recognized terminal-result field wins,
+    because transports may emit progress records before their final outcome.
+    If no dictionary carries such a field, the last decoded dictionary is the
+    best available structured record (for example, a usage-only result). JSON
+    embedded later on a prose line is never decoded by :func:`_structured_values`.
+
+    This is the single result-record selector used by failure, actual-model,
+    and adapter usage readers. Boundary-denial evidence deliberately differs:
+    it scans every decoded record because a denial may live in a separate
+    usage event.
+    """
+
+    records = [value for value in _structured_values(output) if isinstance(value, dict)]
+    terminal = [record for record in records if _STRUCTURED_RESULT_KEYS.intersection(record)]
+    if terminal:
+        return terminal[-1]
+    return records[-1] if records else None
+
+
 def worker_boundary_evidence(output: str) -> dict[str, object]:
     """Classify read-only boundary evidence without inferring from prose.
 
@@ -485,7 +489,7 @@ def worker_action_denied(output: str) -> bool:
 def structured_failure(output: str) -> str | None:
     """Return a failure reason exposed by a structured CLI result, if any."""
 
-    payload = _first_json_object(output)
+    payload = first_structured_result(output)
     if worker_action_denied(output):
         return "worker tool action was denied by the configured read-only permission boundary"
     if payload is None:
@@ -519,7 +523,7 @@ def structured_actual_model_report(output: str, requested_model: str) -> tuple[s
     ``model_id`` alone, since a fallback can coincidentally equal a genuinely reported id.
     """
 
-    payload = _first_json_object(output)
+    payload = first_structured_result(output)
     if payload is None:
         return requested_model, False
     usage = payload.get("modelUsage")

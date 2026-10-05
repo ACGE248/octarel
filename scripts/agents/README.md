@@ -432,6 +432,14 @@ under `Test gaps` when a counterfactual would decide the verdict. An eligible te
 a new review dispatch presents the result. This prompt is descriptive only: `.opencode/agents/reviewer.md` and
 provider-native sandboxes remain the enforcement boundary and their allowlists are unchanged.
 
+ENG-AO-13 makes `runner.first_structured_result` the single result-record selector for failure classification,
+actual-model attribution, and adapter usage categories. It decodes only JSON values that begin a logical output
+line, selects the last dictionary carrying a recognized terminal-result field (progress may precede the final
+outcome), and otherwise falls back to the last decoded dictionary for usage-only results. Diagnostic prose may
+appear before or after the record without hiding `is_error`, `stopReason`, `subtype`, an empty response, or
+`modelUsage`; a JSON example embedded later on a prose line remains untrusted model text. Typed denial evidence
+continues to scan every line-anchored record because a denial may be emitted separately from the terminal result.
+
 ENG-AO-15 makes the whole-worktree `session` verb write-capable-only, matching its documented contract. Admission
 rejects every read-only worker before command construction under both the standard and unattended profiles. As a
 second, independent layer, `run_delegation` and `run_session` now share one worktree-change classifier: if a

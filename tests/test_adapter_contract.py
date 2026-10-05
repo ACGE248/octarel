@@ -287,6 +287,18 @@ def test_structural_usage_keys_reports_measured_categories_and_redacts_secret_sh
     assert "inputTokens" in joined
 
 
+def test_structural_usage_keys_reads_the_same_preambled_result_as_failure_classification():
+    caps = _fake_capabilities(reports_structured_usage=True)
+    log_text = (
+        "worker diagnostic preamble\n"
+        '{"result":"ok","modelUsage":{"claude-sonnet-5":{"inputTokens":10,"outputTokens":2}}}'
+        "\nworker shutdown diagnostic"
+    )
+    cell = structural_usage_keys(caps, log_text)
+    assert cell["class"] == CLASS_MEASURED
+    assert cell["value"] == ("inputTokens", "outputTokens")
+
+
 # --------------------------------------------------------------------------- RunResult
 
 
