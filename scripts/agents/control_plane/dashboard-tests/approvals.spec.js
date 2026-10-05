@@ -57,6 +57,28 @@ test('Attention popover keeps pending approval controls when advancement adds a 
   await expect(page.locator('#overview-attention-list')).toContainText('Synthetic advancement row');
 });
 
+test('Run Detail preserves the approval note and focus across polling before resolution', async ({ page }) => {
+  await navTo(page, 'view-runs');
+  await page.getByRole('button', { name: 'View detail for Fixture overnight run' }).click();
+  const detail = page.locator('#run-detail');
+  const note = detail.getByLabel('Approval resolution note');
+  await expect(note).toBeVisible();
+  await note.fill('Run Detail note survives the polling refresh');
+  await expect(note).toBeFocused();
+
+  await page.waitForTimeout(2_500);
+
+  await expect(note).toHaveValue('Run Detail note survives the polling refresh');
+  await expect(note).toBeFocused();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes('/api/approvals/') && response.url().endsWith('/resolve')),
+    detail.getByRole('button', { name: 'Reject' }).click(),
+  ]);
+  await expect(detail.locator('[data-approval-state="REJECTED"]')).toContainText(
+    'Run Detail note survives the polling refresh',
+  );
+});
+
 test('Premium override creates an approval request without claiming routing changed', async ({ page }) => {
   await navTo(page, 'view-providers');
   const routing = page.locator('#usage-routing-body');

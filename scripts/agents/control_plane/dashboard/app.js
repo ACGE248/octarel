@@ -48,6 +48,9 @@
   let pipelinePrevTaskStates = new Map();
   let connectTerminalView = null;
   let validatedConfigurationRollback = null;
+  const approvalResolutionDrafts = new Map();
+  let pendingApprovalFocusKey = null;
+  let runDetailRenderGeneration = 0;
 
   // --------------------------------------------------------------------- helpers
 
@@ -5166,9 +5169,14 @@
   function renderRunDetail(run) {
     const root = document.getElementById("run-detail");
     if (!root) return;
+    const renderGeneration = ++runDetailRenderGeneration;
     const runtimeFocusKey = root.contains(document.activeElement)
       ? document.activeElement?.dataset?.runtimeFocus || null
       : null;
+    const approvalFocusKey = root.contains(document.activeElement)
+      ? document.activeElement?.dataset?.approvalFocus || null
+      : null;
+    if (approvalFocusKey) pendingApprovalFocusKey = approvalFocusKey;
     root.innerHTML = "";
     if (!run) {
       root.appendChild(el("p", { class: "hint", text: "No run is selected." }));
@@ -5265,13 +5273,18 @@
     }
 
     getJSON(`/api/approvals?run_id=${encodeURIComponent(run.id)}`).then((rows) => {
-      if (root.dataset.runId !== run.id) return;
+      if (
+        root.dataset.runId !== run.id
+        || renderGeneration !== runDetailRenderGeneration
+        || !root.contains(approvalEvidence)
+      ) return;
       approvalEvidence.innerHTML = "";
       if (!rows.length) {
         approvalEvidence.appendChild(el("p", { class: "hint", text: "No typed approval request is recorded for this run." }));
         return;
       }
       rows.forEach((approval) => {
+        if (approval.state !== "PENDING") approvalResolutionDrafts.delete(approval.id);
         approvalEvidence.appendChild(approvalCard(approval, {
           interactive: true,
           afterResolve: async () => {
@@ -5279,8 +5292,18 @@
           },
         }));
       });
+      if (pendingApprovalFocusKey) {
+        const replacement = [...root.querySelectorAll("[data-approval-focus]")]
+          .find((node) => node.dataset.approvalFocus === pendingApprovalFocusKey);
+        if (replacement) replacement.focus({ preventScroll: true });
+        pendingApprovalFocusKey = null;
+      }
     }).catch(() => {
-      if (root.dataset.runId !== run.id) return;
+      if (
+        root.dataset.runId !== run.id
+        || renderGeneration !== runDetailRenderGeneration
+        || !root.contains(approvalEvidence)
+      ) return;
       approvalEvidence.innerHTML = "";
       approvalEvidence.appendChild(el("p", { class: "hint", text: "Approval evidence is UNKNOWN because the read failed." }));
     });
@@ -5867,10 +5890,20 @@
       maxlength: "1000",
       placeholder: "Resolution note (required)",
       "aria-label": "Approval resolution note",
+      "data-approval-focus": `${approval.id}:note`,
+      value: approvalResolutionDrafts.get(approval.id) || "",
+    });
+    note.addEventListener("input", () => {
+      approvalResolutionDrafts.set(approval.id, note.value);
     });
     const status = el("span", { class: "hint approval-resolution-status", role: "status" });
-    const approve = el("button", { type: "button", class: "btn-primary", text: "Approve" });
-    const reject = el("button", { type: "button", text: "Reject" });
+    const approve = el("button", {
+      type: "button", class: "btn-primary", text: "Approve",
+      "data-approval-focus": `${approval.id}:approve`,
+    });
+    const reject = el("button", {
+      type: "button", text: "Reject", "data-approval-focus": `${approval.id}:reject`,
+    });
     const resolve = async (decision) => {
       const resolutionNote = note.value.trim();
       if (!resolutionNote) {
@@ -5887,6 +5920,7 @@
         resolution_note: resolutionNote,
       });
       if (result.ok) {
+        approvalResolutionDrafts.delete(approval.id);
         status.textContent = result.body?.state === "REJECTED" ? "Rejected." : "Approved and executed.";
         await afterResolve();
       } else {

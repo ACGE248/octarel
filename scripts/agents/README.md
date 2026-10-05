@@ -584,7 +584,8 @@ only later approved, current-state-revalidated resolution reaches the existing
 fixed internal handler. Attention contains pending decisions and cannot lose
 them behind Overview-only advancement rows; terminal run-scoped outcomes remain
 in Run Detail, while bounded failed unscoped cleanup results remain visible on
-Overview without increasing the active bell count. Trusted-local runtime
+Overview without increasing the active bell count. Run Detail preserves typed
+approval note drafts and focus across polling refreshes. Trusted-local runtime
 controls and direct trusted-local CLI commands remain deterministic boundaries
 rather than routine approvals.
 

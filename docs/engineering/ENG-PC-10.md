@@ -137,9 +137,10 @@ later invalid `project_id IS NULL` row as OctaScene state.
   outcome details. A bounded recent-results projection keeps failed unscoped
   cleanup targets and reasons visible on Overview without inflating the bell's
   active-attention count. Advancement-derived Overview rows cannot displace
-  approval controls from the Attention popover. Both extend the existing
-  responsive Glass Studio structure; no approval page or history store was
-  added.
+  approval controls from the Attention popover. Run Detail preserves a pending
+  resolution-note draft and focused approval control across its two-second
+  polling rebuild. Both extend the existing responsive Glass Studio structure;
+  no approval page or history store was added.
 
 Ordinary trusted-local runtime actions intentionally retain their existing
 deterministic confirmation and supervisor safeguards, so normal local work is
@@ -181,6 +182,6 @@ Post-review focused evidence on 2026-10-05:
 
 - All 176 approval, usage-policy, project-registry, and remote-dashboard tests
   passed after the handler-bound revalidation fixes.
-- Ruff, JavaScript syntax, and the five-test desktop-1280 approval browser
+- Ruff, JavaScript syntax, and the six-test desktop-1280 approval browser
   slice passed, including preview refusal, terminal cleanup visibility, and
-  advancement/Attention displacement regressions.
+  advancement/Attention displacement and Run Detail polling regressions.
