@@ -55,6 +55,7 @@ from .registry import (
     PERMISSION_STANDARD,
     Registry,
     RegistryError,
+    Worker,
     load_registry,
 )
 
@@ -120,6 +121,39 @@ def _agent_preset_block_reason(root: Path, command: list[str]) -> str | None:
         "self-healed from this checkout's own .opencode/agents/ -- refusing to launch a worker that "
         "would silently fall back to an unconfigured default agent"
     )
+
+
+def _record_worktree_changes(
+    record: RunRecord,
+    worker: Worker,
+    before: dict[str, str],
+    after: dict[str, str],
+) -> bool:
+    """Record changed paths and fail a read-only worker identically on every run path."""
+
+    changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+    record.files_changed = changed
+    if not worker.is_read_only or not changed:
+        return False
+    record.read_only_violation = True
+    record.set_result(
+        RESULT_FAIL,
+        note=(
+            "read-only worker modified the working tree: "
+            + ", ".join(changed)
+            + ". Treat as a contract violation."
+        ),
+    )
+    return True
+
+
+def _require_session_write_capability(worker: Worker) -> None:
+    """Reject a whole-worktree session unless its worker is write-capable."""
+
+    if not worker.is_write_capable:
+        raise ValidationError(
+            f"run_session requires a write-capable worker; {worker.name!r} is {worker.capability}"
+        )
 
 
 def _dirty_paths(root: Path) -> list[str]:
@@ -604,19 +638,7 @@ def run_delegation(
     record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
-    changed_during_run = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-    record.files_changed = changed_during_run
-
-    if worker.is_read_only and changed_during_run:
-        record.read_only_violation = True
-        record.set_result(
-            RESULT_FAIL,
-            note=(
-                "read-only worker modified the working tree: "
-                + ", ".join(changed_during_run)
-                + ". Treat as a contract violation."
-            ),
-        )
+    if _record_worktree_changes(record, worker, before, after):
         return finish(log_text)
 
     result, failure_reason = classify_finished_run(exit_status=exit_status, log_text=log_text)
@@ -712,6 +734,7 @@ def run_session(
         model = worker.effective_model
     if role not in worker.roles:
         raise ValidationError(f"worker {worker_name!r} does not declare role {role!r}")
+    _require_session_write_capability(worker)
     resolved_intensity = intensity or worker.default_intensity
     if resolved_intensity not in registry.intensities:
         raise ValidationError(
@@ -734,10 +757,6 @@ def run_session(
                 f"{capabilities.unattended_write_permission_profile!r} for unattended writes"
             )
     if permission_profile != PERMISSION_STANDARD:
-        if worker.is_read_only:
-            raise ValidationError(
-                f"permission_profile {permission_profile!r} cannot be used with read-only worker {worker_name!r}"
-            )
         # Route the actual decision through the typed adapter capability contract
         # (scripts.agents.adapter_contract) instead of a second, parallel copy of
         # Worker.supports_permission_profile's rule, so there is one authority for
@@ -877,7 +896,8 @@ def run_session(
     record.boundary_evidence = worker_boundary_evidence(log_text)
 
     after = worktree_snapshot(root)
-    record.files_changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+    if _record_worktree_changes(record, worker, before, after):
+        return finish(log_text)
 
     result, failure_reason = classify_finished_run(exit_status=exit_status, log_text=log_text)
     record.set_result(result, note=failure_reason)

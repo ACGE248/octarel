@@ -20,6 +20,7 @@ from scripts.agents import orchestrate
 from scripts.agents.manifest import (
     RESULT_PASS,
     RunRecord,
+    classify_failure,
     compact_pointer,
     write_artifacts,
 )
@@ -572,9 +573,12 @@ def test_run_delegation_rejects_repo_configured_auto_for_a_read_only_worker(git_
         )
 
 
-def test_run_session_rejects_repo_configured_auto_for_a_read_only_worker(git_repo):
+@pytest.mark.parametrize("permission_profile", ["standard", "repo_configured_auto"])
+def test_run_session_rejects_read_only_worker_under_every_permission_profile(
+    git_repo, permission_profile
+):
     registry = load_registry()
-    with pytest.raises(ValidationError, match="permission_profile"):
+    with pytest.raises(ValidationError, match="requires a write-capable worker"):
         orchestrate.run_session(
             registry=registry,
             root=git_repo,
@@ -587,7 +591,7 @@ def test_run_session_rejects_repo_configured_auto_for_a_read_only_worker(git_rep
             prompt="do it",
             dry_run=True,
             timeout=30.0,
-            permission_profile="repo_configured_auto",
+            permission_profile=permission_profile,
         )
 
 
@@ -1245,8 +1249,75 @@ def test_read_only_worker_flagged_when_it_modifies_the_tree(git_repo):
     assert result.record.result == "FAIL"
     assert result.record.read_only_violation is True
     assert result.manifest["failure_category"] == "READ_ONLY_VIOLATION"
+    assert classify_failure(result.record) == "READ_ONLY_VIOLATION"
     assert "sneaky_edit.txt" in result.record.files_changed
     assert "modified the working tree" in " ".join(result.record.notes)
+
+
+def test_run_session_defense_in_depth_fails_a_read_only_worker_that_changes_the_tree(
+    git_repo, monkeypatch
+):
+    """The finish-path check survives even if admission is accidentally bypassed."""
+
+    monkeypatch.setattr(orchestrate, "_require_session_write_capability", lambda _worker: None)
+    registry = _registry_with(
+        name="antigravity-focused-tests",
+        cli_bin="sh",
+        cli_template=("-c", "echo session-edit > sneaky_session_edit.txt", "--"),
+    )
+
+    result = orchestrate.run_session(
+        registry=registry,
+        root=git_repo,
+        task="ENG-AO-15",
+        worker_name="antigravity-focused-tests",
+        role="focused-tests",
+        model=None,
+        intensity="low",
+        why="exercise defense-in-depth mutation classification",
+        prompt="attempt a read-only session",
+        dry_run=False,
+        timeout=30.0,
+        permission_profile="standard",
+    )
+
+    assert result.record.result == "FAIL"
+    assert result.record.read_only_violation is True
+    assert result.record.files_changed == ["sneaky_session_edit.txt"]
+    assert classify_failure(result.record) == "READ_ONLY_VIOLATION"
+    assert result.manifest["failure_category"] == "READ_ONLY_VIOLATION"
+    assert result.exit_code == orchestrate.EXIT_WORKER_FAILED
+
+
+def test_run_session_allows_a_write_worker_to_change_the_tree(git_repo):
+    registry = _registry_with(
+        name="claude-code",
+        cli_bin="sh",
+        permission_profile_templates={
+            "repo_configured_auto": ("-c", "echo legitimate > legitimate_session_edit.txt", "--")
+        },
+    )
+
+    result = orchestrate.run_session(
+        registry=registry,
+        root=git_repo,
+        task="ENG-AO-15",
+        worker_name="claude-code",
+        role="primary-implementation",
+        model=None,
+        intensity="low",
+        why="prove legitimate write sessions remain unchanged",
+        prompt="make the authorized change",
+        dry_run=False,
+        timeout=30.0,
+        permission_profile="repo_configured_auto",
+    )
+
+    assert result.record.result == "PASS"
+    assert result.record.read_only_violation is False
+    assert result.record.files_changed == ["legitimate_session_edit.txt"]
+    assert classify_failure(result.record) == "NONE"
+    assert result.manifest["failure_category"] == "NONE"
 
 
 @pytest.mark.parametrize("exit_status", [1, 124])
