@@ -1014,6 +1014,7 @@ def create_app(
         body: dict[str, Any],
         confirm: bool,
         target: str | None,
+        allow_preview: bool = False,
     ) -> dict[str, Any] | None:
         """Route the two approval-owned commands through one production seam.
 
@@ -1025,17 +1026,22 @@ def create_app(
 
         if verb not in {"usage_override", "worktree_cleanup"}:
             return None
-        if not confirm:
-            raise HTTPException(
-                status_code=409,
-                detail=f"{verb} is destructive and requires confirm=true after operator review",
-            )
         if verb == "worktree_cleanup":
             unexpected = sorted(body)
             if unexpected:
                 raise HTTPException(
                     status_code=400,
                     detail=f"unsupported cleanup request field(s): {', '.join(unexpected)}",
+                )
+            # The established unconfirmed command is the server preview used
+            # by the confirmation sheet. Only the later confirmed request is
+            # converted into a durable approval handoff.
+            if not confirm and allow_preview:
+                return None
+            if not confirm:
+                raise HTTPException(
+                    status_code=409,
+                    detail="worktree_cleanup is destructive and requires confirm=true after operator review",
                 )
             approval = approval_handoff(
                 request,
@@ -1050,6 +1056,12 @@ def create_app(
                 "message": "Approval request created; no worktree was removed.",
                 "data": {"mode": "APPROVAL_REQUESTED", "approval_request": approval},
             }
+
+        if not confirm:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{verb} is destructive and requires confirm=true after operator review",
+            )
 
         unexpected = sorted(set(body) - {"runbook_id", "reason"})
         if unexpected:
@@ -2858,6 +2870,7 @@ def create_app(
             if row["status"] in {_usage_budgets.STATUS_WARNING, _usage_budgets.STATUS_BLOCKED}
         ]
         approval_attention: list[dict[str, Any]] = []
+        approval_results: list[dict[str, Any]] = []
         if ctx.selected_project_id:
             _approvals.expire_pending(ctx)
             approval_attention = [
@@ -2868,6 +2881,16 @@ def create_app(
                     limit=100,
                 )
             ]
+            approval_results = [
+                public_approval(row)
+                for row in ctx.state.list_approval_requests(
+                    project_id=ctx.selected_project_id,
+                    states=[_approvals.STATE_FAILED_SAFE],
+                    limit=20,
+                )
+                if row.get("action_type") == _approvals.ACTION_DESTRUCTIVE_CLEANUP
+                and row.get("run_id") is None
+            ]
         return {
             "tasks": failed_or_blocked,
             "recovery": recovery_attention,
@@ -2877,6 +2900,7 @@ def create_app(
             "wakes": troubled_wakes,
             "usage_budgets": troubled_budgets,
             "approvals": approval_attention,
+            "approval_results": approval_results,
         }
 
     @app.post("/api/wake-queue/manual")
@@ -3381,6 +3405,7 @@ def create_app(
             body=body,
             confirm=confirm,
             target=target,
+            allow_preview=True,
         )
         if approval_response is not None:
             return approval_response

@@ -582,9 +582,11 @@ route override, and authenticated remote runtime start/stop/restart (including
 the legacy app-lifecycle endpoints). Creation has no operational side effect;
 only later approved, current-state-revalidated resolution reaches the existing
 fixed internal handler. Attention contains pending decisions and cannot lose
-them behind Overview-only advancement rows; terminal outcomes remain in Run
-Detail. Trusted-local runtime controls and direct trusted-local CLI commands
-remain deterministic boundaries rather than routine approvals.
+them behind Overview-only advancement rows; terminal run-scoped outcomes remain
+in Run Detail, while bounded failed unscoped cleanup results remain visible on
+Overview without increasing the active bell count. Trusted-local runtime
+controls and direct trusted-local CLI commands remain deterministic boundaries
+rather than routine approvals.
 
 ### Control Center finish (`ENG-AGENT-02-S8`)
 

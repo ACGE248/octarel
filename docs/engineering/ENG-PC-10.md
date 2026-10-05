@@ -116,6 +116,8 @@ later invalid `project_id IS NULL` row as OctaScene state.
   as its impact source, then creates `DESTRUCTIVE_CLEANUP`. Creation removes no
   checkout; only a later approved resolution can call the existing cleanup
   command, which re-runs its finished-clean/canonical/ownership protections.
+  The unconfirmed command remains a read-only preview; a refused preview is
+  rendered as a refusal rather than as an empty target set.
 - The Control Center Premium override creates `METERED_OVERFLOW_ROUTE` and
   leaves runbook and usage-governance state untouched. A later approved
   resolution alone reaches the existing bounded `usage_override` handler.
@@ -132,9 +134,12 @@ later invalid `project_id IS NULL` row as OctaScene state.
 - Attention shows each pending request with risk, reason, expiry, impact
   preview, note field, and approve/reject controls. Run Detail shows related
   pending and terminal request/resolution evidence, including failed cleanup
-  outcome details. Advancement-derived Overview rows cannot displace approval
-  controls from the Attention popover. Both extend the existing responsive
-  Glass Studio structure; no approval page or history store was added.
+  outcome details. A bounded recent-results projection keeps failed unscoped
+  cleanup targets and reasons visible on Overview without inflating the bell's
+  active-attention count. Advancement-derived Overview rows cannot displace
+  approval controls from the Attention popover. Both extend the existing
+  responsive Glass Studio structure; no approval page or history store was
+  added.
 
 Ordinary trusted-local runtime actions intentionally retain their existing
 deterministic confirmation and supervisor safeguards, so normal local work is
@@ -174,7 +179,8 @@ Initial candidate evidence on 2026-10-02:
 
 Post-review focused evidence on 2026-10-05:
 
-- All 175 approval, usage-policy, project-registry, and remote-dashboard tests
+- All 176 approval, usage-policy, project-registry, and remote-dashboard tests
   passed after the handler-bound revalidation fixes.
-- Ruff, JavaScript syntax, and the three-test desktop-1280 approval browser
-  slice passed, including the advancement/Attention displacement regression.
+- Ruff, JavaScript syntax, and the five-test desktop-1280 approval browser
+  slice passed, including preview refusal, terminal cleanup visibility, and
+  advancement/Attention displacement regressions.

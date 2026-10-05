@@ -4338,8 +4338,12 @@
 
   async function previewWorktreeCleanup(confirm) {
     const response = await postCommand("worktree_cleanup", confirm ? { confirm: true } : {});
-    const data = response.body?.data || {};
     const root = document.getElementById("worktrees-cleanup-result");
+    if (!response.ok) {
+      if (root) root.textContent = response.body?.detail || "Worktree cleanup request was refused.";
+      return;
+    }
+    const data = response.body?.data || {};
     if (data.mode === "APPROVAL_REQUESTED") {
       const approvalId = data.approval_request?.id || "UNKNOWN";
       if (root) root.textContent = `Approval request ${approvalId} created. No worktree was removed; review it in Attention.`;
@@ -5744,6 +5748,7 @@
     budget_warning: { label: "Budget warning", glyph: "△", tone: "warn", view: "view-providers" },
     budget_block: { label: "Budget hard block", glyph: "■", tone: "err", view: "view-providers" },
     approval: { label: "Typed approval", glyph: "?", tone: "warn", view: "view-runs" },
+    approval_failure: { label: "Approval execution result", glyph: "✕", tone: "err", view: "view-overview" },
   };
 
   function attentionItems(data) {
@@ -5841,6 +5846,18 @@
         { approval },
       );
     });
+    (data.approval_results || []).forEach((approval) => {
+      const result = approval.result_summary || {};
+      const failures = (result.failed || []).map((failure) =>
+        `${failure.path || failure.target || "unknown target"}: ${failure.reason || "removal failed"}`
+      );
+      add(
+        "approval_failure",
+        `${approval.action_type} · ${approval.state}`,
+        [result.message, ...failures].filter(Boolean).join(" — "),
+        { approval, historical: true },
+      );
+    });
     return items;
   }
 
@@ -5892,6 +5909,23 @@
         el("dt", { text: displayName(key.replaceAll("_", "-")) }),
         el("dd", { text: typeof value === "object" ? JSON.stringify(value) : String(value) }),
       ]);
+    const removalRows = [];
+    if (Object.hasOwn(result, "removed")) {
+      removalRows.push(
+        el("dt", { text: "Removed" }),
+        el("dd", { text: (result.removed || []).join(", ") || "None" }),
+      );
+    }
+    if (Object.hasOwn(result, "failed")) {
+      removalRows.push(
+        el("dt", { text: "Failed" }),
+        el("dd", {
+          text: (result.failed || []).map((failure) =>
+            `${failure.path || failure.target || "unknown target"}: ${failure.reason || "removal failed"}`
+          ).join("; ") || "None",
+        }),
+      );
+    }
     const card = el("article", {
       class: `approval-card is-${String(approval.state || "unknown").toLowerCase()}`,
       "data-approval-id": approval.id,
@@ -5913,8 +5947,7 @@
         el("dt", { text: "Resolution" }), el("dd", { text: approval.resolution_note || "NOT_REPORTED" }),
         ...(approval.result_summary ? [
           el("dt", { text: "Result" }), el("dd", { text: result.message || "NOT_REPORTED" }),
-          el("dt", { text: "Removed" }), el("dd", { text: String((result.removed || []).length) }),
-          el("dt", { text: "Failed" }), el("dd", { text: String((result.failed || []).length) }),
+          ...removalRows,
         ] : []),
       ]),
     ]);
@@ -5941,7 +5974,7 @@
           await Promise.all([refreshAttention(), refreshEvents(), refreshRunbooks()]);
         })
       );
-    } else if (opts && opts.action) {
+    } else if (opts && opts.action && !item.historical) {
       const go = el("button", { type: "button", class: "attn-action", text: "Open", "aria-label": `Open ${spec.view.replace("view-", "")} for ${spec.label}` });
       go.addEventListener("click", () => { closeAttention(); showView(spec.view); });
       row.appendChild(go);
@@ -5957,6 +5990,7 @@
     const poisonedWakes = data.wakes || [];
     const troubledBudgets = data.usage_budgets || [];
     const approvalAttention = data.approvals || [];
+    const approvalResults = data.approval_results || [];
     renderKV("attention-body", [
       ["Tasks needing attention", data.tasks.length],
       ["Recovery / wait conditions", recoveryAttention.length],
@@ -5966,6 +6000,7 @@
       ["Poisoned wakes", poisonedWakes.length],
       ["Budget warnings / hard blocks", troubledBudgets.length],
       ["Approval decisions requiring attention", approvalAttention.length],
+      ["Recent failed approval actions", approvalResults.length],
     ]);
     const items = attentionItems(data);
     const list = document.getElementById("attention-list");
@@ -5980,7 +6015,7 @@
     // rows appear on the Overview card only. Filter by provenance rather than
     // slicing by count because derived rows are interleaved before approvals.
     const base = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length + approvalAttention.length;
-    items.filter((item) => !item.advancementDerived)
+    items.filter((item) => !item.advancementDerived && !item.historical)
       .forEach((item) => list.appendChild(attentionRow(item, { action: true })));
     const card = document.getElementById("overview-attention-list");
     if (card) {

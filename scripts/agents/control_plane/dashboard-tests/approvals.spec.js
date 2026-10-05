@@ -75,3 +75,52 @@ test('Premium override creates an approval request without claiming routing chan
   await expect(requested).toBeVisible();
   await expect(requested).toContainText('PENDING');
 });
+
+test('Cleanup preview renders a server refusal instead of a false empty preview', async ({ page }) => {
+  await page.route('**/api/commands/worktree_cleanup', async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Fixture cleanup preview was refused safely' }),
+    });
+  });
+  await navTo(page, 'view-worktrees');
+
+  await page.getByRole('button', { name: 'Preview cleanup' }).click();
+
+  const result = page.locator('#worktrees-cleanup-result');
+  await expect(result).toContainText('Fixture cleanup preview was refused safely');
+  await expect(result).not.toContainText('0 eligible');
+});
+
+test('Overview retains failed unscoped cleanup targets and reasons without bell inflation', async ({ page }) => {
+  await page.route('**/api/attention', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.approval_results = [{
+      id: 'approval-failed-cleanup',
+      action_type: 'DESTRUCTIVE_CLEANUP',
+      risk: 'HIGH',
+      state: 'FAILED_SAFE',
+      result_summary: {
+        ok: false,
+        message: 'removed 1 eligible finished worktree(s); 1 removal(s) failed',
+        removed: ['/fixture/removed-clean'],
+        failed: [{
+          path: '/fixture/still-busy',
+          classification: 'FINISHED_CLEAN',
+          reason: 'worktree is unexpectedly busy',
+        }],
+      },
+    }];
+    await route.fulfill({ response, json: body });
+  });
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-initial-refresh-complete', 'true', { timeout: 15_000 });
+
+  const result = page.locator('#overview-attention-list [data-attention-kind="approval_failure"]');
+  await expect(result).toContainText('/fixture/still-busy');
+  await expect(result).toContainText('worktree is unexpectedly busy');
+  await page.locator('#notif-bell').click();
+  await expect(page.locator('#attention-list [data-attention-kind="approval_failure"]')).toHaveCount(0);
+});

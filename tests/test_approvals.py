@@ -592,6 +592,37 @@ def test_confirmed_cleanup_hands_off_without_removal_until_approved_revalidation
     ]
 
 
+def test_unconfirmed_cleanup_command_preserves_server_preview_without_creating_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.agents.control_plane import operations
+
+    ctx = _context(tmp_path)
+    eligible_path = tmp_path / "finished-clean"
+    monkeypatch.setattr(
+        operations,
+        "refresh_worktree_statuses",
+        lambda _ctx: [
+            {
+                "path": str(eligible_path),
+                "branch": "eng/finished-clean",
+                "classification": "FINISHED_CLEAN",
+                "dirty": False,
+                "cleanup_eligible": True,
+                "canonical_checkout": False,
+            }
+        ],
+    )
+    client = TestClient(create_app(ctx, roadmap_path=tmp_path / "missing.md"))
+
+    response = client.post("/api/commands/worktree_cleanup", json={})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["mode"] == "PREVIEW"
+    assert [row["path"] for row in response.json()["data"]["eligible"]] == [str(eligible_path)]
+    assert ctx.state.list_approval_requests(project_id="project-a") == []
+
+
 def test_steering_cleanup_never_calls_command_handler_before_later_approval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -782,7 +813,14 @@ def test_cleanup_removal_failure_is_failed_safe_and_terminal_only(
         }
     ]
     client = TestClient(create_app(ctx, roadmap_path=tmp_path / "missing.md"))
-    assert client.get("/api/attention").json()["approvals"] == []
+    attention = client.get("/api/attention").json()
+    assert attention["approvals"] == []
+    assert attention["approval_results"][0]["id"] == created["id"]
+    assert attention["approval_results"][0]["result_summary"]["failed"][0] == {
+        "path": str(eligible_path.resolve()),
+        "classification": "FINISHED_CLEAN",
+        "reason": "worktree is unexpectedly busy",
+    }
     assert client.get("/api/approvals").json()[0]["state"] == "FAILED_SAFE"
 
 
