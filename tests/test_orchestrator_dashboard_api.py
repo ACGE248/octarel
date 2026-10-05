@@ -970,6 +970,7 @@ def test_usage_telemetry_filters_and_budget_progress_are_safe_and_truthful(clien
             "scope_key": "no-matching-task",
             "constraint_type": "attempts",
             "limit_value": 2,
+            "activated_at": "2026-01-01T00:00:00+00:00",
         }
     )
     ctx.state.upsert_usage_budget(
@@ -980,6 +981,7 @@ def test_usage_telemetry_filters_and_budget_progress_are_safe_and_truthful(clien
             "scope_key": "Anthropic",
             "constraint_type": "provider_quota_reserve",
             "limit_value": 10,
+            "activated_at": "2026-01-01T00:00:00+00:00",
         }
     )
     ctx.state.upsert_usage_budget(
@@ -991,6 +993,7 @@ def test_usage_telemetry_filters_and_budget_progress_are_safe_and_truthful(clien
             "constraint_type": "attempts",
             "limit_value": 2,
             "warning_fraction": 0.5,
+            "activated_at": "2026-01-01T00:00:00+00:00",
         }
     )
     ctx.state.upsert_usage_budget(
@@ -1001,6 +1004,7 @@ def test_usage_telemetry_filters_and_budget_progress_are_safe_and_truthful(clien
             "scope_key": None,
             "constraint_type": "attempts",
             "limit_value": 0,
+            "activated_at": "2026-01-01T00:00:00+00:00",
         }
     )
 
@@ -1027,6 +1031,8 @@ def test_usage_telemetry_filters_and_budget_progress_are_safe_and_truthful(clien
     assert measured["value"] == 0
     assert measured["evidence_class"] == "MEASURED"
     assert measured["progress_percent"] == 0
+    assert measured["enforcement_mode"] == "enforced"
+    assert measured["activated_at"] == "2026-01-01T00:00:00+00:00"
     assert unknown["value"] is None
     assert unknown["remaining"] is None
     assert unknown["progress_percent"] is None

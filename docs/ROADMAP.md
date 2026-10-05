@@ -297,6 +297,12 @@ Promote usage from a read model over runbook-scoped governance records into a du
 
 Add budget/usage policy scopes: global -> provider -> program/task -> run/session. Supported constraints may include metered cash, tokens, wall-clock, attempts/fallbacks and provider quota reserve when a real source exists. Enforcement happens before launch/fallback and cannot authorize a paid route.
 
+ENG-PC-12 (#65) extends this delivered contract with explicit `advisory` versus `enforced` definitions and an
+activation timestamp. Advisory definitions warn but never veto. Enforced definitions retain fail-closed
+`UNKNOWN` handling. Usage is counted only from activation forward; a row whose timestamp cannot prove it falls
+before activation remains `UNKNOWN` rather than disappearing or becoming zero. See
+`docs/engineering/ENG-PC-12.md` for the maintained policy contract.
+
 ### UI
 
 Extend the shipped usage surface; do not add a parallel one.

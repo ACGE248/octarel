@@ -343,6 +343,8 @@ CREATE TABLE IF NOT EXISTS usage_budgets (
     constraint_type TEXT NOT NULL,
     limit_value REAL NOT NULL,
     warning_fraction REAL NOT NULL DEFAULT 0.8,
+    enforcement_mode TEXT NOT NULL DEFAULT 'enforced',
+    activated_at TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -1177,13 +1179,35 @@ class State:
             ("constraint_type", "TEXT"),
             ("limit_value", "REAL"),
             ("warning_fraction", "REAL NOT NULL DEFAULT 0.8"),
+            ("enforcement_mode", "TEXT NOT NULL DEFAULT 'enforced'"),
+            # SQLite cannot add a NOT NULL column without a constant default.
+            # Backfill the historical creation boundary below; all writes then
+            # supply a non-null value through ``upsert_usage_budget``.
+            ("activated_at", "TEXT"),
             ("enabled", "INTEGER NOT NULL DEFAULT 1"),
             ("created_at", "TEXT"),
             ("updated_at", "TEXT"),
         )
+        added: set[str] = set()
         for column, ddl in columns:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE usage_budgets ADD COLUMN {column} {ddl}")
+                added.add(column)
+        # Do not issue no-op writes every time a State connection opens. That
+        # would turn read/initialization concurrency into SQLite writer-lock
+        # contention. These backfills belong only to the transaction that adds
+        # the legacy column.
+        if "enforcement_mode" in added:
+            self._conn.execute(
+                "UPDATE usage_budgets SET enforcement_mode = 'enforced' "
+                "WHERE enforcement_mode IS NULL OR enforcement_mode = ''"
+            )
+        if "activated_at" in added:
+            self._conn.execute(
+                "UPDATE usage_budgets SET activated_at = COALESCE(created_at, ?) "
+                "WHERE activated_at IS NULL OR activated_at = ''",
+                (utc_now_iso(),),
+            )
 
     @_serialized
     def _migrate_runtime_service_columns(self) -> None:
@@ -2472,8 +2496,19 @@ class State:
 
         now = utc_now_iso()
         existing = self._conn.execute(
-            "SELECT created_at FROM usage_budgets WHERE id = ?", (budget["id"],)
+            "SELECT created_at, enforcement_mode, activated_at FROM usage_budgets WHERE id = ?",
+            (budget["id"],),
         ).fetchone()
+        enforcement_mode = budget.get("enforcement_mode")
+        if enforcement_mode is None:
+            enforcement_mode = existing["enforcement_mode"] if existing else "enforced"
+        activated_at = budget.get("activated_at")
+        if activated_at is None:
+            activated_at = (
+                (existing["activated_at"] or existing["created_at"])
+                if existing
+                else now
+            )
         row = {
             "id": str(budget["id"]),
             "project_id": budget.get("project_id"),
@@ -2482,6 +2517,8 @@ class State:
             "constraint_type": str(budget["constraint_type"]),
             "limit_value": float(budget["limit_value"]),
             "warning_fraction": float(budget.get("warning_fraction", 0.8)),
+            "enforcement_mode": str(enforcement_mode),
+            "activated_at": str(activated_at),
             "enabled": 1 if budget.get("enabled", True) else 0,
             "created_at": existing["created_at"] if existing else now,
             "updated_at": now,
@@ -2489,13 +2526,14 @@ class State:
         self._conn.execute(
             "INSERT INTO usage_budgets "
             "(id, project_id, scope_type, scope_key, constraint_type, limit_value, "
-            "warning_fraction, enabled, created_at, updated_at) "
+            "warning_fraction, enforcement_mode, activated_at, enabled, created_at, updated_at) "
             "VALUES (:id, :project_id, :scope_type, :scope_key, :constraint_type, :limit_value, "
-            ":warning_fraction, :enabled, :created_at, :updated_at) "
+            ":warning_fraction, :enforcement_mode, :activated_at, :enabled, :created_at, :updated_at) "
             "ON CONFLICT(id) DO UPDATE SET "
             "project_id=excluded.project_id, scope_type=excluded.scope_type, scope_key=excluded.scope_key, "
             "constraint_type=excluded.constraint_type, limit_value=excluded.limit_value, "
-            "warning_fraction=excluded.warning_fraction, enabled=excluded.enabled, updated_at=excluded.updated_at",
+            "warning_fraction=excluded.warning_fraction, enforcement_mode=excluded.enforcement_mode, "
+            "activated_at=excluded.activated_at, enabled=excluded.enabled, updated_at=excluded.updated_at",
             row,
         )
         self._conn.commit()
