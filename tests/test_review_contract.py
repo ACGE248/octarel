@@ -106,6 +106,19 @@ def test_narration_merged_onto_the_same_line_as_a_field_label_is_still_recognize
     assert verdict.ready is True
 
 
+def test_observed_grok_glued_preamble_is_accepted_only_with_the_structured_shape() -> None:
+    text = (
+        "I'll review the candidate read-only.Blockers: None\n"
+        "Important findings: None\nMinor findings: None\nTest gaps: None\nREADY\n"
+    )
+    verdict = parse_review_response(text)
+    assert verdict.ready is True
+    assert verdict.reason == "all required fields None and verdict READY"
+
+    bare_with_same_preamble = "I'll review the candidate read-only.READY"
+    assert parse_review_response(bare_with_same_preamble).ready is False
+
+
 def test_a_quoted_template_earlier_in_the_response_does_not_override_a_later_unstructured_blocker() -> None:
     """Independent-review finding: the field block and the verdict must be
 

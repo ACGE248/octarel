@@ -4,6 +4,25 @@ Grok Build may implement in its own dedicated write worktree; Grok Build Review 
 plan+sandbox route. Use only when the configured xAI session, repository authorization, metered-cost policy,
 and assigned role permit it. Web search and subagents remain disabled for repository delegation.
 
+## Grok Build Review response adapter (ENG-AO-11)
+
+For `grok-build-review` only, never use the bare `READY` response option described by the canonical REVIEW
+workflow. The native CLI can concatenate turn narration directly onto that token, making the bare shape invalid.
+Always return the structured four-field shape, even when there are no findings:
+
+```text
+Blockers: None
+Important findings: None
+Minor findings: None
+Test gaps: None
+READY
+```
+
+When a field has a real finding, replace `None` with the complete finding and end with a standalone `BLOCKED`
+line. Start the answer with `Blockers:`; do not add a lead-in, summary, or text after the final verdict. The
+acceptance parser deliberately remains strict. This provider-specific output adapter does not authorize the
+caller to relax or reinterpret the canonical review contract.
+
 Unattended writes (ENG-AO-16) are an explicit capability, not an inference from `capability: write` or a
 missing/present CLI template. `grok-build` and the explicitly selected `grok-build-bots` primary declare
 `repo_configured_auto`: native `--permission-mode auto` in headless mode, where calls not accepted by the

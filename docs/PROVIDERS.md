@@ -62,6 +62,11 @@ runs an unsupported test or counterfactual. If an unsupplied counterfactual deci
 the exact command under `Test gaps`; an eligible orchestrator/test route runs it and a subsequent review receives
 the redacted result as caller/orchestrator evidence. Prompt guidance never widens the native preset or sandbox.
 
+Native Grok review also has a provider-specific response adapter. `grok-build-review` always uses the canonical
+four-field structured response, including for a no-findings verdict, because its CLI may concatenate turn narration
+directly onto a bare `READY` token. Real findings end in standalone `BLOCKED`; four `None` fields end in standalone
+`READY`. The shared parser is not relaxed and still refuses prose-prefixed bare verdicts.
+
 Unattended write eligibility is separately declared for every write/focused-edit worker and exposed through
 `AdapterCapabilities.unattended_write`. A `session` launch, managed dispatch, Quick Start, retry, and automatic
 fallback all require that fact and its exact permission profile; ordinary write capability is insufficient.
