@@ -194,6 +194,7 @@ PRESETS: dict[str, RunbookPreset] = {
             default_parent_worker="claude-code",
             default_duration_minutes=240,
             phases=("Verify current state", "Close gaps", "Test", "Checkpoint", "Report"),
+            permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
         ),
         RunbookPreset(
             key="test-fix",
@@ -208,6 +209,7 @@ PRESETS: dict[str, RunbookPreset] = {
             default_parent_worker="claude-code",
             default_duration_minutes=120,
             phases=("Run tests", "Diagnose failures", "Fix", "Re-verify", "Checkpoint", "Report"),
+            permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
         ),
         RunbookPreset(
             key="ui-polish",
@@ -230,6 +232,7 @@ PRESETS: dict[str, RunbookPreset] = {
                 "Checkpoint",
                 "Report",
             ),
+            permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
         ),
         RunbookPreset(
             key="review-only",
@@ -327,10 +330,19 @@ def validate_target(
             raise RunbookError(f"worktree {worktree!r} already has a running task ({task.id})")
 
 
-def _validate_permission_profile_for_worker(permission_profile: str, worker, *, worker_name: str) -> None:
-    """Shared gate: the unattended profile is only ever valid for a write-capable
+def _validate_permission_profile_for_worker(
+    permission_profile: str,
+    worker,
+    *,
+    worker_name: str,
+    requires_unattended_write: bool,
+) -> None:
+    """Shared gate for the exact worker/profile used by an unattended run.
 
-    write-capable worker that actually declares an invocation for it. Called at
+    A write-capable worker is not necessarily unattended-write-capable.  ENG-AO-16
+    makes that fact explicit and binds it to exactly one declared permission
+    profile rather than inferring it from the existence of a base CLI template.
+    Called at
     every point a Runbook's ``(permission_profile, parent_worker)`` pair can
     change — ``create_runbook``, ``update_runbook`` (a later edit can retarget
     either field independently), and ``start_runbook`` (defense in depth
@@ -343,6 +355,17 @@ def _validate_permission_profile_for_worker(permission_profile: str, worker, *, 
 
     if permission_profile not in RUNBOOK_PERMISSION_PROFILES:
         raise RunbookError(f"unknown permission_profile {permission_profile!r}")
+    if requires_unattended_write:
+        if not worker.supports_unattended_write:
+            raise RunbookError(
+                f"worker {worker_name!r} is not eligible for unattended writes: "
+                f"{worker.unattended_write_reason}"
+            )
+        if permission_profile != worker.unattended_write_permission_profile:
+            raise RunbookError(
+                f"worker {worker_name!r} requires permission_profile "
+                f"{worker.unattended_write_permission_profile!r} for unattended writes"
+            )
     if permission_profile != PERMISSION_REPO_CONFIGURED_AUTO:
         return
     if worker.is_read_only:
@@ -376,7 +399,13 @@ def eligible_retry_workers(*, state: State, registry: Registry, runbook: Runbook
             continue
         worker = registry.get(name)
         provider = state.get_provider_state(name)
-        if role not in worker.roles or ((preset is None or preset.writes_code) and not worker.is_write_capable):
+        requires_unattended_write = preset is None or preset.writes_code
+        if role not in worker.roles or (requires_unattended_write and not worker.is_write_capable):
+            continue
+        if requires_unattended_write and (
+            not worker.supports_unattended_write
+            or runbook.permission_profile != worker.unattended_write_permission_profile
+        ):
             continue
         if runbook.permission_profile != PERMISSION_STANDARD and not worker.supports_permission_profile(
             runbook.permission_profile
@@ -564,7 +593,12 @@ def create_runbook(
         raise RunbookError(f"unknown stop condition(s): {', '.join(sorted(unknown_stops))}")
 
     resolved_permission = permission_profile or preset_def.permission_profile
-    _validate_permission_profile_for_worker(resolved_permission, worker, worker_name=worker_name)
+    _validate_permission_profile_for_worker(
+        resolved_permission,
+        worker,
+        worker_name=worker_name,
+        requires_unattended_write=preset_def.writes_code,
+    )
     if codex_policy not in CODEX_POLICIES:
         raise RunbookError(f"unknown codex_policy {codex_policy!r}")
     if not isinstance(max_codex_invocations, int) or isinstance(max_codex_invocations, bool) or max_codex_invocations < 0:
@@ -677,7 +711,13 @@ def update_runbook(*, state: State, registry: Registry, runbook_id: str, **field
         current_worker = registry.get(runbook.parent_worker)
     except RegistryError as exc:
         raise RunbookError(str(exc)) from None
-    _validate_permission_profile_for_worker(runbook.permission_profile, current_worker, worker_name=runbook.parent_worker)
+    current_preset = PRESETS.get(runbook.preset)
+    _validate_permission_profile_for_worker(
+        runbook.permission_profile,
+        current_worker,
+        worker_name=runbook.parent_worker,
+        requires_unattended_write=current_preset is None or current_preset.writes_code,
+    )
 
     state.upsert_runbook(runbook)
     usage = state.get_usage_governance(runbook.id)
@@ -787,7 +827,13 @@ def start_runbook(
         launch_worker = registry.get(runbook.parent_worker)
     except RegistryError as exc:
         raise RunbookError(str(exc)) from None
-    _validate_permission_profile_for_worker(runbook.permission_profile, launch_worker, worker_name=runbook.parent_worker)
+    preset_def = PRESETS.get(runbook.preset)
+    _validate_permission_profile_for_worker(
+        runbook.permission_profile,
+        launch_worker,
+        worker_name=runbook.parent_worker,
+        requires_unattended_write=preset_def is None or preset_def.writes_code,
+    )
     validate_target(repo_root=repo_root, state=state, branch=runbook.branch, worktree=runbook.worktree)
     _adopt_runbook_worktree(state=state, runbook=runbook, repo_root=repo_root)
     if scheduler is None:
@@ -795,7 +841,6 @@ def start_runbook(
 
         scheduler = Scheduler()
 
-    preset_def = PRESETS.get(runbook.preset)
     role = preset_def.role if preset_def else "primary-implementation"
     prompt_text = build_session_prompt(runbook, registry=registry)
     policy_bundle = compose_policy_bundle(
@@ -1056,7 +1101,12 @@ def retry_runbook(
         raise RunbookError(f"worker {worker_name!r} does not declare role {role!r}")
     if (preset is None or preset.writes_code) and not worker.is_write_capable:
         raise RunbookError(f"runbook {runbook_id!r} requires a write-capable implementation worker")
-    _validate_permission_profile_for_worker(runbook.permission_profile, worker, worker_name=worker_name)
+    _validate_permission_profile_for_worker(
+        runbook.permission_profile,
+        worker,
+        worker_name=worker_name,
+        requires_unattended_write=preset is None or preset.writes_code,
+    )
     reason = worker.availability_reason()
     if reason != "AVAILABLE":
         raise RunbookError(f"worker {worker_name!r} is not eligible: {reason}")
@@ -1359,6 +1409,7 @@ def automatic_fallback_runbook(
         codex_invocations=int(usage["codex_invocations"]), max_codex_invocations=runbook.max_codex_invocations,
         excluded_workers=attempted,
         permission_profile=runbook.permission_profile,
+        requires_unattended_write=preset is None or preset.writes_code,
         worker_availability=availability,
         allowed_workers=permitted_route,
     )

@@ -555,7 +555,7 @@ def test_run_session_receives_graph_context_from_changed_files(project, graphify
     result = orchestrate.run_session(
         registry=load_registry(), root=project, task="ENG-AO-01", worker_name="claude-code",
         role="primary-implementation", model=None, intensity="low", why="test", prompt="finish", dry_run=True,
-        timeout=5.0,
+        timeout=5.0, permission_profile="repo_configured_auto",
     )
     assert result.manifest["policy_manifest"]["graph_context"]["status"] in {"used", "refreshed"}
     assert "src/util.py" in _graph_section(["\n".join(result.record.requested_command) + "\n--- TASK ENVELOPE"])

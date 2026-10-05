@@ -404,6 +404,8 @@ def _current_worktree_option(
     duration_minutes: int,
     checks: tuple[str, ...],
 ) -> QuickStartOption:
+    from .runbooks import get_preset
+
     branch = _current_branch(repo_root)
     unavailable = None
     if not branch or branch in {"main", "master"}:
@@ -416,7 +418,7 @@ def _current_worktree_option(
         preset=preset,
         parent_worker=parent_worker,
         duration_minutes=duration_minutes,
-        permission_profile="standard",
+        permission_profile=get_preset(preset).permission_profile,
         stop_conditions=DEFAULT_STOP_CONDITIONS,
         program="Current OctaScene branch",
         task_id=branch,
@@ -542,6 +544,7 @@ def _routable_worker(
     fallback: str,
     *,
     permission_profile: str = "standard",
+    requires_unattended_write: bool = False,
 ) -> tuple[str, str | None]:
     """First runnable worker plus a truthful reason when the route is empty."""
 
@@ -567,6 +570,16 @@ def _routable_worker(
         if not registry.repository_data_reuse_allowed(name):
             blocked.append(f"{name}: unauthorized for repository data")
             continue
+        if requires_unattended_write:
+            if not worker.supports_unattended_write:
+                blocked.append(f"{name}: {worker.unattended_write_reason}")
+                continue
+            if permission_profile != worker.unattended_write_permission_profile:
+                blocked.append(
+                    f"{name}: unattended writes require permission profile "
+                    f"{worker.unattended_write_permission_profile}"
+                )
+                continue
         if permission_profile != "standard" and not worker.supports_permission_profile(permission_profile):
             blocked.append(f"{name}: permission profile {permission_profile} unsupported")
             continue
@@ -695,6 +708,7 @@ def _apply_run_truth(
             "primary-implementation",
             option.parent_worker,
             permission_profile=option.permission_profile,
+            requires_unattended_write=True,
         )
         changes.update(
             proposed_tester=tester,

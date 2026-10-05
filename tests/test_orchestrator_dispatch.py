@@ -15,6 +15,7 @@ from scripts.agents.control_plane.intake import IntakeCollision, check_and_claim
 from scripts.agents.control_plane.models import (
     KIND_HEAVY,
     KIND_READ,
+    LAUNCH_SESSION,
     TASK_BLOCKED,
     TASK_PENDING,
     TASK_RUNNING,
@@ -170,7 +171,7 @@ def test_codex_pressure_and_permission_profile_filter_before_balancing(tmp_path)
         codex_policy="balanced", codex_auto_eligible=False,
     )
     result, _, _, _ = _managed(tmp_path, task)
-    assert result.task.worker == "claude-code"
+    assert result.task.worker == "grok-build"
     assert "codex-build" not in result.task.selection_alternatives
 
 
@@ -205,8 +206,21 @@ def test_preauthorized_providers_still_obey_capability_permission_and_worktree_g
         state=state, registry=registry, scheduler=Scheduler(), supervisor=supervisor,
         repo_root=tmp_path, task=grok_unattended, dry_run=True,
     )
+    assert result.launched
+    assert result.task.worker == "grok-build"
+
+    grok_attended_profile = Task(
+        id="grok-attended", task_ref="ENG-AUTH-2B", owner_ref="issue:#202",
+        role="primary-implementation", worker="grok-build", launch_mode=LAUNCH_SESSION,
+        permission_profile="standard", worktree=str(tmp_path / "grok-attended"),
+    )
+    state.upsert_task(grok_attended_profile)
+    result = managed_admit(
+        state=state, registry=registry, scheduler=Scheduler(), supervisor=supervisor,
+        repo_root=tmp_path, task=grok_attended_profile, dry_run=True,
+    )
     assert not result.launched
-    assert "permission profile repo_configured_auto unsupported" in result.reason
+    assert "unattended write requires permission profile repo_configured_auto" in result.reason
 
     running = Task(
         id="grok-running", task_ref="ENG-AUTH-3", role="primary-implementation",

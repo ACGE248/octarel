@@ -311,7 +311,7 @@ def test_read_only_or_worktree_regression_blocks_promotion(state):
 
 @pytest.mark.parametrize("worker,drop", [
     ("grok-build-review", ("--sandbox", "read-only")), ("grok-build-review", ("--permission-mode", "plan")),
-    ("grok-build-bot", ("--sandbox", "read-only")), ("grok-build", ("--sandbox", "work-tree")),
+    ("grok-build-bot", ("--sandbox", "read-only")), ("grok-build", ("--sandbox", "strict")),
     ("grok-build-bots", ("--permission-mode", "default")), ("grok-build", ("--no-subagents",)),
     ("grok-build-review", ("--disable-web-search",)),
 ])
@@ -336,7 +336,7 @@ def test_removing_a_required_guard_blocks_promotion_fail_closed(state, worker, d
 
 
 @pytest.mark.parametrize("worker,extra", [
-    ("grok-build-review", ("--sandbox", "work-tree")), ("grok-build-bot", ("--sandbox", "work-tree")),
+    ("grok-build-review", ("--sandbox", "strict")), ("grok-build-bot", ("--sandbox", "strict")),
     ("grok-build-review", ("--permission-mode", "default")), ("grok-build", ("--sandbox", "read-only")),
     ("grok-build-bots", ("--permission-mode", "bypassPermissions")), ("grok-build", ("--permission-mode", "plan")),
 ])

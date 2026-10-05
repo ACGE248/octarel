@@ -22,6 +22,7 @@ from .models import (
     DEPENDENCY_SATISFIED_STATES,
     KIND_READ,
     KIND_WRITE,
+    LAUNCH_SESSION,
     TASK_BLOCKED,
     TASK_QUEUED,
     Task,
@@ -116,6 +117,14 @@ def _candidate_scores(*, state: State, registry: Registry, task: Task) -> tuple[
             reasons.append("not read-only")
         if task.required_capability and task.required_capability not in {worker.capability, "any"}:
             reasons.append(f"capability {worker.capability} does not meet {task.required_capability}")
+        if task.launch_mode == LAUNCH_SESSION and task.kind == KIND_WRITE:
+            if not worker.supports_unattended_write:
+                reasons.append(f"unattended write unsupported: {worker.unattended_write_reason}")
+            elif task.permission_profile != worker.unattended_write_permission_profile:
+                reasons.append(
+                    "unattended write requires permission profile "
+                    f"{worker.unattended_write_permission_profile}"
+                )
         if task.permission_profile != PERMISSION_STANDARD and not worker.supports_permission_profile(task.permission_profile):
             reasons.append(f"permission profile {task.permission_profile} unsupported")
         if has_provider_truth and (not provider or not provider.configured or provider.state not in {"AVAILABLE", "BUSY"}):

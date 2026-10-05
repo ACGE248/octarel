@@ -174,6 +174,14 @@ class Worker:
     enabled: bool
     preserve: bool
     notes: str
+    # ENG-AO-16 (#57): whether this write worker has a deliberately declared,
+    # bounded non-interactive invocation. This is independent of ``capability``:
+    # a worker can edit in an attended session without being safe to launch from
+    # an unattended Runbook. The matching permission profile is explicit so no
+    # caller infers eligibility from a missing/present template key.
+    supports_unattended_write: bool
+    unattended_write_permission_profile: str | None
+    unattended_write_reason: str
     permission_profile_templates: dict[str, tuple[str, ...]] = field(default_factory=dict)
     auth_check_args: tuple[str, ...] = ()
     auth_check_success_pattern: str | None = None
@@ -447,6 +455,47 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
     try:
         cli = data["cli"]
         permission_profiles_raw = cli.get("permission_profiles", {})
+        capability = data["capability"]
+        # Preserve the more fundamental runtime-pool invariant before applying
+        # write-worker metadata validation. A dynamic model pool can never be a
+        # writer, so changing one to ``capability: write`` must fail for that
+        # reason rather than merely complaining that the now-invalid worker also
+        # lacks an unattended-write declaration.
+        if data.get("model_pool") and capability in WRITE_CAPABILITIES:
+            raise RegistryError(f"dynamic-model worker {name!r} must be read-only")
+        unattended_raw = data.get("unattended_write")
+        if capability in WRITE_CAPABILITIES:
+            if not isinstance(unattended_raw, dict):
+                raise RegistryError(
+                    f"write-capable worker {name!r} must declare an unattended_write capability object"
+                )
+            unattended_supported = unattended_raw.get("supported")
+            if type(unattended_supported) is not bool:
+                raise RegistryError(f"worker {name!r} unattended_write.supported must be boolean")
+            unattended_reason = unattended_raw.get("reason")
+            if not isinstance(unattended_reason, str) or not unattended_reason.strip():
+                raise RegistryError(f"worker {name!r} unattended_write.reason must be a non-empty string")
+            unattended_profile = unattended_raw.get("permission_profile")
+            if unattended_supported:
+                if not isinstance(unattended_profile, str) or not unattended_profile.strip():
+                    raise RegistryError(
+                        f"worker {name!r} supports unattended writes but declares no permission_profile"
+                    )
+                if unattended_profile not in permission_profiles_raw:
+                    raise RegistryError(
+                        f"worker {name!r} unattended permission profile {unattended_profile!r} "
+                        "has no matching cli.permission_profiles invocation"
+                    )
+            elif unattended_profile is not None:
+                raise RegistryError(
+                    f"worker {name!r} cannot declare an unattended permission_profile while supported=false"
+                )
+        else:
+            if unattended_raw is not None:
+                raise RegistryError(f"read-only worker {name!r} must not declare unattended_write")
+            unattended_supported = False
+            unattended_profile = None
+            unattended_reason = f"{name} is read-only and cannot run an unattended write session"
         auth_check_raw = cli.get("auth_check") or {}
         launch_probe_raw = cli.get("launch_probe") or {}
         resume_raw = cli.get("resume")
@@ -473,7 +522,7 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             provider=data["provider"],
             default_model=data.get("default_model", ""),
             default_intensity=data.get("default_intensity", "low"),
-            capability=data["capability"],
+            capability=capability,
             cost_class=data["cost_class"],
             roles=tuple(data.get("roles", ())),
             allowed_policy_roles=tuple(data.get("allowed_policy_roles", ())),
@@ -488,6 +537,9 @@ def _coerce_worker(name: str, data: dict[str, Any]) -> Worker:
             enabled=bool(data.get("enabled", True)),
             preserve=bool(data.get("preserve", False)),
             notes=data.get("notes", ""),
+            supports_unattended_write=unattended_supported,
+            unattended_write_permission_profile=unattended_profile,
+            unattended_write_reason=unattended_reason.strip(),
             permission_profile_templates={k: tuple(v) for k, v in permission_profiles_raw.items()},
             auth_check_args=tuple(auth_check_raw.get("args", ())),
             auth_check_success_pattern=auth_check_raw.get("success_pattern"),

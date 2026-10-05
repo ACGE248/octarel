@@ -291,8 +291,9 @@ installed native CLI advance the *effective* model without a registry edit (`scr
 - **Verified** only when the session is authenticated (Grok: `grok models` confirms a logged-in session; Codex:
   `codex login status` exits 0 and reports the ChatGPT subscription session; negated phrases and API-key modes are
   ineligible), every flag in every worker template of the family is still documented by the CLI's `--help`, and each
-  route still carries exactly its required guards (review: read-only sandbox, plus plan mode for Grok; implementation: its
-  worktree sandbox, default permission mode, and isolated worktree; Grok: `--no-subagents`, web search off) with no
+  route still carries exactly its required guards (review: read-only sandbox, plus plan mode for Grok; implementation:
+  its strict sandbox, exactly one of attended `default` or bounded unattended `auto`, and isolated worktree; Grok:
+  `--no-subagents`, web search off) with no
   conflicting later value and no write or approval-bypass flag.
 - **Otherwise the configured model stays in force** and the reason is recorded (`unverified` / `unavailable`: CLI
   missing, unauthenticated, malformed or incomplete listing, missing flag, stale configured model). Nothing raises into
@@ -414,6 +415,19 @@ subscription-authenticated `codex-review` is read-only and `codex-build` is the
 explicit write-capable implementation fallback. Each entry references one provider policy and declares
 canonical allowed roles, auth mode, repository-data authorization mode, API-billing prohibition, and
 worktree-isolation requirement; explanatory behavior lives under `.agents/providers/`.
+
+ENG-AO-16 makes unattended write support a separate required registry fact. Every write/focused-edit worker
+declares `unattended_write.supported`, an exact `permission_profile` when supported, and a concrete reason.
+The typed adapter contract exposes the same object. `session`, managed dispatch, Quick Start, retry, and fallback
+all bind an unattended write to that fact and exact profile instead of treating `capability: write` or an existing
+template as proof. Claude, Codex Build, Grok Build, and the explicit Grok bot-primary bind to
+`repo_configured_auto`; disabled DeepSeek overflow explicitly does not.
+
+Grok's bounded profile uses native headless `--permission-mode auto` with the built-in `--sandbox strict`,
+`--no-subagents`, and web search disabled. Classifier-rejected calls fail back to the model in headless mode
+rather than prompting. The route never uses always-approve/bypass or API-key fallback. `strict` is the portable
+native profile: the previous `work-tree` name was only a custom-profile reference and failed closed in any
+managed worktree without an undeclared user/project `sandbox.toml`.
 
 ACGE248/octages persistently pre-authorizes configured Google and xAI providers for minimized, redacted,
 task-relevant repository-data reuse. `workers.json` records that grant once at provider level, and policy
@@ -794,13 +808,11 @@ any other task — no second scheduler. A new `orchestrate.py session`
 subcommand is a whole-worktree sibling to `run` for exactly the case that
 tool's mandatory `--scope` narrowing cannot express; `session` (never `run`)
 is also the only verb that can carry a non-default `permission_profile`.
-Overnight Development's `repo_configured_auto` profile launches `claude-code`
-with `--dangerously-skip-permissions` instead of `--permission-mode manual`
-so a genuinely unattended session never blocks on a headless tool-permission
-prompt. S9 later adds a separately declared workspace-write profile for the
-subscription-authenticated `codex-build` fallback; both worker/profile pairs
-are re-validated at every create/update/start/retry boundary and neither is
-automatic. The dashboard gained a `Runs` surface with a `Run
+Every write preset uses `repo_configured_auto`; Review Only remains standard/read-only. The exact worker/profile
+pair is re-validated at create, update, start, managed admission, retry, and fallback boundaries. Claude Code,
+subscription-authenticated Codex Build, and grok.com-authenticated Grok Build each declare their own invocation;
+Grok uses bounded native auto plus the strict sandbox, never always-approve/bypass. No worker is selected merely
+because it can write in an attended session. The dashboard gained a `Runs` surface with a `Run
 Overnight` quick action, live runbook cards, and a morning-report viewer.
 See [`docs/engineering/ENG-AGENT-02.md`](../../docs/engineering/ENG-AGENT-02.md)
 for full detail.

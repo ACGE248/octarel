@@ -406,7 +406,7 @@ def test_cancelled_quickstart_worktree_remains_physically_and_durably_visible(tm
     assert row["task_state"] == "CANCELLED"
 
 
-def test_real_quickstart_http_path_blocks_truthfully_when_codex_is_unavailable(tmp_path, monkeypatch):
+def test_real_quickstart_http_path_uses_grok_when_claude_and_codex_are_unavailable(tmp_path, monkeypatch):
     ctx, client, spawned, _existing_worktree = _quickstart_http_context(tmp_path, monkeypatch)
     claude = ctx.state.get_provider_state("claude-code")
     claude.state = "QUOTA_EXHAUSTED"
@@ -423,11 +423,14 @@ def test_real_quickstart_http_path_blocks_truthfully_when_codex_is_unavailable(t
         json={"key": "continue-video-editor"},
     )
 
-    assert response.status_code == 400
-    assert spawned == []
-    assert ctx.state.list_runbooks() == []
-    option = client.get("/api/quickstart").json()[0]
-    assert option["ready"] is False
-    assert "No eligible implementation worker" in option["unavailable_reason"]
-    assert option["codex_policy"] == "conserve"
-    assert option["codex_auto_eligible"] is False
+    assert response.status_code == 200
+    runbook = ctx.state.get_runbook(response.json()["data"]["runbook_id"])
+    task = ctx.state.get_task(runbook.task_id)
+    assert len(spawned) == 1
+    launched_argv = spawned[0][0]
+    assert launched_argv[launched_argv.index("--worker") + 1] == "grok-build"
+    assert task.worker == "grok-build"
+    assert runbook.parent_worker == "grok-build"
+    assert runbook.permission_profile == "repo_configured_auto"
+    assert runbook.codex_policy == "conserve"
+    assert runbook.codex_auto_eligible is False

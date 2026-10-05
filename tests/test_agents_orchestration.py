@@ -62,6 +62,12 @@ def test_registry_is_well_formed():
         assert worker.allow_api_billing is False
         if worker.is_write_capable:
             assert worker.requires_isolated_worktree is True
+            assert worker.unattended_write_reason
+            if worker.supports_unattended_write:
+                assert worker.unattended_write_permission_profile
+                assert worker.supports_permission_profile(worker.unattended_write_permission_profile)
+            else:
+                assert worker.unattended_write_permission_profile is None
     assert registry.intensities == ("low", "medium", "high")
 
 
@@ -199,7 +205,15 @@ def test_workers_without_a_declared_auth_check_report_none_not_a_guess():
     """
 
     registry = load_registry()
-    assert registry.get("grok-build").check_auth() is None
+    assert registry.get("deepseek-overflow").check_auth() is None
+
+
+def test_grok_auth_check_uses_the_existing_grok_com_session_only():
+    registry = load_registry()
+    for name in ("grok-build", "grok-build-bots", "grok-build-review", "grok-build-bot"):
+        worker = registry.get(name)
+        assert worker.auth_check_args == ("models",)
+        assert worker.auth_check_success_pattern == "You are logged in with grok.com."
 
 
 def test_check_auth_reports_true_when_the_local_cli_session_is_authenticated(monkeypatch):
@@ -443,7 +457,7 @@ def test_repo_configured_auto_profile_is_explicit_for_supported_write_workers_on
     registry = load_registry()
     for worker in registry.workers.values():
         assert "--dangerously-skip-permissions" not in worker.cli_template
-        if worker.name not in {"claude-code", "codex-build"}:
+        if worker.name not in {"claude-code", "codex-build", "grok-build", "grok-build-bots"}:
             assert not worker.supports_permission_profile("repo_configured_auto")
 
     claude = registry.get("claude-code")
@@ -461,6 +475,16 @@ def test_repo_configured_auto_profile_is_explicit_for_supported_write_workers_on
     )
     assert "workspace-write" in codex_unattended
     assert "--dangerously-bypass-approvals-and-sandbox" not in codex_unattended
+
+    for name in ("grok-build", "grok-build-bots"):
+        grok = registry.get(name)
+        grok_unattended = grok.build_command(
+            model=None, intensity="medium", prompt="finish the runbook", permission_profile="repo_configured_auto"
+        )
+        assert grok_unattended[grok_unattended.index("--permission-mode") + 1] == "auto"
+        assert grok_unattended[grok_unattended.index("--sandbox") + 1] == "strict"
+        assert "--always-approve" not in grok_unattended
+        assert "bypassPermissions" not in grok_unattended
 
     standard_command = claude.build_command(model=None, intensity="medium", prompt="finish the runbook")
     assert "--permission-mode" in standard_command
@@ -830,6 +854,25 @@ def test_worker_environment_uses_allowlist(monkeypatch, git_repo):
     assert "GH_TOKEN=" not in output
     assert "AWS_SECRET_ACCESS_KEY=" not in output
     assert "OPENCODE_SERVER_PASSWORD=" not in output
+
+
+def test_strict_grok_environment_disables_unreadable_global_git_config(monkeypatch, git_repo):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("scripts.agents.runner.subprocess.run", fake_run)
+    exit_code, _ = run_worker_process(
+        ["grok", "--permission-mode", "auto", "--sandbox", "strict"],
+        git_repo,
+        timeout=10,
+    )
+
+    assert exit_code == 0
+    assert captured["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert "XAI_API_KEY" not in captured["env"]
 
 
 def test_reviewer_preset_self_heal_is_consulted_before_launching_any_worker(monkeypatch, git_repo):

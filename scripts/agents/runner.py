@@ -266,6 +266,24 @@ def _worker_environment() -> dict[str, str]:
 worker_environment = _worker_environment
 
 
+def _environment_for_command(command: list[str], env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the minimized worker environment plus command-specific safety compatibility.
+
+    Grok's built-in ``strict`` sandbox intentionally cannot read the user's global
+    Git configuration. Git treats an unreadable ``~/.gitconfig`` as fatal even for
+    read-only commands such as ``git status``. Pointing Git at the OS null device
+    preserves the strict filesystem boundary while leaving repository-local and
+    system Git configuration available. It does not grant a new path or credential.
+    """
+
+    result = dict(_worker_environment() if env is None else env)
+    if command and Path(command[0]).name == "grok" and any(
+        left == "--sandbox" and right == "strict" for left, right in zip(command, command[1:])
+    ):
+        result["GIT_CONFIG_GLOBAL"] = os.devnull
+    return result
+
+
 def run_worker_process(
     command: list[str], root: Path, *, timeout: float | None, env: dict[str, str] | None = None
 ) -> tuple[int, str]:
@@ -285,7 +303,7 @@ def run_worker_process(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=_worker_environment() if env is None else env,
+            env=_environment_for_command(command, env),
             check=False,
         )
     except subprocess.TimeoutExpired as exc:

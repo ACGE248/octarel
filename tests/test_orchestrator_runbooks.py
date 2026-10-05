@@ -931,6 +931,7 @@ def test_real_dry_run_session_end_to_end_spawns_no_worker_cli(tmp_path):
         worker="claude-code",
         worktree=str(repo),
         launch_mode=LAUNCH_SESSION,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
         timeout_seconds=60,
         command=("describe the registry",),
     )
@@ -990,12 +991,8 @@ def test_starting_an_overnight_runbook_carries_repo_configured_auto_onto_the_tas
     assert argv[argv.index("--permission-profile") + 1] == PERMISSION_REPO_CONFIGURED_AUTO
 
 
-def test_starting_a_standard_profile_runbook_omits_the_permission_profile_flag(tmp_path, monkeypatch):
-    """A standard-profile (default) runbook must produce byte-identical argv to before
-
-    this feature existed: no ``--permission-profile`` flag at all, since the
-    worker's own default (manual) invocation already applies.
-    """
+def test_every_write_preset_launches_its_declared_unattended_profile(tmp_path, monkeypatch):
+    """A write Runbook never falls back to an attended base invocation."""
 
     repo = _git_worktree(tmp_path)
     state = State(":memory:")
@@ -1013,14 +1010,14 @@ def test_starting_a_standard_profile_runbook_omits_the_permission_profile_flag(t
         worktree=str(repo),
         duration_minutes=120,
     )
-    assert rb.permission_profile == PERMISSION_STANDARD
+    assert rb.permission_profile == PERMISSION_REPO_CONFIGURED_AUTO
 
     started = runbooks.start_runbook(state=state, registry=registry, supervisor=supervisor, repo_root=repo, runbook_id=rb.id)
     task = state.get_task(started.task_id)
-    assert task.permission_profile == PERMISSION_STANDARD
+    assert task.permission_profile == PERMISSION_REPO_CONFIGURED_AUTO
 
     argv = supervisor._build_argv(task, dry_run=True)
-    assert "--permission-profile" not in argv
+    assert argv[argv.index("--permission-profile") + 1] == PERMISSION_REPO_CONFIGURED_AUTO
 
 
 def test_real_dry_run_overnight_session_builds_the_unattended_claude_invocation(tmp_path):
@@ -1238,37 +1235,56 @@ def test_update_runbook_rejects_a_parent_worker_swap_that_breaks_an_existing_aut
         worktree="/tmp/x",
     )
     assert rb.permission_profile == PERMISSION_REPO_CONFIGURED_AUTO
-    with pytest.raises(runbooks.RunbookError, match="repo_configured_auto|read-only"):
-        runbooks.update_runbook(state=state, registry=registry, runbook_id=rb.id, parent_worker="grok-build")
+    with pytest.raises(runbooks.RunbookError, match="unattended writes"):
+        runbooks.update_runbook(state=state, registry=registry, runbook_id=rb.id, parent_worker="deepseek-overflow")
     assert state.get_runbook(rb.id).parent_worker == "claude-code", "the rejected edit must not persist"
 
 
-def test_run_session_rejects_repo_configured_auto_for_a_write_capable_non_claude_worker():
-    """``grok-build`` is write-capable but declares no ``repo_configured_auto`` template:
+def test_run_session_builds_the_bounded_grok_unattended_profile():
+    """The real session seam uses native auto plus the repository sandbox, never bypass."""
 
-    the profile must still be rejected, not just for read-only workers.
-    """
+    from scripts.agents import orchestrate
+    registry = load_registry()
+    grok = registry.get("grok-build")
+    assert grok.is_write_capable and grok.supports_unattended_write
+    result = orchestrate.run_session(
+        registry=registry,
+        root=Path(__file__).resolve().parents[1],
+        task="ENG-AO-16",
+        worker_name="grok-build",
+        role="secondary-implementation",
+        model=None,
+        intensity="low",
+        why="test bounded Grok unattended invocation",
+        prompt="do it",
+        dry_run=True,
+        timeout=30.0,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
+    )
+    command = result.record.requested_command
+    assert command[command.index("--permission-mode") + 1] == "auto"
+    assert command[command.index("--sandbox") + 1] == "strict"
+    assert "--always-approve" not in command and "bypassPermissions" not in command
 
+
+def test_run_session_rejects_an_attended_profile_for_a_write_worker():
     from scripts.agents import orchestrate
     from scripts.agents.validation import ValidationError
 
-    registry = load_registry()
-    grok = registry.get("grok-build")
-    assert grok.is_write_capable and not grok.is_read_only
-    with pytest.raises(ValidationError, match="permission_profile"):
+    with pytest.raises(ValidationError, match="requires permission_profile 'repo_configured_auto'"):
         orchestrate.run_session(
-            registry=registry,
+            registry=load_registry(),
             root=Path(__file__).resolve().parents[1],
-            task="ENG-AGENT-02-S5",
+            task="ENG-AO-16",
             worker_name="grok-build",
             role="secondary-implementation",
             model=None,
             intensity="low",
-            why="test",
+            why="prove standard mode remains attended",
             prompt="do it",
             dry_run=True,
             timeout=30.0,
-            permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
+            permission_profile=PERMISSION_STANDARD,
         )
 
 
