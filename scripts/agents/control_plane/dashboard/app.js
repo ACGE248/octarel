@@ -1603,7 +1603,7 @@
     closeSystemMenu();
     closeAttention();
     applySearch(document.getElementById("global-search")?.value || "");
-    if (viewId === "view-flow") requestAnimationFrame(() => drawFlowEdges());
+    if (viewId === "view-flow") requestAnimationFrame(() => layoutFlowCanvas());
     if (viewId === "view-terminal" && connectTerminalView) connectTerminalView();
     // Populate a view-scoped panel now rather than waiting for the next poll,
     // since it is skipped entirely while its view is hidden.
@@ -2222,9 +2222,9 @@
       container.appendChild(el("p", { class: "hint", text: "No tasks yet." }));
     }
     container.querySelectorAll(".flow-node").forEach((card) => {
-      card.addEventListener("toggle", () => requestAnimationFrame(() => drawFlowEdges(data.edges || [])));
+      card.addEventListener("toggle", () => requestAnimationFrame(() => layoutFlowCanvas(data.edges || [])));
     });
-    requestAnimationFrame(() => drawFlowEdges(data.edges || []));
+    requestAnimationFrame(() => layoutFlowCanvas(data.edges || []));
   }
 
   // Draws a real dependency connector (from /api/flow's own `edges`,
@@ -2233,16 +2233,85 @@
   // can't show *why* one task waits on another; this line can, without
   // adopting a graph-layout library for what is still a small, per-project
   // task count.
+  const FLOW_ZOOM_MIN = 0.5;
+  const FLOW_ZOOM_MAX = 1.6;
+  const FLOW_ZOOM_STEP = 0.1;
+  let flowZoom = 1;
   let lastFlowEdges = [];
+  let flowMinimapFrame = null;
+
+  function flowElements() {
+    return {
+      canvas: document.getElementById("flow-canvas"),
+      viewport: document.getElementById("flow-viewport"),
+      shell: document.getElementById("flow-stage-shell"),
+      stage: document.getElementById("flow-stage"),
+      graph: document.getElementById("flow-graph"),
+    };
+  }
+
+  function updateFlowToolbar() {
+    const value = document.getElementById("flow-zoom-value");
+    const out = document.getElementById("flow-zoom-out");
+    const inn = document.getElementById("flow-zoom-in");
+    if (value) value.textContent = `${Math.round(flowZoom * 100)}%`;
+    if (out) out.disabled = flowZoom <= FLOW_ZOOM_MIN + 0.001;
+    if (inn) inn.disabled = flowZoom >= FLOW_ZOOM_MAX - 0.001;
+  }
+
+  function setFlowZoom(next, { announce = true, anchor = null } = {}) {
+    const { viewport } = flowElements();
+    if (!viewport) return;
+    const previous = flowZoom;
+    const clamped = Math.min(FLOW_ZOOM_MAX, Math.max(FLOW_ZOOM_MIN, Number(next) || 1));
+    flowZoom = Math.round(clamped * 100) / 100;
+    const point = anchor || {
+      x: viewport.scrollLeft + viewport.clientWidth / 2,
+      y: viewport.scrollTop + viewport.clientHeight / 2,
+    };
+    layoutFlowCanvas();
+    const ratio = flowZoom / previous;
+    viewport.scrollLeft = Math.max(0, point.x * ratio - viewport.clientWidth / 2);
+    viewport.scrollTop = Math.max(0, point.y * ratio - viewport.clientHeight / 2);
+    updateFlowToolbar();
+    scheduleFlowMinimap();
+    if (announce) {
+      const status = document.getElementById("flow-canvas-status");
+      if (status) status.textContent = `Flow canvas zoom ${Math.round(flowZoom * 100)}%.`;
+    }
+  }
+
+  function layoutFlowCanvas(edges) {
+    if (edges) lastFlowEdges = edges;
+    const { viewport, shell, stage, graph } = flowElements();
+    if (!viewport || !shell || !stage || !graph || viewport.clientWidth === 0) return;
+    const style = getComputedStyle(viewport);
+    const insetX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const insetY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    const availableWidth = Math.max(1, viewport.clientWidth - insetX);
+    const availableHeight = Math.max(1, viewport.clientHeight - insetY);
+    stage.style.width = `${availableWidth}px`;
+    stage.style.transform = `scale(${flowZoom})`;
+    const baseWidth = Math.max(stage.scrollWidth, graph.scrollWidth, availableWidth, 1);
+    const baseHeight = Math.max(graph.scrollHeight, graph.offsetHeight, 1);
+    shell.style.width = `${Math.max(availableWidth, baseWidth * flowZoom)}px`;
+    shell.style.height = `${Math.max(availableHeight, baseHeight * flowZoom)}px`;
+    drawFlowEdges();
+    updateFlowToolbar();
+    scheduleFlowMinimap();
+  }
+
   function drawFlowEdges(edges) {
     if (edges) lastFlowEdges = edges;
-    const wrap = document.querySelector(".flow-graph-wrap");
+    const wrap = document.getElementById("flow-stage");
     const svg = document.getElementById("flow-edges-svg");
     if (!wrap || !svg || document.getElementById("view-flow")?.hidden) return;
     const box = wrap.getBoundingClientRect();
-    svg.setAttribute("viewBox", `0 0 ${Math.max(1, box.width)} ${Math.max(1, box.height)}`);
-    svg.setAttribute("width", String(box.width));
-    svg.setAttribute("height", String(box.height));
+    const width = Math.max(1, wrap.offsetWidth);
+    const height = Math.max(1, wrap.scrollHeight);
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("width", String(width));
+    svg.setAttribute("height", String(height));
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     lastFlowEdges.forEach((edge) => {
       const from = wrap.querySelector(`[data-task-id="${edge.from}"] > summary`);
@@ -2250,8 +2319,14 @@
       if (!from || !to) return; // dependency outside the currently loaded task list
       const fr = from.getBoundingClientRect();
       const tr = to.getBoundingClientRect();
-      const start = { x: fr.right - box.left, y: fr.top - box.top + fr.height / 2 };
-      const end = { x: tr.left - box.left, y: tr.top - box.top + tr.height / 2 };
+      const start = {
+        x: (fr.right - box.left) / flowZoom,
+        y: (fr.top - box.top + fr.height / 2) / flowZoom,
+      };
+      const end = {
+        x: (tr.left - box.left) / flowZoom,
+        y: (tr.top - box.top + tr.height / 2) / flowZoom,
+      };
       const path = svgEl("path", {
         d: `M ${start.x} ${start.y} C ${(start.x + end.x) / 2} ${start.y}, ${(start.x + end.x) / 2} ${end.y}, ${end.x} ${end.y}`,
         fill: "none",
@@ -2262,6 +2337,87 @@
       });
       svg.appendChild(path);
     });
+  }
+
+  function scheduleFlowMinimap() {
+    if (flowMinimapFrame !== null) return;
+    flowMinimapFrame = requestAnimationFrame(() => {
+      flowMinimapFrame = null;
+      renderFlowMinimap();
+    });
+  }
+
+  function renderFlowMinimap() {
+    const { viewport, shell } = flowElements();
+    const minimap = document.getElementById("flow-minimap");
+    const svg = document.getElementById("flow-minimap-svg");
+    const windowBox = document.getElementById("flow-minimap-viewport");
+    if (!viewport || !shell || !minimap || !svg || !windowBox || viewport.clientWidth === 0) return;
+    const contentWidth = Math.max(1, shell.scrollWidth, viewport.scrollWidth);
+    const contentHeight = Math.max(1, shell.scrollHeight, viewport.scrollHeight);
+    const viewportRect = viewport.getBoundingClientRect();
+    svg.setAttribute("viewBox", `0 0 ${contentWidth} ${contentHeight}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const nodes = {};
+    shell.querySelectorAll(".flow-node").forEach((node) => {
+      const rect = node.getBoundingClientRect();
+      const projected = {
+        x: rect.left - viewportRect.left + viewport.scrollLeft,
+        y: rect.top - viewportRect.top + viewport.scrollTop,
+        width: rect.width,
+        height: rect.height,
+      };
+      nodes[node.dataset.taskId] = projected;
+      svg.appendChild(svgEl("rect", {
+        class: "flow-minimap-node",
+        x: projected.x,
+        y: projected.y,
+        width: Math.max(3, projected.width),
+        height: Math.max(3, projected.height),
+        rx: "4",
+      }));
+    });
+    lastFlowEdges.forEach((edge) => {
+      const from = nodes[edge.from];
+      const to = nodes[edge.to];
+      if (!from || !to) return;
+      svg.insertBefore(svgEl("line", {
+        class: "flow-minimap-edge",
+        x1: from.x + from.width,
+        y1: from.y + from.height / 2,
+        x2: to.x,
+        y2: to.y + to.height / 2,
+      }), svg.firstChild);
+    });
+    const mapWidth = minimap.clientWidth;
+    const mapHeight = minimap.clientHeight;
+    windowBox.style.left = `${viewport.scrollLeft / contentWidth * mapWidth}px`;
+    windowBox.style.top = `${viewport.scrollTop / contentHeight * mapHeight}px`;
+    windowBox.style.width = `${Math.min(mapWidth, viewport.clientWidth / contentWidth * mapWidth)}px`;
+    windowBox.style.height = `${Math.min(mapHeight, viewport.clientHeight / contentHeight * mapHeight)}px`;
+    minimap.dataset.contentWidth = String(contentWidth);
+    minimap.dataset.contentHeight = String(contentHeight);
+  }
+
+  function fitFlowCanvas() {
+    const { viewport, graph } = flowElements();
+    if (!viewport || !graph) return;
+    const style = getComputedStyle(viewport);
+    const availableWidth = Math.max(1, viewport.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
+    const availableHeight = Math.max(1, viewport.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom));
+    const contentWidth = Math.max(1, graph.scrollWidth);
+    const contentHeight = Math.max(1, graph.scrollHeight);
+    const fitted = Math.min(1, availableWidth / contentWidth, availableHeight / contentHeight);
+    const safeFitted = Math.floor(fitted * 100) / 100;
+    setFlowZoom(safeFitted, { announce: false, anchor: { x: 0, y: 0 } });
+    viewport.scrollTo({ left: 0, top: 0 });
+    const status = document.getElementById("flow-canvas-status");
+    if (status) {
+      status.textContent = fitted < FLOW_ZOOM_MIN
+        ? `Minimum zoom ${Math.round(FLOW_ZOOM_MIN * 100)}%; the canvas still requires scrolling.`
+        : `Flow canvas fitted at ${Math.round(flowZoom * 100)}%.`;
+    }
   }
 
   function renderOverviewPipeline(workflow) {
@@ -6511,8 +6667,81 @@
     });
     window.addEventListener("resize", () => {
       renderOverviewPipeline(state.workflow);
-      drawFlowEdges();
+      layoutFlowCanvas();
     });
+  }
+
+  function initFlowCanvas() {
+    const card = document.getElementById("flow-canvas-card");
+    const canvas = document.getElementById("flow-canvas");
+    const viewport = document.getElementById("flow-viewport");
+    const minimap = document.getElementById("flow-minimap");
+    const fullscreen = document.getElementById("flow-fullscreen");
+    if (!card || !canvas || !viewport || !minimap || !fullscreen) return;
+
+    document.getElementById("flow-zoom-out")?.addEventListener("click", () => setFlowZoom(flowZoom - FLOW_ZOOM_STEP));
+    document.getElementById("flow-zoom-in")?.addEventListener("click", () => setFlowZoom(flowZoom + FLOW_ZOOM_STEP));
+    document.getElementById("flow-fit")?.addEventListener("click", fitFlowCanvas);
+    viewport.addEventListener("scroll", scheduleFlowMinimap, { passive: true });
+    viewport.addEventListener("keydown", (event) => {
+      if (event.target !== viewport || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (!["+", "=", "-", "0"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "-") setFlowZoom(flowZoom - FLOW_ZOOM_STEP);
+      else if (event.key === "0") setFlowZoom(1);
+      else setFlowZoom(flowZoom + FLOW_ZOOM_STEP);
+    });
+    minimap.addEventListener("click", (event) => {
+      const width = Number(minimap.dataset.contentWidth || 0);
+      const height = Number(minimap.dataset.contentHeight || 0);
+      if (!width || !height) return;
+      const rect = minimap.getBoundingClientRect();
+      viewport.scrollLeft = Math.max(0, (event.clientX - rect.left) / rect.width * width - viewport.clientWidth / 2);
+      viewport.scrollTop = Math.max(0, (event.clientY - rect.top) / rect.height * height - viewport.clientHeight / 2);
+      scheduleFlowMinimap();
+    });
+    minimap.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const stepX = Math.max(40, viewport.clientWidth * 0.25);
+      const stepY = Math.max(40, viewport.clientHeight * 0.25);
+      if (event.key === "ArrowLeft") viewport.scrollBy({ left: -stepX });
+      else if (event.key === "ArrowRight") viewport.scrollBy({ left: stepX });
+      else if (event.key === "ArrowUp") viewport.scrollBy({ top: -stepY });
+      else if (event.key === "ArrowDown") viewport.scrollBy({ top: stepY });
+      else if (event.key === "Home") viewport.scrollTo({ left: 0, top: 0 });
+      else viewport.scrollTo({ left: viewport.scrollWidth, top: viewport.scrollHeight });
+      scheduleFlowMinimap();
+    });
+
+    const fullscreenSupported = !!document.fullscreenEnabled && typeof card.requestFullscreen === "function";
+    fullscreen.disabled = !fullscreenSupported;
+    if (!fullscreenSupported) {
+      fullscreen.title = "Fullscreen is not available in this browser";
+      fullscreen.setAttribute("aria-label", "Flow canvas fullscreen unavailable");
+    }
+    fullscreen.addEventListener("click", async () => {
+      if (!fullscreenSupported) return;
+      const status = document.getElementById("flow-canvas-status");
+      try {
+        if (document.fullscreenElement === card) await document.exitFullscreen();
+        else await card.requestFullscreen();
+      } catch (_err) {
+        if (status) status.textContent = "Fullscreen request was not accepted by the browser.";
+      }
+    });
+    document.addEventListener("fullscreenchange", () => {
+      const active = document.fullscreenElement === card;
+      fullscreen.setAttribute("aria-pressed", String(active));
+      fullscreen.setAttribute("aria-label", `${active ? "Exit" : "Enter"} flow canvas fullscreen`);
+      fullscreen.textContent = active ? "Exit fullscreen" : "Fullscreen";
+      requestAnimationFrame(() => layoutFlowCanvas());
+    });
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => layoutFlowCanvas());
+      observer.observe(canvas);
+    }
+    updateFlowToolbar();
   }
 
   function initWorkflowDetail() {
@@ -6900,6 +7129,7 @@
   initMaxWriters();
   initConfigurationRollback();
   initRanges();
+  initFlowCanvas();
   initWorkflowDetail();
   initOperationsControls();
   initReportSheet();

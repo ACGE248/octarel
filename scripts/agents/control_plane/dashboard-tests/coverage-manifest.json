@@ -93,7 +93,11 @@
     "ENG-AGENT-#/primary-implementationCodex Build (codex-build)…",
     "ENG-CI-#/focused-testsGrok Build (grok-build)focused-testsG…",
     "ENG-PC-#/primary-implementationClaude Code (claude-code)pri…",
-    "V#-#/primary-implementationClaude Code (claude-code)primary…"
+    "Enter flow canvas fullscreen",
+    "Fit flow canvas to screen",
+    "V#-#/primary-implementationClaude Code (claude-code)primary…",
+    "Zoom in flow canvas",
+    "Zoom out flow canvas"
   ],
   "view-priority": [
     "Routing mode"

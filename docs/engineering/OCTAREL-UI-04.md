@@ -63,7 +63,7 @@ functional when it does nothing.*
 | Settings: auto-prune stale worktrees + threshold | **Omitted** | Worktree cleanup is deliberately explicit and confirmation-gated. An automatic pruner is a product decision, not a UI one. |
 | Execution Events: CVE counts, review attestation card | **Omitted** | No scanner or attestation record produces these. Rendering zeros would assert a security posture that was never measured. |
 | Execution Events: type-to-confirm destructive modal | **Not adopted** | Octarel already has a server-enforced confirmation gate that re-derives destructiveness rather than trusting the client. Replacing it with a client-side typing challenge would be weaker, not stronger. |
-| Flow canvas: minimap, fit-to-screen, zoom %, fullscreen | **Deferred** | Genuinely useful, but pure canvas work with no data dependency. Recorded here so it is a known gap rather than an oversight. |
+| Flow canvas: minimap, fit-to-screen, zoom %, fullscreen | **Delivered** | Extends the existing `/api/flow` projection in place. The minimap is derived from rendered nodes and dependency edges, zoom is bounded and reported, fit uses measured canvas bounds, and fullscreen uses the browser Fullscreen API with an explicit unavailable state. |
 | AO-style cache metrics and context utilization | **Shown as `NOT_EXPOSED`** | Implemented as visible, explained gaps rather than omitted — see below. |
 
 ## Metrics the stack cannot produce
@@ -100,6 +100,27 @@ rims, glows, borders), and status **text** uses the same hue at a lightness that
 clears 4.5:1. Hue family and semantic meaning are unchanged; only lightness
 moves, and only in light mode. Measured ratios are recorded beside each value in
 `styles.css`.
+
+## Flow canvas
+
+The Flow view remains a projection of `/api/flow`; it does not own scheduling
+state or invent graph data. Its canvas controls operate only on the rendered
+task nodes and durable dependency edges:
+
+- zoom is bounded from 50% to 160%, exposes its current value, and supports the
+  labelled toolbar plus keyboard `+`, `-`, and `0` (reset to 100%) controls;
+- fit-to-screen uses measured rendered bounds and never claims an inferred
+  progress or dependency;
+- the minimap is rebuilt from the actual node geometry and dependency list and
+  marks the current scroll viewport;
+- fullscreen calls the browser Fullscreen API and disables itself with a named
+  unavailable state when the browser does not expose that capability; and
+- dependency lines are redrawn after zoom, resize, or card expansion so their
+  endpoints remain attached to the same real task cards.
+
+The canvas keeps the existing detail disclosures, parallel-running evidence,
+and explicit `NOT_REPORTED` pipeline stages. It adds no backend or second
+source of truth.
 
 ## Light/dark parity
 
