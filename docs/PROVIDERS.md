@@ -20,9 +20,9 @@ metadata commands. It does not make live product-provider generation calls.
 | `claude-code` | Claude Code | Claude.ai subscription session (`claude auth status` must show `claude.ai`, never an API key) | write (ORCHESTRATOR/IMPLEMENTER) | required | prohibited |
 | `codex-build` | Codex | ChatGPT subscription (`codex login status`) | write | required | prohibited |
 | `codex-review` | Codex | same ChatGPT session | read-only review | not required | prohibited |
-| `grok-build` | Grok Build | configured CLI session | write (IMPLEMENTER) | required | prohibited |
+| `grok-build` | Grok Build | grok.com session (`grok models` must confirm login) | write (IMPLEMENTER); explicit bounded unattended profile | required | prohibited |
 | `grok-build-review` | Grok Build | configured CLI session | read-only review (plan + sandbox) | not required | prohibited |
-| `grok-build-bots` | Grok Build | configured CLI session | write (IMPLEMENTER); explicit bot-enabled route, never automatic | required | prohibited |
+| `grok-build-bots` | Grok Build | grok.com session (`grok models` must confirm login) | write (IMPLEMENTER); explicit bot-enabled route, never automatic; bounded unattended primary | required | prohibited |
 | `grok-build-bot` | Grok Build | configured CLI session | read-only, non-recursive bot (plan + sandbox); launched only by AO fan-out, not a reviewer | not required | prohibited |
 | `opencode2-gemini-flash-lite` | OpenCode | local OpenCode session | read-only tests/search | not required | prohibited |
 | `opencode2-gemini-flash-lite-review` | OpenCode | local OpenCode session | read-only review | not required | prohibited |
@@ -48,6 +48,14 @@ Write workers require an isolated worktree and a write lock. Review workers
 are read-only (`plan`/`sandbox`/`read-only` as declared). An implementer must
 not be its own final independent reviewer. Exact-tree high-risk gates reject
 Claude/Anthropic and Codex as the independent review provider.
+
+Unattended write eligibility is separately declared for every write/focused-edit worker and exposed through
+`AdapterCapabilities.unattended_write`. A `session` launch, managed dispatch, Quick Start, retry, and automatic
+fallback all require that fact and its exact permission profile; ordinary write capability is insufficient.
+Claude Code, Codex Build, Grok Build, and the explicit Grok bot-primary route currently bind that capability to
+`repo_configured_auto`; disabled DeepSeek overflow explicitly does not. Grok's profile uses native headless
+`auto` plus the built-in `strict` sandbox. It never uses always-approve/bypass or an API key. A safety-classifier
+block can still make an individual tool action fail, which is the bounded behavior—not a prompt or silent widening.
 
 ## Limits and fallback
 
@@ -80,7 +88,7 @@ used, and provider policy files are never rewritten. Details: `scripts/agents/RE
 Native Grok and Codex workers keep stable identities and routing; their configured `default_model` is the last
 verified baseline, and the installed native CLI may advance the effective model to a strictly newer same-tier model it
 enumerates itself, but only when the existing subscription/session is authenticated and the worker flags and
-read-only/worktree permission shape still verify (`python -m scripts.agents.native_models refresh|list`,
+read-only/strict-worktree permission shape still verify (`python -m scripts.agents.native_models refresh|list`,
 `GET /api/native-models`). Otherwise the configured model is retained with the reason recorded. OpenCode labels are
 hints only, a different tier (for example `gpt-6-astra`) is never adopted by freshness, and no API key, paid, or
 premium route is involved. Details: `scripts/agents/README.md`, `.agents/providers/GROK.md`,

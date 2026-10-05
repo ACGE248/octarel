@@ -60,6 +60,7 @@ def test_supervisor_wrapper_runs_from_controller_when_target_predates_agents(tmp
         worker="claude-code",
         worktree=str(target),
         launch_mode=LAUNCH_SESSION,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
         command=("validation only",),
     )
 
@@ -481,6 +482,10 @@ def test_prelaunch_unavailable_worker_stays_truthfully_blocked_without_safe_repl
     codex.configured = True
     codex.state = "AVAILABLE"
     state.upsert_provider_state(codex)
+    grok = state.get_provider_state("grok-build")
+    grok.state = "DISABLED"
+    grok.reason = "disabled for no-safe-replacement test"
+    state.upsert_provider_state(grok)
     monkeypatch.setattr("scripts.agents.registry.Worker.availability_reason", lambda self, probe=True: REASON_AVAILABLE)
     monkeypatch.setattr("scripts.agents.control_plane.runbooks.validate_target", lambda **kwargs: None)
     runbook = Runbook(
@@ -511,7 +516,7 @@ def test_prelaunch_unavailable_worker_stays_truthfully_blocked_without_safe_repl
     assert task.failed_worker_id == "claude-code"
     assert [item["worker"] for item in usage["route_history"]] == ["claude-code"]
     assert "runbook is not auto-eligible for Codex" in persisted.recovery_note
-    assert "permission profile repo_configured_auto is unsupported" in persisted.recovery_note
+    assert "grok-build: provider state is DISABLED" in persisted.recovery_note
 
 
 def test_prelaunch_attempt_history_survives_restart_without_reselecting_unavailable_worker(tmp_path, monkeypatch):
@@ -768,6 +773,7 @@ def test_fallback_history_skips_failed_routes_and_selects_next_provider(tmp_path
     runbook = Runbook(
         id="RB-chain", name="Chain", preset="finish-pr", objective="same objective", source_ref="ENG-119",
         branch="eng/119", worktree=str(tmp_path), parent_worker="codex-build", max_duration_minutes=120,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
         codex_policy="unrestricted", codex_auto_eligible=True, max_codex_invocations=2,
         status=RUNBOOK_FAILED, task_id="RB-chain-session",
     )
@@ -776,6 +782,7 @@ def test_fallback_history_skips_failed_routes_and_selects_next_provider(tmp_path
         state=TASK_FAILED, worktree=str(tmp_path), last_error="service unavailable",
         failed_worker_id="codex-build", failure_reason_sanitized="service unavailable",
         failure_category="PROVIDER_OUTAGE", launch_mode=LAUNCH_SESSION, runbook_id=runbook.id,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
     )
     usage = new_usage_record(
         runbook_id=runbook.id, task_id=task.id, classification="routine",
@@ -819,7 +826,8 @@ def test_automatic_fallback_persists_restart_decision_and_never_duplicates_launc
     runbook = Runbook(
         id="RB-restart", name="Restart", preset="finish-pr", objective="same objective",
         source_ref="ENG-119", branch="eng/119", worktree=str(tmp_path), parent_worker="claude-code",
-        max_duration_minutes=120, codex_policy="unrestricted", codex_auto_eligible=True,
+        max_duration_minutes=120, permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
+        codex_policy="unrestricted", codex_auto_eligible=True,
         max_codex_invocations=1, status=RUNBOOK_FAILED, task_id="RB-restart-session",
     )
     task = Task(
@@ -827,6 +835,7 @@ def test_automatic_fallback_persists_restart_decision_and_never_duplicates_launc
         state=TASK_FAILED, worktree=str(tmp_path), failed_worker_id="claude-code",
         failure_reason_sanitized="weekly quota exhausted", failure_category="QUOTA",
         launch_mode=LAUNCH_SESSION, runbook_id=runbook.id, fallback_automatic=None,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
     )
     with State(database) as state:
         reconcile_provider_states(state, registry)
@@ -870,6 +879,7 @@ def test_live_failed_process_blocks_replacement_write_ownership(tmp_path, monkey
     runbook = Runbook(
         id="RB-owner", name="Owner", preset="finish-pr", objective="same objective", source_ref="ENG-119",
         branch="eng/119", worktree=str(tmp_path), parent_worker="claude-code", max_duration_minutes=120,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
         codex_policy="unrestricted", codex_auto_eligible=True, max_codex_invocations=1,
         status=RUNBOOK_FAILED, task_id="RB-owner-session",
     )
@@ -877,6 +887,7 @@ def test_live_failed_process_blocks_replacement_write_ownership(tmp_path, monkey
         id=runbook.task_id, task_ref="ENG-119", role="primary-implementation", worker="claude-code",
         state=TASK_FAILED, pid=77, worktree=str(tmp_path), failed_worker_id="claude-code",
         failure_reason_sanitized="quota exhausted", launch_mode=LAUNCH_SESSION, runbook_id=runbook.id,
+        permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
     )
     state.upsert_runbook(runbook)
     state.upsert_task(task)

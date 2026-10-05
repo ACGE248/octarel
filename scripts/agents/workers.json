@@ -34,6 +34,11 @@
       "repository_data_authorization": "explicit-worker-selection",
       "allow_api_billing": false,
       "requires_isolated_worktree": true,
+      "unattended_write": {
+        "supported": true,
+        "permission_profile": "repo_configured_auto",
+        "reason": "Claude Code declares the repository-configured unattended invocation already gated by Octarel's dedicated-worktree and write-lock controls."
+      },
       "roles": ["primary-implementation", "secondary-implementation"],
       "cli": {
         "bin": "claude",
@@ -78,6 +83,11 @@
       "repository_data_authorization": "explicit-worker-selection",
       "allow_api_billing": false,
       "requires_isolated_worktree": true,
+      "unattended_write": {
+        "supported": true,
+        "permission_profile": "repo_configured_auto",
+        "reason": "Codex declares a workspace-write unattended invocation using the authenticated ChatGPT session; API-key billing remains disabled."
+      },
       "roles": ["primary-implementation", "secondary-implementation"],
       "cli": {
         "bin": "codex",
@@ -116,17 +126,33 @@
       "repository_data_authorization": "explicit-worker-selection",
       "allow_api_billing": false,
       "requires_isolated_worktree": true,
+      "unattended_write": {
+        "supported": true,
+        "permission_profile": "repo_configured_auto",
+        "reason": "Native Grok auto mode runs headlessly without approval prompts while the CLI's built-in strict sandbox confines writes to the selected checkout and protected session/temp paths; no always-approve or bypass mode is used."
+      },
       "roles": ["primary-implementation", "secondary-implementation"],
       "cli": {
         "bin": "grok",
         "version_args": ["--version"],
+        "auth_check": {
+          "args": ["models"],
+          "success_pattern": "You are logged in with grok.com."
+        },
         "template": [
           "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
           "--reasoning-effort", "{intensity}", "--permission-mode", "default",
-          "--sandbox", "work-tree", "--no-subagents", "--disable-web-search"
-        ]
+          "--sandbox", "strict", "--no-subagents", "--disable-web-search"
+        ],
+        "permission_profiles": {
+          "repo_configured_auto": [
+            "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
+            "--reasoning-effort", "{intensity}", "--permission-mode", "auto",
+            "--sandbox", "strict", "--no-subagents", "--disable-web-search"
+          ]
+        }
       },
-      "notes": "Secondary implementation when configured. Uses normal permission prompts plus a sandbox, never auto-approval. Write runs require --allow-write and a dedicated worktree."
+      "notes": "Secondary implementation when configured. Standard mode remains attended. The explicit repo_configured_auto profile uses native auto mode (not always-approve/bypass) plus the built-in strict sandbox; write runs still require --allow-write and a dedicated worktree."
     },
     "grok-build-bots": {
       "display_name": "Grok Build Bots",
@@ -145,6 +171,11 @@
       "repository_data_authorization": "explicit-worker-selection",
       "allow_api_billing": false,
       "requires_isolated_worktree": true,
+      "unattended_write": {
+        "supported": true,
+        "permission_profile": "repo_configured_auto",
+        "reason": "The Grok primary shares the proven native auto plus built-in strict sandbox boundary; AO-run read-only bots do not widen that primary's permissions."
+      },
       "roles": ["bot-implementation"],
       "subagents": {
         "mode": "ao-orchestrated",
@@ -158,13 +189,24 @@
       "cli": {
         "bin": "grok",
         "version_args": ["--version"],
+        "auth_check": {
+          "args": ["models"],
+          "success_pattern": "You are logged in with grok.com."
+        },
         "template": [
           "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
           "--reasoning-effort", "{intensity}", "--permission-mode", "default",
-          "--sandbox", "work-tree", "--no-subagents", "--disable-web-search"
-        ]
+          "--sandbox", "strict", "--no-subagents", "--disable-web-search"
+        ],
+        "permission_profiles": {
+          "repo_configured_auto": [
+            "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
+            "--reasoning-effort", "{intensity}", "--permission-mode", "auto",
+            "--sandbox", "strict", "--no-subagents", "--disable-web-search"
+          ]
+        }
       },
-      "notes": "Separate, never-automatic route (ENG-AO-02). The primary is the only writer and keeps --no-subagents: AO, not the model, runs at most max_bots one-level read-only bots (grok-build-bot) before the primary starts, so count, scope, timeout, evidence, and read-only enforcement stay deterministic. Bot output is assistance, not independent review. Subscription/OIDC session only; no API-key fallback. grok-build and grok-build-review are unchanged."
+      "notes": "Separate, never-automatic route (ENG-AO-02). The primary is the only writer and keeps --no-subagents: AO, not the model, runs at most max_bots one-level read-only bots (grok-build-bot) before the primary starts, so count, scope, timeout, evidence, and read-only enforcement stay deterministic. Its explicit unattended profile uses native auto mode plus the built-in strict sandbox, never always-approve/bypass. Bot output is assistance, not independent review. Subscription/OIDC session only; no API-key fallback."
     },
     "grok-build-review": {
       "display_name": "Grok Build Review",
@@ -187,6 +229,10 @@
       "cli": {
         "bin": "grok",
         "version_args": ["--version"],
+        "auth_check": {
+          "args": ["models"],
+          "success_pattern": "You are logged in with grok.com."
+        },
         "template": [
           "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
           "--reasoning-effort", "{intensity}", "--permission-mode", "plan",
@@ -216,6 +262,10 @@
       "cli": {
         "bin": "grok",
         "version_args": ["--version"],
+        "auth_check": {
+          "args": ["models"],
+          "success_pattern": "You are logged in with grok.com."
+        },
         "template": [
           "--single", "{prompt}", "--output-format", "json", "--model", "{model}",
           "--reasoning-effort", "{intensity}", "--permission-mode", "plan",
@@ -483,6 +533,11 @@
       "repository_data_authorization": "explicit-per-run",
       "allow_api_billing": false,
       "requires_isolated_worktree": true,
+      "unattended_write": {
+        "supported": false,
+        "permission_profile": null,
+        "reason": "This disabled, explicitly authorized overflow route declares no bounded unattended invocation and may never be selected automatically."
+      },
       "roles": ["overflow"],
       "enabled": false,
       "cli": {

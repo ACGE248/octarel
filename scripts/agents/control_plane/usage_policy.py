@@ -199,6 +199,7 @@ def fallback_for_failure(
     max_codex_invocations: int,
     excluded_workers: Iterable[str] = (),
     permission_profile: str = "standard",
+    requires_unattended_write: bool = False,
     worker_availability: Mapping[str, str] | None = None,
     allowed_workers: Iterable[str] | None = None,
 ) -> FallbackDecision:
@@ -236,6 +237,16 @@ def fallback_for_failure(
         if required_write and not worker.is_write_capable:
             blocked.append(f"{name}: replacement is not write-capable")
             continue
+        if requires_unattended_write:
+            if not worker.supports_unattended_write:
+                blocked.append(f"{name}: unattended write unsupported ({worker.unattended_write_reason})")
+                continue
+            if permission_profile != worker.unattended_write_permission_profile:
+                blocked.append(
+                    f"{name}: unattended writes require permission profile "
+                    f"{worker.unattended_write_permission_profile}"
+                )
+                continue
         if permission_profile != "standard" and not worker.supports_permission_profile(permission_profile):
             blocked.append(f"{name}: permission profile {permission_profile} is unsupported")
             continue

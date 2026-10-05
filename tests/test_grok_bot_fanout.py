@@ -164,7 +164,11 @@ def _registry(fakes: Fakes, *, bot_script: str | None = None, **config) -> Regis
     settings = {**primary.subagents, **config}
     workers = dict(base.workers)
     workers[PRIMARY] = dataclasses.replace(
-        primary, cli_bin="sh", cli_template=("-c", fakes.primary_script(), "--"), subagents=settings
+        primary,
+        cli_bin="sh",
+        cli_template=("-c", fakes.primary_script(), "--"),
+        permission_profile_templates={"repo_configured_auto": ("-c", fakes.primary_script(), "--")},
+        subagents=settings,
     )
     workers[BOT] = dataclasses.replace(
         base.get(BOT), cli_bin="sh", cli_template=("-c", bot_script or fakes.bot_script(), "--")
@@ -719,7 +723,7 @@ def test_session_fanout_uses_explicit_bot_scopes(project, fakes):
     result = orchestrate.run_session(
         registry=_registry(fakes), root=project, task="ENG-AO-02", worker_name=PRIMARY, role="bot-implementation",
         model=None, intensity="low", why="test", prompt="finish the integration", dry_run=False, timeout=60.0,
-        bot_task_class="hard-debugging", bot_scope_paths=["src/app.py"],
+        permission_profile="repo_configured_auto", bot_task_class="hard-debugging", bot_scope_paths=["src/app.py"],
     )
     assert result.record.result == "PASS"
     evidence = result.manifest["policy_manifest"]["bot_fanout"]
@@ -740,6 +744,7 @@ def test_session_without_a_class_never_fans_out(project, fakes):
     result = orchestrate.run_session(
         registry=_registry(fakes), root=project, task="ENG-AO-02", worker_name=PRIMARY, role="bot-implementation",
         model=None, intensity="low", why="test", prompt="finish", dry_run=False, timeout=60.0,
+        permission_profile="repo_configured_auto",
     )
     assert result.record.result == "PASS" and not fakes.bot_calls.exists()
 

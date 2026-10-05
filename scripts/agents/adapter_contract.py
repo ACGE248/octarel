@@ -115,6 +115,9 @@ class AdapterCapabilities:
     supports_auth_probe: bool
     auth_probe_reason: str | None
     permission_profiles: tuple[str, ...]
+    supports_unattended_write: bool
+    unattended_write_permission_profile: str | None
+    unattended_write_reason: str
     supports_cancellation: bool
     cancellation_unavailable_reason: str | None
     supports_native_subagents: bool
@@ -137,6 +140,11 @@ class AdapterCapabilities:
             "streaming_events": {"supported": self.supports_streaming_events, "reason": self.streaming_unavailable_reason},
             "auth_probe": {"supported": self.supports_auth_probe, "reason": self.auth_probe_reason},
             "permission_profiles": list(self.permission_profiles),
+            "unattended_write": {
+                "supported": self.supports_unattended_write,
+                "permission_profile": self.unattended_write_permission_profile,
+                "reason": self.unattended_write_reason,
+            },
             "cancellation": {"supported": self.supports_cancellation, "reason": self.cancellation_unavailable_reason},
             "native_subagents": {"supported": self.supports_native_subagents, "reason": self.native_subagents_reason},
         }
@@ -231,6 +239,9 @@ def capabilities_for(worker: Worker) -> AdapterCapabilities:
             None if worker.auth_check_args else f"{worker.name} declares no cli.auth_check in workers.json"
         ),
         permission_profiles=permission_profiles,
+        supports_unattended_write=worker.supports_unattended_write,
+        unattended_write_permission_profile=worker.unattended_write_permission_profile,
+        unattended_write_reason=worker.unattended_write_reason,
         supports_cancellation=False,
         cancellation_unavailable_reason=CANCELLATION_NOT_IMPLEMENTED_REASON,
         supports_native_subagents=False,

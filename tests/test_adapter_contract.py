@@ -120,6 +120,29 @@ def test_grok_build_bots_and_grok_build_both_report_native_subagents_unsupported
     assert solo.native_subagents_reason == bots.native_subagents_reason
 
 
+def test_unattended_write_capability_is_explicit_and_bound_to_one_profile():
+    for name in ("claude-code", "codex-build", "grok-build", "grok-build-bots"):
+        caps = capabilities_for(REGISTRY.get(name))
+        assert caps.supports_unattended_write is True
+        assert caps.unattended_write_permission_profile == "repo_configured_auto"
+        assert caps.unattended_write_reason
+        assert caps.as_dict()["unattended_write"] == {
+            "supported": True,
+            "permission_profile": "repo_configured_auto",
+            "reason": caps.unattended_write_reason,
+        }
+
+    overflow = capabilities_for(REGISTRY.get("deepseek-overflow"))
+    assert overflow.supports_unattended_write is False
+    assert overflow.unattended_write_permission_profile is None
+    assert overflow.unattended_write_reason
+
+    reviewer = capabilities_for(REGISTRY.get("grok-build-review"))
+    assert reviewer.supports_unattended_write is False
+    assert reviewer.unattended_write_permission_profile is None
+    assert "read-only" in reviewer.unattended_write_reason
+
+
 def test_opencode_free_review_reports_runtime_pool_model_discovery():
     caps = capabilities_for(REGISTRY.get("opencode-free-review"))
     assert caps.effective_model_discovery == MODEL_DISCOVERY_RUNTIME_POOL
@@ -160,6 +183,9 @@ def test_compatibility_with_every_current_registry_worker():
         assert caps.can_write == worker.is_write_capable
         assert caps.supports_auth_probe == bool(worker.auth_check_args)
         assert caps.supports_native_subagents is False
+        assert caps.supports_unattended_write == worker.supports_unattended_write
+        assert caps.unattended_write_permission_profile == worker.unattended_write_permission_profile
+        assert caps.unattended_write_reason == worker.unattended_write_reason
         assert PERMISSION_STANDARD in caps.permission_profiles
         for profile in worker.permission_profile_templates:
             assert profile in caps.permission_profiles

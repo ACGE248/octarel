@@ -713,6 +713,18 @@ def run_session(
         raise ValidationError("session prompt must not be empty")
     if not why.strip():
         raise ValidationError("--why is required for delegated-worker audit evidence")
+    capabilities = capabilities_for(worker)
+    if worker.is_write_capable:
+        if not capabilities.supports_unattended_write:
+            raise ValidationError(
+                f"worker {worker_name!r} is not eligible for unattended writes: "
+                f"{capabilities.unattended_write_reason}"
+            )
+        if permission_profile != capabilities.unattended_write_permission_profile:
+            raise ValidationError(
+                f"worker {worker_name!r} requires permission_profile "
+                f"{capabilities.unattended_write_permission_profile!r} for unattended writes"
+            )
     if permission_profile != PERMISSION_STANDARD:
         if worker.is_read_only:
             raise ValidationError(
@@ -722,7 +734,7 @@ def run_session(
         # (scripts.agents.adapter_contract) instead of a second, parallel copy of
         # Worker.supports_permission_profile's rule, so there is one authority for
         # which profiles a worker supports.
-        if permission_profile not in capabilities_for(worker).permission_profiles:
+        if permission_profile not in capabilities.permission_profiles:
             raise ValidationError(f"worker {worker_name!r} does not support permission_profile {permission_profile!r}")
 
     bundle = compose_policy_bundle(

@@ -251,7 +251,7 @@ _FORBIDDEN_TOKENS = ("--dangerously-skip-permissions", "--always-approve", "--yo
 # Adjacent flag/value pairs every template of a class must still carry (positive, so a removed guard fails closed).
 _REQUIRED_PAIRS: dict[str, dict[str, tuple[tuple[str, str], ...]]] = {
     "grok": {"read-only": (("--sandbox", "read-only"), ("--permission-mode", "plan")),
-             "write": (("--sandbox", "work-tree"), ("--permission-mode", "default"))},
+             "write": (("--sandbox", "strict"),)},
     "codex": {"read-only": (("--sandbox", "read-only"),), "write": (("--sandbox", "workspace-write"),)},
 }
 _REQUIRED_TOKENS = {"grok": ("--no-subagents", "--disable-web-search"), "codex": ()}
@@ -283,6 +283,17 @@ def _shape_problems(adapter: Adapter, shapes: Sequence[WorkerShape]) -> list[str
                     problems.append(f"{shape.name}: {kind} route lost required {flag} {value}")
                 elif _values(template, flag) != [value]:  # a later conflicting value would win in typical CLI parsing
                     problems.append(f"{shape.name}: {kind} route has conflicting {flag} values {_values(template, flag)}")
+            if adapter.family == "grok" and kind == "write":
+                permission_modes = _values(template, "--permission-mode")
+                if not permission_modes:
+                    problems.append(
+                        f"{shape.name}: {kind} route lost required --permission-mode default or auto"
+                    )
+                elif len(permission_modes) != 1 or permission_modes[0] not in {"default", "auto"}:
+                    problems.append(
+                        f"{shape.name}: {kind} route has conflicting or unsafe --permission-mode values "
+                        f"{permission_modes}"
+                    )
             for token in _REQUIRED_TOKENS[adapter.family]:
                 if token not in template:
                     problems.append(f"{shape.name}: route lost required {token}")
