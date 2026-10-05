@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
+
+import pytest
 
 from scripts.agents.control_plane.dispatch import managed_admit
 from scripts.agents.control_plane.models import (
@@ -25,6 +28,8 @@ from scripts.agents.control_plane.usage_budgets import (
     CONSTRAINT_TOKENS,
     CONSTRAINT_TYPES,
     CONSTRAINT_WALL_CLOCK,
+    MODE_ADVISORY,
+    MODE_ENFORCED,
     PROGRESS_BASIS,
     SCOPE_GLOBAL,
     SCOPE_PROGRAM,
@@ -146,7 +151,17 @@ def _record(state, attempt, *, task_id="task-1"):
     )
 
 
-def _budget(state, budget_id, *, scope=SCOPE_GLOBAL, key=None, constraint=CONSTRAINT_ATTEMPTS, limit=1):
+def _budget(
+    state,
+    budget_id,
+    *,
+    scope=SCOPE_GLOBAL,
+    key=None,
+    constraint=CONSTRAINT_ATTEMPTS,
+    limit=1,
+    enforcement_mode=MODE_ENFORCED,
+    activated_at="2026-01-01T00:00:00+00:00",
+):
     return save_definition(
         state,
         {
@@ -157,6 +172,8 @@ def _budget(state, budget_id, *, scope=SCOPE_GLOBAL, key=None, constraint=CONSTR
             "constraint_type": constraint,
             "limit_value": limit,
             "warning_fraction": 0.8,
+            "enforcement_mode": enforcement_mode,
+            "activated_at": activated_at,
         },
     )
 
@@ -661,3 +678,257 @@ def test_progress_carries_the_basis_that_separates_it_from_enforcement():
         assert row["basis"] != row.get("source")
         assert row["basis"] != row.get("evidence_class")
         assert "proposed" in row["basis"]
+
+
+def test_new_budget_defaults_are_enforced_and_activation_survives_ordinary_updates():
+    state = State(":memory:")
+    created = state.upsert_usage_budget(
+        {
+            "id": "new-defaults",
+            "project_id": "project-a",
+            "scope_type": SCOPE_GLOBAL,
+            "scope_key": None,
+            "constraint_type": CONSTRAINT_ATTEMPTS,
+            "limit_value": 3,
+        }
+    )
+    assert created["enforcement_mode"] == MODE_ENFORCED
+    assert created["activated_at"] == created["created_at"]
+
+    updated = state.upsert_usage_budget(
+        {
+            "id": "new-defaults",
+            "project_id": "project-a",
+            "scope_type": SCOPE_GLOBAL,
+            "scope_key": None,
+            "constraint_type": CONSTRAINT_ATTEMPTS,
+            "limit_value": 4,
+        }
+    )
+    assert updated["enforcement_mode"] == MODE_ENFORCED
+    assert updated["activated_at"] == created["activated_at"]
+
+    explicitly_reset = state.upsert_usage_budget(
+        {
+            **updated,
+            "activated_at": "2026-10-01T00:00:00+00:00",
+            "enforcement_mode": MODE_ADVISORY,
+        }
+    )
+    assert explicitly_reset["activated_at"] == "2026-10-01T00:00:00+00:00"
+    assert explicitly_reset["enforcement_mode"] == MODE_ADVISORY
+
+
+def test_activation_excludes_legacy_unknowns_but_never_post_activation_unknowns():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _record(state, _attempt(run_id="legacy-known", tokens=(70, 10)))
+    _record(state, _attempt(run_id="legacy-unknown", quality="unknown", tokens=(None, None)))
+    _budget(
+        state,
+        "activation",
+        constraint=CONSTRAINT_TOKENS,
+        limit=100,
+        activated_at="2026-09-27T00:00:00+00:00",
+    )
+
+    clean_start = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert clean_start.allowed is True
+    assert clean_start.evaluations[0]["value"] == 0
+    assert clean_start.evaluations[0]["evidence_class"] == "MEASURED"
+
+    post_activation = _attempt(
+        run_id="active-unknown", quality="unknown", tokens=(None, None)
+    )
+    post_activation["ended_at"] = "2026-09-28T00:00:00+00:00"
+    _record(state, post_activation)
+    blocked = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert blocked.allowed is False
+    assert blocked.status == STATUS_UNKNOWN
+    assert blocked.evaluations[0]["value"] is None
+    assert "1 matching ledger row(s) have no trustworthy total_tokens source" in blocked.reason
+
+
+def test_default_creation_activation_excludes_preexisting_legacy_history():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    legacy = _attempt(run_id="old-before-definition", quality="unknown", tokens=(None, None))
+    legacy["ended_at"] = "2020-01-01T00:00:00+00:00"
+    _record(state, legacy)
+    created = save_definition(
+        state,
+        {
+            "id": "created-now",
+            "project_id": "project-a",
+            "scope_type": SCOPE_GLOBAL,
+            "scope_key": None,
+            "constraint_type": CONSTRAINT_TOKENS,
+            "limit_value": 100,
+        },
+    )
+
+    assert created["activated_at"] == created["created_at"]
+    decision = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert decision.allowed is True
+    assert decision.evaluations[0]["value"] == 0
+    assert decision.evaluations[0]["evidence_class"] == "MEASURED"
+
+
+def test_activation_boundary_is_inclusive():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _record(state, _attempt(run_id="on-boundary", tokens=(10, 2)))
+    _budget(
+        state,
+        "boundary",
+        constraint=CONSTRAINT_TOKENS,
+        limit=100,
+        activated_at="2026-09-26T12:01:00+00:00",
+    )
+    decision = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert decision.evaluations[0]["value"] == 12
+
+
+def test_unknown_occurred_at_cannot_be_silently_assigned_before_activation():
+    state = State(":memory:")
+    state.append_usage_ledger(
+        {
+            "project_id": "project-a",
+            "program_ref": "ENG-PC",
+            "task_id": "task-1",
+            "runbook_id": "runbook-1",
+            "run_id": "time-unknown",
+            "session_id": None,
+            "worker": "worker",
+            "provider": "Provider",
+            "effective_model": "model",
+            "occurred_at": None,
+            "source_record": {},
+            "source_attempt": _attempt(run_id="time-unknown"),
+        }
+    )
+    registry = _registry(_worker())
+    _budget(state, "enforced-time", constraint=CONSTRAINT_TOKENS, limit=100)
+    enforced = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert enforced.allowed is False
+    assert enforced.status == STATUS_UNKNOWN
+    assert enforced.evaluations[0]["value"] is None
+    assert "no trustworthy occurred_at relative to activation" in enforced.reason
+
+    state.delete_usage_budget("enforced-time")
+    _budget(
+        state,
+        "advisory-time",
+        constraint=CONSTRAINT_TOKENS,
+        limit=100,
+        enforcement_mode=MODE_ADVISORY,
+    )
+    advisory = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert advisory.allowed is True
+    assert advisory.status == STATUS_WARNING
+    assert advisory.evidence_class == CLASS_UNKNOWN
+    assert advisory.evaluations[0]["value"] is None
+    assert "advisory budgets report risk but never veto execution" in advisory.reason
+    [advisory_progress] = progress(
+        state, registry=registry, project_id="project-a", pricing_book=FixedBook()
+    )
+    assert advisory_progress["status"] == STATUS_WARNING
+    assert advisory_progress["value"] is None
+    assert advisory_progress["evidence_class"] == CLASS_UNKNOWN
+
+
+def test_advisory_budget_warns_at_a_hard_threshold_without_vetoing_dispatch(tmp_path):
+    state, registry = _available_dispatch_state()
+    _budget(
+        state,
+        "advisory-stop",
+        limit=0,
+        enforcement_mode=MODE_ADVISORY,
+    )
+    task = Task(
+        id="task-1",
+        task_ref="ENG-PC-12",
+        role="primary-implementation",
+        worker="grok-build",
+        project_id="project-a",
+    )
+
+    result, supervisor = _dispatch(state, registry, task, tmp_path)
+    assert result.launched is True
+    assert supervisor.launched == ["task-1"]
+    event = state.list_run_events(event_class="usage")[-1]
+    assert event.event_type == "usage.budget_warning"
+    assert event.data["enforcement_mode"] == MODE_ADVISORY
+
+
+def test_enforced_unknown_vetoes_even_when_an_advisory_budget_is_also_applicable():
+    state = State(":memory:")
+    registry = _registry(_worker())
+    _record(state, _attempt(run_id="unknown", quality="unknown", tokens=(None, None)))
+    _budget(
+        state,
+        "advisory",
+        constraint=CONSTRAINT_ATTEMPTS,
+        limit=0,
+        enforcement_mode=MODE_ADVISORY,
+    )
+    _budget(state, "enforced", constraint=CONSTRAINT_TOKENS, limit=100)
+
+    decision = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
+    assert decision.allowed is False
+    assert decision.bounding_budget_id == "enforced"
+    assert decision.status == STATUS_UNKNOWN
+    assert {item["enforcement_mode"] for item in decision.evaluations} == {
+        MODE_ADVISORY,
+        MODE_ENFORCED,
+    }
+
+
+def test_legacy_budget_migration_backfills_enforced_mode_and_creation_activation(tmp_path):
+    database = tmp_path / "legacy-budget.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE usage_budgets (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT,
+            constraint_type TEXT NOT NULL,
+            limit_value REAL NOT NULL,
+            warning_fraction REAL NOT NULL DEFAULT 0.8,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO usage_budgets VALUES (
+            'legacy', 'project-a', 'global', NULL, 'attempts', 3, 0.8, 1,
+            '2026-09-01T00:00:00+00:00', '2026-09-02T00:00:00+00:00'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with State(database) as migrated:
+        budget = migrated.get_usage_budget("legacy")
+        assert budget is not None
+        assert budget["enforcement_mode"] == MODE_ENFORCED
+        assert budget["activated_at"] == "2026-09-01T00:00:00+00:00"
+
+
+def test_activation_timestamp_must_be_timezone_aware():
+    state = State(":memory:")
+    with pytest.raises(ValueError, match="timezone-aware"):
+        save_definition(
+            state,
+            {
+                "id": "naive",
+                "project_id": "project-a",
+                "scope_type": SCOPE_GLOBAL,
+                "scope_key": None,
+                "constraint_type": CONSTRAINT_ATTEMPTS,
+                "limit_value": 1,
+                "activated_at": "2026-10-01T00:00:00",
+            },
+        )

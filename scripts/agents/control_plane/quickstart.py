@@ -699,23 +699,25 @@ def _apply_run_truth(
         )
     if registry is not None and option.action == "prepare":
         from .provider_state import ROUTABLE_STATES
+        from .runbooks import get_preset
 
         tester, tester_reason = _routable_worker(state, registry, "focused-tests", option.proposed_tester)
         reviewer, reviewer_reason = _routable_worker(state, registry, "diff-review", option.proposed_reviewer)
-        implementer, implementer_reason = _routable_worker(
+        preset = get_preset(option.preset)
+        routed_worker, route_reason = _routable_worker(
             state,
             registry,
-            "primary-implementation",
+            preset.role,
             option.parent_worker,
             permission_profile=option.permission_profile,
-            requires_unattended_write=True,
+            requires_unattended_write=preset.writes_code,
         )
         changes.update(
             proposed_tester=tester,
             proposed_reviewer=reviewer,
             proposed_tester_unavailable_reason=tester_reason,
             proposed_reviewer_unavailable_reason=reviewer_reason,
-            parent_worker=implementer,
+            parent_worker=routed_worker,
         )
         provider_rows = {row.name: row for row in state.list_provider_states()}
         codex_routable = any(
@@ -732,10 +734,11 @@ def _apply_run_truth(
         )
         if not codex_routable:
             changes.update(codex_policy="conserve", codex_auto_eligible=False)
-        if implementer_reason and "unavailable_reason" not in changes:
+        if route_reason and "unavailable_reason" not in changes:
+            route_label = "implementation" if preset.writes_code else preset.role.replace("-", " ")
             changes.update(
-                unavailable_reason=f"No eligible implementation worker: {implementer_reason}",
-                dependency_state="Blocked — no eligible implementation route",
+                unavailable_reason=f"No eligible {route_label} worker: {route_reason}",
+                dependency_state=f"Blocked — no eligible {route_label} route",
             )
     return replace(option, **changes) if changes else option
 

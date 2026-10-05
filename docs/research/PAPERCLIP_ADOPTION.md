@@ -108,6 +108,7 @@ Octarel currently minimizes credential exposure through local subscription sessi
 - #37 ENG-PC-09 — runtime services.
 - #38 ENG-PC-10 — approvals.
 - #39 ENG-PC-11 — adapter capability/result contract.
+- #65 ENG-PC-12 — advisory/enforced budget policy and activation-scoped accounting.
 
 ## Attribution / copying rule
 

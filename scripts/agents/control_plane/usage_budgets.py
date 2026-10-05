@@ -66,6 +66,10 @@ STATUS_WARNING = "WARNING"
 STATUS_BLOCKED = "BLOCKED"
 STATUS_UNKNOWN = "UNKNOWN"
 
+MODE_ADVISORY = "advisory"
+MODE_ENFORCED = "enforced"
+ENFORCEMENT_MODES = frozenset({MODE_ADVISORY, MODE_ENFORCED})
+
 
 @dataclass(frozen=True)
 class BudgetContext:
@@ -102,7 +106,21 @@ class BudgetDecision:
     evaluations: tuple[dict[str, Any], ...]
 
 
-def validate_definition(definition: Mapping[str, Any]) -> None:
+def _timestamp(value: Any, *, field: str) -> _dt.datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"budget {field} must be a timezone-aware ISO-8601 timestamp")
+    try:
+        parsed = _dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"budget {field} must be a timezone-aware ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"budget {field} must be a timezone-aware ISO-8601 timestamp")
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def validate_definition(
+    definition: Mapping[str, Any], *, require_persisted_fields: bool = True
+) -> None:
     scope = str(definition.get("scope_type") or "")
     constraint = str(definition.get("constraint_type") or "")
     if scope not in SCOPE_TYPES:
@@ -119,10 +137,20 @@ def validate_definition(definition: Mapping[str, Any]) -> None:
         raise ValueError("budget limit_value must be non-negative")
     if warning != warning or warning in {float("inf"), float("-inf")} or not 0 < warning <= 1:
         raise ValueError("budget warning_fraction must be greater than 0 and at most 1")
+    mode = definition.get("enforcement_mode", MODE_ENFORCED)
+    if mode not in ENFORCEMENT_MODES:
+        raise ValueError(f"unsupported budget enforcement_mode {mode!r}")
+    activated_at = definition.get("activated_at")
+    if activated_at is None and require_persisted_fields:
+        raise ValueError("budget activated_at is required")
+    if activated_at is not None:
+        _timestamp(activated_at, field="activated_at")
 
 
 def save_definition(state, definition: Mapping[str, Any]) -> dict[str, Any]:
-    validate_definition(definition)
+    # Persistence supplies safe defaults for a new definition and preserves an
+    # existing definition's mode/activation when an ordinary update omits them.
+    validate_definition(definition, require_persisted_fields=False)
     return state.upsert_usage_budget(dict(definition))
 
 
@@ -176,9 +204,47 @@ def _entry_context(state, entry: Mapping[str, Any]) -> BudgetContext:
     )
 
 
-def _entries_for(state, definition: Mapping[str, Any]) -> list[dict[str, Any]]:
-    entries = state.list_usage_ledger()
-    return [entry for entry in entries if _scope_matches(definition, _entry_context(state, entry))]
+def _entries_for(
+    state, definition: Mapping[str, Any]
+) -> tuple[list[dict[str, Any]], int]:
+    """Return active scoped entries plus rows whose activation relation is unknown.
+
+    A timestamp-less or malformed row cannot be assumed to precede activation.
+    It therefore remains explicit UNKNOWN evidence instead of disappearing from
+    an enforced total or being treated as zero.
+    """
+
+    activation = _timestamp(definition["activated_at"], field="activated_at")
+    active: list[dict[str, Any]] = []
+    unknown_timestamps = 0
+    for entry in state.list_usage_ledger():
+        if not _scope_matches(definition, _entry_context(state, entry)):
+            continue
+        try:
+            occurred_at = _timestamp(entry.get("occurred_at"), field="occurred_at")
+        except ValueError:
+            unknown_timestamps += 1
+            continue
+        if occurred_at >= activation:
+            active.append(entry)
+    return active, unknown_timestamps
+
+
+def _effective_status(status: str, enforcement_mode: str) -> str:
+    if enforcement_mode == MODE_ADVISORY and status in {STATUS_BLOCKED, STATUS_UNKNOWN}:
+        return STATUS_WARNING
+    return status
+
+
+def _evaluation_identity(definition: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "budget_id": str(definition.get("id") or "UNKNOWN"),
+        "scope_type": str(definition.get("scope_type") or "invalid"),
+        "scope_key": definition.get("scope_key"),
+        "constraint_type": str(definition.get("constraint_type") or "invalid"),
+        "enforcement_mode": str(definition.get("enforcement_mode") or MODE_ENFORCED),
+        "activated_at": definition.get("activated_at"),
+    }
 
 
 def _sum_metric(rows: list[dict[str, Any]], metric_name: str) -> tuple[float | None, str, str]:
@@ -303,33 +369,55 @@ def evaluate(
         return BudgetDecision(True, STATUS_OK, "no applicable usage budget", None, None, CLASS_UNKNOWN, ())
     book = pricing_book or load_pricing_book()
     quota = quota_sources or {}
-    evaluations: list[dict[str, Any]] = [
-        {
-            "budget_id": str(definition.get("id") or "UNKNOWN"),
-            "scope_type": str(definition.get("scope_type") or "invalid"),
-            "scope_key": definition.get("scope_key"),
-            "constraint_type": str(definition.get("constraint_type") or "invalid"),
-            "status": STATUS_UNKNOWN,
-            "value": None,
-            "limit": definition.get("limit_value"),
-            "remaining": None,
-            "evidence_class": CLASS_UNKNOWN,
-            "source": f"malformed stored budget definition: {reason}",
-            "basis": PROGRESS_BASIS,
-        }
-        for definition, reason in invalid
-    ]
+    evaluations: list[dict[str, Any]] = []
+    for definition, reason in invalid:
+        mode = (
+            MODE_ADVISORY
+            if definition.get("enforcement_mode") == MODE_ADVISORY
+            else MODE_ENFORCED
+        )
+        evaluations.append(
+            {
+                **_evaluation_identity(definition),
+                # A recognizable explicit advisory remains non-vetoing even if
+                # another field is malformed. An absent/invalid mode fails safe
+                # as enforced because operator intent cannot be established.
+                "enforcement_mode": mode,
+                "status": _effective_status(STATUS_UNKNOWN, mode),
+                "value": None,
+                "limit": definition.get("limit_value"),
+                "remaining": None,
+                "evidence_class": CLASS_UNKNOWN,
+                "source": f"malformed stored budget definition: {reason}",
+                "basis": PROGRESS_BASIS,
+            }
+        )
     for definition in definitions:
-        entries = _entries_for(state, definition)
+        mode = str(definition["enforcement_mode"])
+        entries, unknown_timestamps = _entries_for(state, definition)
+        if unknown_timestamps:
+            evaluations.append(
+                {
+                    **_evaluation_identity(definition),
+                    "status": _effective_status(STATUS_UNKNOWN, mode),
+                    "value": None,
+                    "limit": float(definition["limit_value"]),
+                    "remaining": None,
+                    "evidence_class": CLASS_UNKNOWN,
+                    "source": (
+                        f"{unknown_timestamps} matching ledger row(s) have no trustworthy occurred_at "
+                        f"relative to activation {definition['activated_at']}"
+                    ),
+                    "basis": PROGRESS_BASIS,
+                }
+            )
+            continue
         malformed_entries = sum(1 for entry in entries if _source_attempt(entry) is None)
         if malformed_entries:
             evaluations.append(
                 {
-                    "budget_id": definition["id"],
-                    "scope_type": definition["scope_type"],
-                    "scope_key": definition.get("scope_key"),
-                    "constraint_type": definition["constraint_type"],
-                    "status": STATUS_UNKNOWN,
+                    **_evaluation_identity(definition),
+                    "status": _effective_status(STATUS_UNKNOWN, mode),
                     "value": None,
                     "limit": float(definition["limit_value"]),
                     "remaining": None,
@@ -349,7 +437,7 @@ def evaluate(
         constraint = definition["constraint_type"]
         semantics = CONSTRAINT_SEMANTICS[constraint]
         if value is None:
-            status = STATUS_UNKNOWN
+            status = _effective_status(STATUS_UNKNOWN, mode)
             remaining = None
         else:
             remaining = (value - limit) if constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE else (limit - value)
@@ -364,7 +452,7 @@ def evaluate(
                 # particular, zero metered cash means no paid work may start.
                 breached = value >= limit
             if breached:
-                status = STATUS_BLOCKED
+                status = _effective_status(STATUS_BLOCKED, mode)
             else:
                 ratio = (limit / value) if constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE and value else (
                     value / limit if limit else 1.0
@@ -372,10 +460,7 @@ def evaluate(
                 status = STATUS_WARNING if ratio >= float(definition["warning_fraction"]) else STATUS_OK
         evaluations.append(
             {
-                "budget_id": definition["id"],
-                "scope_type": definition["scope_type"],
-                "scope_key": definition.get("scope_key"),
-                "constraint_type": constraint,
+                **_evaluation_identity(definition),
                 "status": status,
                 "value": value,
                 "limit": limit,
@@ -398,21 +483,29 @@ def evaluate(
     binding = evaluations[0] if evaluations else None
     if binding is None:  # pragma: no cover - definitions above guarantees an evaluation
         return BudgetDecision(True, STATUS_OK, "no applicable usage budget", None, None, CLASS_UNKNOWN, ())
-    allowed = binding["status"] not in {STATUS_BLOCKED, STATUS_UNKNOWN}
+    allowed = not any(
+        item["enforcement_mode"] == MODE_ENFORCED
+        and item["status"] in {STATUS_BLOCKED, STATUS_UNKNOWN}
+        for item in evaluations
+    )
     scope = binding["scope_type"] + (
         f":{binding['scope_key']}" if binding.get("scope_key") is not None else ""
     )
-    if binding["status"] == STATUS_UNKNOWN:
+    if binding["value"] is None:
         reason = (
-            f"usage budget {binding['budget_id']} at {scope} is UNKNOWN "
-            f"({binding['constraint_type']}, {binding['evidence_class']}): {binding['source']}"
+            f"usage budget {binding['budget_id']} at {scope} is {binding['status']} "
+            f"({binding['enforcement_mode']}, {binding['constraint_type']}, "
+            f"{binding['evidence_class']}): {binding['source']}"
         )
     else:
         reason = (
             f"usage budget {binding['budget_id']} at {scope} is {binding['status']} "
-            f"for {binding['constraint_type']}: {binding['value']:g}/{binding['limit']:g} "
+            f"({binding['enforcement_mode']}) for {binding['constraint_type']}: "
+            f"{binding['value']:g}/{binding['limit']:g} "
             f"({binding['evidence_class']})"
         )
+    if binding["enforcement_mode"] == MODE_ADVISORY and binding["status"] == STATUS_WARNING:
+        reason += "; advisory budgets report risk but never veto execution"
     return BudgetDecision(
         allowed, binding["status"], reason, scope, binding["budget_id"],
         binding["evidence_class"], tuple(evaluations),
@@ -456,14 +549,17 @@ def progress(
         try:
             validate_definition(definition)
         except (KeyError, TypeError, ValueError) as exc:
+            mode = (
+                MODE_ADVISORY
+                if definition.get("enforcement_mode") == MODE_ADVISORY
+                else MODE_ENFORCED
+            )
             rows.append(
                 {
-                    "budget_id": str(definition.get("id") or "UNKNOWN"),
-                    "scope_type": str(definition.get("scope_type") or "invalid"),
-                    "scope_key": definition.get("scope_key"),
+                    **_evaluation_identity(definition),
+                    "enforcement_mode": mode,
                     "bounding_scope": "invalid",
-                    "constraint_type": str(definition.get("constraint_type") or "invalid"),
-                    "status": STATUS_UNKNOWN,
+                    "status": _effective_status(STATUS_UNKNOWN, mode),
                     "value": None,
                     "limit": definition.get("limit_value"),
                     "remaining": None,
@@ -474,19 +570,38 @@ def progress(
                 }
             )
             continue
-        entries = _entries_for(state, definition)
+        mode = str(definition["enforcement_mode"])
+        entries, unknown_timestamps = _entries_for(state, definition)
+        if unknown_timestamps:
+            rows.append(
+                {
+                    **_evaluation_identity(definition),
+                    "bounding_scope": definition["scope_type"] + (
+                        f":{definition['scope_key']}" if definition.get("scope_key") is not None else ""
+                    ),
+                    "status": _effective_status(STATUS_UNKNOWN, mode),
+                    "value": None,
+                    "limit": float(definition["limit_value"]),
+                    "remaining": None,
+                    "progress_percent": None,
+                    "evidence_class": CLASS_UNKNOWN,
+                    "source": (
+                        f"{unknown_timestamps} matching ledger row(s) have no trustworthy occurred_at "
+                        f"relative to activation {definition['activated_at']}"
+                    ),
+                    "basis": PROGRESS_BASIS,
+                }
+            )
+            continue
         malformed_entries = sum(1 for entry in entries if _source_attempt(entry) is None)
         if malformed_entries:
             rows.append(
                 {
-                    "budget_id": definition["id"],
-                    "scope_type": definition["scope_type"],
-                    "scope_key": definition.get("scope_key"),
+                    **_evaluation_identity(definition),
                     "bounding_scope": definition["scope_type"] + (
                         f":{definition['scope_key']}" if definition.get("scope_key") is not None else ""
                     ),
-                    "constraint_type": definition["constraint_type"],
-                    "status": STATUS_UNKNOWN,
+                    "status": _effective_status(STATUS_UNKNOWN, mode),
                     "value": None,
                     "limit": float(definition["limit_value"]),
                     "remaining": None,
@@ -517,11 +632,11 @@ def progress(
         remaining: float | None = None
         progress_percent: float | None = None
         if value is None:
-            status = STATUS_UNKNOWN
+            status = _effective_status(STATUS_UNKNOWN, mode)
         elif constraint == CONSTRAINT_PROVIDER_QUOTA_RESERVE:
             remaining = value - limit
             if value <= limit:
-                status = STATUS_BLOCKED
+                status = _effective_status(STATUS_BLOCKED, mode)
             else:
                 ratio = limit / value if value else 1.0
                 status = STATUS_WARNING if ratio >= float(definition["warning_fraction"]) else STATUS_OK
@@ -531,7 +646,7 @@ def progress(
             remaining = limit - value
             breached = value >= limit
             if breached:
-                status = STATUS_BLOCKED
+                status = _effective_status(STATUS_BLOCKED, mode)
             else:
                 ratio = value / limit if limit else 1.0
                 status = STATUS_WARNING if ratio >= float(definition["warning_fraction"]) else STATUS_OK
@@ -540,13 +655,10 @@ def progress(
 
         rows.append(
             {
-                "budget_id": definition["id"],
-                "scope_type": definition["scope_type"],
-                "scope_key": definition.get("scope_key"),
+                **_evaluation_identity(definition),
                 "bounding_scope": definition["scope_type"] + (
                     f":{definition['scope_key']}" if definition.get("scope_key") is not None else ""
                 ),
-                "constraint_type": constraint,
                 "status": status,
                 "value": value,
                 "limit": limit,
@@ -563,6 +675,14 @@ def progress(
 def emit_decision(state, *, task: Any, decision: BudgetDecision) -> None:
     if decision.status not in {STATUS_WARNING, STATUS_BLOCKED, STATUS_UNKNOWN}:
         return
+    binding = next(
+        (
+            item
+            for item in decision.evaluations
+            if item.get("budget_id") == decision.bounding_budget_id
+        ),
+        {},
+    )
     try:
         state.record_run_event(
             RunEvent(
@@ -580,6 +700,8 @@ def emit_decision(state, *, task: Any, decision: BudgetDecision) -> None:
                     "budget_id": decision.bounding_budget_id,
                     "bounding_scope": decision.bounding_scope,
                     "evidence_class": decision.evidence_class,
+                    "enforcement_mode": binding.get("enforcement_mode"),
+                    "activated_at": binding.get("activated_at"),
                 },
             )
         )
@@ -602,7 +724,8 @@ def context_for_task(task: Any, *, provider: str | None = None) -> BudgetContext
 __all__ = [
     "BudgetContext", "BudgetDecision", "CONSTRAINT_ATTEMPTS", "CONSTRAINT_FALLBACKS",
     "CONSTRAINT_METERED_CASH", "CONSTRAINT_PROVIDER_QUOTA_RESERVE", "CONSTRAINT_TOKENS",
-    "CONSTRAINT_SEMANTICS", "CONSTRAINT_TYPES", "CONSTRAINT_WALL_CLOCK", "SCOPE_GLOBAL",
+    "CONSTRAINT_SEMANTICS", "CONSTRAINT_TYPES", "CONSTRAINT_WALL_CLOCK", "ENFORCEMENT_MODES",
+    "MODE_ADVISORY", "MODE_ENFORCED", "SCOPE_GLOBAL",
     "SCOPE_PROGRAM", "SCOPE_PROVIDER", "SCOPE_RUN",
     "SCOPE_SESSION", "SCOPE_TASK", "STATUS_BLOCKED", "STATUS_OK", "STATUS_UNKNOWN",
     "STATUS_WARNING", "context_for_task", "emit_decision", "evaluate", "progress", "save_definition",

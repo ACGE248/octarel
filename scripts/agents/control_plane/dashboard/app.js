@@ -782,15 +782,19 @@
       const known = USAGE_ESTABLISHED.has(budget.evidence_class)
         && budget.value !== null && budget.value !== undefined;
       const status = ["WARNING", "BLOCKED"].includes(budget.status) ? budget.status : budget.status || "UNKNOWN";
+      const mode = budget.enforcement_mode === "advisory" ? "advisory" : "enforced";
       const progressKnown = known && Number.isFinite(Number(budget.progress_percent));
       const scope = budget.bounding_scope || budget.scope_type || "UNKNOWN";
       const amount = known
         ? `${budgetNumber(budget.value, budget.constraint_type)} / ${budgetNumber(budget.limit, budget.constraint_type)}`
         : "UNKNOWN / " + budgetNumber(budget.limit, budget.constraint_type);
-      const statusLabel = status === "BLOCKED" ? "HARD BLOCK" : status;
+      const statusLabel = status === "BLOCKED"
+        ? "HARD BLOCK"
+        : (mode === "advisory" && status === "WARNING" ? "ADVISORY WARNING" : status);
       root.appendChild(el("article", {
         class: `usage-budget is-${status.toLowerCase()}`,
         "data-budget-status": status,
+        "data-budget-mode": mode,
       }, [
         el("header", { class: "usage-budget-head" }, [
           el("strong", { text: budget.budget_id || "budget" }),
@@ -799,6 +803,10 @@
         el("p", {
           class: "usage-budget-scope",
           text: `${BUDGET_CONSTRAINT_LABELS[budget.constraint_type] || budget.constraint_type} · scope ${scope}`,
+        }),
+        el("p", {
+          class: "usage-budget-source",
+          text: `Mode: ${mode === "advisory" ? "Advisory — never vetoes" : "Enforced — fails closed"} · Active since: ${budget.activated_at || "UNKNOWN"}`,
         }),
         el("div", { class: "usage-budget-values" }, [
           el("span", { text: `Used: ${amount}` }),

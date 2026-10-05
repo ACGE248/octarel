@@ -1206,6 +1206,8 @@ def retry_runbook(
         state.upsert_task(task)
         usage_budgets.emit_decision(state, task=task, decision=budget)
         raise RunbookError(budget.reason)
+    if budget.status == usage_budgets.STATUS_WARNING:
+        usage_budgets.emit_decision(state, task=task, decision=budget)
 
     runbook.parent_worker = worker_name
     runbook.recovery_note = f"Previous attempt with {previous_worker} failed: {previous_reason}. Retrying with {worker_name}."

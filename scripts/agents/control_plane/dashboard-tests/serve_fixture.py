@@ -448,6 +448,7 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             parent_worker="claude-code",
             max_duration_minutes=120,
             phases=finish_pr_preset.phases,
+            permission_profile=finish_pr_preset.permission_profile,
         )
     )
     state.upsert_task(
@@ -587,6 +588,13 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             failure_reason_sanitized="Claude subscription weekly limit reached; reset later",
             failure_reset="later",
             failure_reset_source="provider diagnostic",
+            # This row is the stable manual-recovery presentation fixture. Its
+            # automatic-fallback decision has already been made (and declined),
+            # so the dashboard reconciliation loop must not retry admission and
+            # give this historical task a fresh ``updated_at`` on startup. The
+            # separate fx-rb-fallback row exercises a successful automatic
+            # replacement.
+            fallback_automatic=False,
             launch_mode="session",
             worktree=str(video_editor_worktree),
         ),
@@ -781,6 +789,7 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             "id": "fx-budget-token-warning", "scope_type": "run",
             "scope_key": "fx-rb-fallback:attempt:2", "constraint_type": "tokens",
             "limit_value": 200_000, "warning_fraction": 0.75,
+            "enforcement_mode": "advisory",
         },
         {
             "id": "fx-budget-token-unknown", "scope_type": "task",
@@ -806,6 +815,10 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             "limit_value": 10, "warning_fraction": 0.8,
         },
     ):
+        # These presentation fixtures intentionally account for the historical
+        # ledger rows seeded above. Production definitions default activation to
+        # their creation time and therefore exclude pre-activation history.
+        budget["activated_at"] = "2026-01-01T00:00:00+00:00"
         state.upsert_usage_budget(budget)
 
     # Keep scope C's synthetic budget evidence off the ENG-PC-04 run whose

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.agents.control_plane import quickstart as quickstart_mod
 from scripts.agents.control_plane.quickstart import (
     VIDEO_EDITOR_LEDGER_RELATIVE,
     LedgerTask,
@@ -22,7 +23,10 @@ from scripts.agents.control_plane.quickstart import (
     list_quickstart_options,
     next_eligible_video_editor_task,
     parse_video_editor_ledger,
+    resolve_quickstart_option,
 )
+from scripts.agents.control_plane.state import State
+from scripts.agents.registry import load_registry
 
 _SAMPLE_LEDGER = """\
 # Standalone Video Editor — Revised Implementation Status
@@ -105,6 +109,30 @@ def _init_git_repo(root: Path) -> None:
     (root / "README.md").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
+
+
+def test_review_current_diff_uses_its_read_only_review_route(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _init_git_repo(repo_root)
+    subprocess.run(["git", "branch", "-m", "fixture-review"], cwd=repo_root, check=True)
+    calls = []
+
+    def routed(_state, _registry, role, fallback, **kwargs):
+        calls.append((role, fallback, kwargs.get("requires_unattended_write")))
+        return fallback, None
+
+    monkeypatch.setattr(quickstart_mod, "_routable_worker", routed)
+    option = resolve_quickstart_option(
+        repo_root,
+        "review-current-diff",
+        state=State(":memory:"),
+        registry=load_registry(),
+    )
+
+    assert option.parent_worker == "codex-review"
+    assert ("diff-review", "codex-review", False) in calls
+    assert option.unavailable_reason is None
 
 
 @pytest.mark.parametrize("has_worktree", [True, False])

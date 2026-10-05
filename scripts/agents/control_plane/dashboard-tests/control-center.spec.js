@@ -183,9 +183,12 @@ test('usage filters, truthful budget progress, attention, and run events share t
 
   const warning = page.locator('.usage-budget.is-warning', { hasText: 'fx-budget-token-warning' });
   const blocked = page.locator('.usage-budget.is-blocked', { hasText: 'fx-budget-attempt-block' });
-  await expect(warning).toContainText('WARNING');
+  await expect(warning).toContainText('ADVISORY WARNING');
+  await expect(warning).toContainText('Mode: Advisory — never vetoes');
+  await expect(warning).toContainText('Active since: 2026-01-01T00:00:00+00:00');
   await expect(warning).toContainText('scope run:fx-rb-fallback:attempt:2');
   await expect(blocked).toContainText('HARD BLOCK');
+  await expect(blocked).toContainText('Mode: Enforced — fails closed');
   await expect(blocked).toContainText('scope task:fx-rb-fallback-session');
 
   await navTo(page, 'view-overview');

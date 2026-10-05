@@ -15,6 +15,7 @@ from scripts.agents.control_plane.recovery import (
     OWNERSHIP_AMBIGUOUS,
     ownership_proof_for_task,
 )
+from scripts.agents.control_plane.runbooks import reconcile_runbooks
 from scripts.agents.control_plane.state import default_db_path
 
 ACTIVE_STATES = {
@@ -142,3 +143,24 @@ def test_fixture_seed_keeps_one_current_task_ref_across_a_clock_second(
     }
     assert others, "fixture no longer seeds a competing active task reference"
     assert all(stamp < current for stamp in others.values()), others
+
+
+def test_fixture_current_task_survives_dashboard_runbook_reconciliation(tmp_path: Path) -> None:
+    """The dashboard's background reconcile must not make a history fixture current."""
+
+    mod = _load_serve_fixture()
+    ctx = mod.build_fixture_context(tmp_path / "fx")
+
+    reconcile_runbooks(
+        state=ctx.state,
+        repo_root=ctx.repo_root,
+        registry=ctx.registry,
+        supervisor=ctx.supervisor,
+        scheduler=ctx.scheduler,
+    )
+
+    assert _newest_active_task_ref(ctx.state) == "ENG-AGENT-02"
+    failed = ctx.state.get_task("fx-rb-failed-session")
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.fallback_automatic is False
