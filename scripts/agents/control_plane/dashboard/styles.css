@@ -1291,6 +1291,18 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .recovery-stage-status { color: var(--muted); overflow-wrap: anywhere; }
 .run-detail-recovery-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .run-detail-recovery-control .hint { flex: 1 1 220px; margin: 0; overflow-wrap: anywhere; }
+.run-detail-approvals { display: grid; gap: 10px; margin-bottom: 16px; }
+.approval-card { min-width: 0; padding: 12px; border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: var(--radius-sm); background: var(--surface-strong); }
+.approval-card.is-approved { border-left-color: var(--ok); }
+.approval-card.is-rejected, .approval-card.is-expired, .approval-card.is-stale, .approval-card.is-failed_safe { border-left-color: var(--err); }
+.approval-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.approval-impact { margin: 8px 0 4px; font-weight: 650; overflow-wrap: anywhere; }
+.approval-facts { margin: 10px 0; }
+.approval-resolution { display: grid; grid-template-columns: minmax(160px, 1fr) auto auto; gap: 8px; align-items: center; min-width: 0; }
+.approval-resolution input { min-width: 0; }
+.approval-resolution-status { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+.attn-approval .attn-copy { gap: 6px; }
+.attn-approval .approval-resolution { margin-top: 4px; }
 .run-detail-context { margin-bottom: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); }
 .runtime-service-panel, .worktree-runtime-service { margin: 10px 0 14px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-strong); min-width: 0; }
 .runtime-service-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
@@ -1323,6 +1335,11 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 @media (max-width: 900px) {
   .runs-split { grid-template-columns: 1fr; }
   .run-detail { position: static; }
+}
+
+@media (max-width: 560px) {
+  .approval-resolution { grid-template-columns: 1fr 1fr; }
+  .approval-resolution input { grid-column: 1 / -1; }
 }
 
 .command-bar-icon { display: flex; align-items: center; color: var(--muted); flex-shrink: 0; margin-left: 4px; }

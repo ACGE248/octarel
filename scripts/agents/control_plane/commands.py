@@ -615,7 +615,13 @@ def cmd_dry_run(ctx: CommandContext, *, task_id: str) -> CommandResult:
     return cmd_start(ctx, task_id=task_id, dry_run=True)
 
 
-def cmd_usage_override(ctx: CommandContext, *, runbook_id: str, reason: str) -> CommandResult:
+def cmd_usage_override(
+    ctx: CommandContext,
+    *,
+    runbook_id: str,
+    reason: str,
+    expected_state: dict[str, Any] | None = None,
+) -> CommandResult:
     """Explicit, audited operator authorization for premium Codex routing."""
 
     runbook = ctx.state.get_runbook(runbook_id)
@@ -624,33 +630,23 @@ def cmd_usage_override(ctx: CommandContext, *, runbook_id: str, reason: str) -> 
     clean_reason = str(reason or "").strip()
     if not clean_reason:
         raise CommandError("premium override requires a reason")
-    usage = ctx.state.get_usage_governance(runbook_id)
-    current_invocations = int(usage.get("codex_invocations", 0)) if usage else 0
-    runbook.codex_policy = "unrestricted"
-    runbook.codex_auto_eligible = True
-    # A premium override authorizes exactly one additional invocation even
-    # when the prior runbook budget is exhausted; it is not an unbounded flag.
-    runbook.max_codex_invocations = max(runbook.max_codex_invocations, current_invocations + 1)
-    ctx.state.upsert_runbook(runbook)
-    if usage is None:
-        usage = new_usage_record(
-            runbook_id=runbook.id,
-            task_id=runbook.task_id,
-            classification=classify_task(role="primary-implementation"),
-            codex_policy="unrestricted",
-            codex_auto_eligible=True,
-            max_codex_invocations=runbook.max_codex_invocations,
+    default_usage = new_usage_record(
+        runbook_id=runbook.id,
+        task_id=runbook.task_id,
+        classification=classify_task(role="primary-implementation"),
+        codex_policy="unrestricted",
+        codex_auto_eligible=True,
+        max_codex_invocations=runbook.max_codex_invocations,
+    )
+    try:
+        runbook, _usage = ctx.state.apply_usage_override(
+            runbook_id,
+            reason=clean_reason[:500],
+            default_usage=default_usage,
+            expected_state=expected_state,
         )
-    if usage:
-        usage["codex_policy"] = "unrestricted"
-        usage["codex_auto_eligible"] = True
-        usage["max_codex_invocations"] = runbook.max_codex_invocations
-        usage["escalation_state"] = "operator-override"
-        usage["escalation_reason"] = clean_reason[:500]
-        usage["escalation_history"] = [*usage.get("escalation_history", []), {
-            "kind": "premium-override", "reason": clean_reason[:500], "at": utc_now_iso(),
-        }]
-        ctx.state.upsert_usage_governance(usage)
+    except ValueError as exc:
+        raise CommandError(str(exc)) from None
     ctx.state.record_event(
         category="usage_governance", task_id=runbook.task_id, level="warning",
         message=f"premium Codex override enabled for {runbook_id}: {clean_reason[:500]}",
@@ -802,15 +798,34 @@ def cmd_worktree_adopt(ctx: CommandContext, *, path: str) -> CommandResult:
     return CommandResult(ok=True, message="worktree adopted", data=data)
 
 
-def cmd_worktree_cleanup(ctx: CommandContext, *, confirm: bool = False) -> CommandResult:
-    from .operations import cleanup_worktrees
+def cmd_worktree_cleanup(
+    ctx: CommandContext,
+    *,
+    confirm: bool = False,
+    approved_project_id: str | None = None,
+    approved_project_root: str | None = None,
+    approved_paths: list[str] | None = None,
+) -> CommandResult:
+    from .operations import OperationError, cleanup_worktrees
 
-    data = cleanup_worktrees(ctx, confirm=confirm)
+    try:
+        data = cleanup_worktrees(
+            ctx,
+            confirm=confirm,
+            approved_project_id=approved_project_id,
+            approved_project_root=approved_project_root,
+            approved_paths=approved_paths,
+        )
+    except OperationError as exc:
+        raise CommandError(str(exc)) from None
     message = (
-        f"removed {len(data['removed'])} eligible finished worktree(s)"
+        (
+            f"removed {len(data['removed'])} eligible finished worktree(s); "
+            f"{len(data['failed'])} removal(s) failed"
+        )
         if confirm else f"preview: {len(data['eligible'])} eligible; {len(data['protected'])} protected"
     )
-    return CommandResult(ok=True, message=message, data=data)
+    return CommandResult(ok=not data["failed"], message=message, data=data)
 
 
 def cmd_git_operation(

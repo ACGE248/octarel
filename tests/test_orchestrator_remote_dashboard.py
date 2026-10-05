@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
-from scripts.agents.control_plane import agent_session
+from scripts.agents.control_plane import agent_session, approvals
 from scripts.agents.control_plane.agent_session import SessionIdentity
 from scripts.agents.control_plane.commands import CommandContext
 from scripts.agents.control_plane.dashboard_api import (
@@ -558,6 +558,189 @@ def test_successful_remote_state_change_is_audited_with_identity_verb_target_res
     assert "pause" in message
     assert "t1" in message
     assert "OK" in message
+
+
+def test_remote_approval_uses_verified_identity_for_request_resolution_and_audit(ctx, keypair):
+    _select_fixture_project(ctx)
+    private_key, public_key = keypair
+    client = TestClient(
+        create_app(
+            ctx,
+            remote=_remote_state(public_key, allowed_emails=frozenset({MAINTAINER_EMAIL})),
+        )
+    )
+    headers = {ACCESS_JWT_HEADER: _token(private_key), "Origin": f"https://{HOSTNAME}"}
+    created = client.post(
+        "/api/approvals",
+        headers=headers,
+        json={
+            "action_type": approvals.ACTION_AMBIGUOUS_PRODUCT_ARCHITECTURE_CHOICE,
+            "payload": {"question_ref": "ADR-REMOTE", "decision": "Keep the existing scheduler"},
+            "reason": "Remote maintainer decision",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["requested_by"] == f"remote:{MAINTAINER_EMAIL}"
+
+    resolved = client.post(
+        f"/api/approvals/{created.json()['id']}/resolve",
+        headers=headers,
+        json={"decision": "REJECT", "resolution_note": "Needs a local design review"},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["resolved_by"] == f"remote:{MAINTAINER_EMAIL}"
+    messages = [
+        event.message for event in ctx.state.list_events(limit=50) if event.category == "remote_audit"
+    ]
+    assert any(MAINTAINER_EMAIL in message and "approval_request" in message and "OK" in message for message in messages)
+    assert any(MAINTAINER_EMAIL in message and "approval_resolve" in message and "REJECTED" in message for message in messages)
+
+
+def test_remote_crafted_cleanup_steering_hands_off_with_verified_identity_and_audit(
+    ctx, keypair, monkeypatch
+):
+    from scripts.agents.control_plane import dashboard_api, operations
+
+    _select_fixture_project(ctx)
+    private_key, public_key = keypair
+    monkeypatch.setattr(
+        operations,
+        "refresh_worktree_statuses",
+        lambda _ctx: [
+            {
+                "path": str(ctx.repo_root / "finished-clean"),
+                "branch": "eng/finished-clean",
+                "classification": "FINISHED_CLEAN",
+                "dirty": False,
+                "cleanup_eligible": True,
+                "canonical_checkout": False,
+            }
+        ],
+    )
+    direct_calls = []
+
+    def direct_execute(_ctx, verb, **kwargs):
+        direct_calls.append((verb, kwargs))
+        raise AssertionError("steering must not call the cleanup command before approval")
+
+    monkeypatch.setattr(dashboard_api, "apply_command", direct_execute)
+    client = TestClient(
+        create_app(
+            ctx,
+            remote=_remote_state(public_key, allowed_emails=frozenset({MAINTAINER_EMAIL})),
+        )
+    )
+    headers = {ACCESS_JWT_HEADER: _token(private_key), "Origin": f"https://{HOSTNAME}"}
+
+    initiated = client.post(
+        "/api/steering/execute",
+        headers=headers,
+        json={"verb": "worktree_cleanup", "args": {}, "confirm": True},
+    )
+
+    assert initiated.status_code == 200
+    approval = initiated.json()["data"]["approval_request"]
+    assert approval["action_type"] == approvals.ACTION_DESTRUCTIVE_CLEANUP
+    assert approval["state"] == "PENDING"
+    assert approval["requested_by"] == f"remote:{MAINTAINER_EMAIL}"
+    assert direct_calls == []
+    messages = [
+        event.message for event in ctx.state.list_events(limit=50) if event.category == "remote_audit"
+    ]
+    assert any(
+        MAINTAINER_EMAIL in message
+        and "worktree_cleanup" in message
+        and "APPROVAL_REQUESTED" in message
+        for message in messages
+    )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("action_name", ["start", "stop", "restart"])
+def test_authenticated_remote_runtime_actions_handoff_without_legacy_bypass(
+    ctx, keypair, monkeypatch, legacy, action_name
+):
+    _select_fixture_project(ctx)
+    private_key, public_key = keypair
+    app = create_app(
+        ctx,
+        remote=_remote_state(public_key, allowed_emails=frozenset({MAINTAINER_EMAIL})),
+    )
+    manager = app.state.app_lifecycle
+    running = action_name in {"stop", "restart"}
+    service = {
+        "id": "runtime-project-a-fixture",
+        "project_id": "project-a",
+        "name": "Fixture runtime",
+        "worktree_path": None,
+        "runbook_id": None,
+        "cwd": str(ctx.repo_root),
+        "argv": ["python3", "fixture.py"],
+        "health": "HEALTHY" if running else "STOPPED",
+        "ownership": "OWNED_VERIFIED" if running else "OCTAREL_DECLARED",
+        "pid": 4242 if running else None,
+        "process_create_time": 100.5 if running else None,
+        "process_session_id": 4242 if running else None,
+        "actions": {
+            "start": not running,
+            "stop": running,
+            "restart": running,
+        },
+    }
+    calls = []
+    monkeypatch.setattr(manager, "list_services", lambda **_kwargs: [dict(service)])
+    monkeypatch.setattr(
+        manager,
+        "status",
+        lambda: {
+            "service_id": service["id"],
+            "status": "RUNNING" if running else "STOPPED",
+            "actions": dict(service["actions"]),
+        },
+    )
+
+    def action(action_name, actor, **scope):
+        calls.append((action_name, actor, scope))
+        return dict(service, health="STARTING")
+
+    monkeypatch.setattr(manager, "action", action)
+    client = TestClient(app)
+    headers = {ACCESS_JWT_HEADER: _token(private_key), "Origin": f"https://{HOSTNAME}"}
+
+    endpoint = (
+        f"/api/app-lifecycle/{action_name}"
+        if legacy
+        else f"/api/runtime-services/{service['id']}/{action_name}"
+    )
+    request_payload = {"confirm": True} if running else {}
+    initiated = client.post(endpoint, headers=headers, json=request_payload)
+
+    assert initiated.status_code == 200
+    assert initiated.json()["status"] == "APPROVAL_REQUESTED"
+    approval = initiated.json()["approval_request"]
+    assert approval["action_type"] == approvals.ACTION_REMOTE_SENSITIVE
+    assert approval["requested_by"] == f"remote:{MAINTAINER_EMAIL}"
+    assert calls == []
+
+    resolved = client.post(
+        f"/api/approvals/{approval['id']}/resolve",
+        headers=headers,
+        json={"decision": "APPROVE", "resolution_note": "Remote action remains eligible"},
+    )
+
+    assert resolved.status_code == 200
+    assert resolved.json()["state"] == "APPROVED"
+    assert len(calls) == 1
+    assert calls[0][0] == action_name
+    assert calls[0][1] == f"remote:{MAINTAINER_EMAIL}"
+    messages = [
+        event.message for event in ctx.state.list_events(limit=50) if event.category == "remote_audit"
+    ]
+    audit_verb = f"app_{action_name}" if legacy else f"runtime_service_{action_name}"
+    assert any(
+        MAINTAINER_EMAIL in message and audit_verb in message and "APPROVAL_REQUESTED" in message
+        for message in messages
+    )
 
 
 def test_remote_graphify_check_and_refresh_are_identity_audited(ctx, keypair, monkeypatch):

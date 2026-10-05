@@ -434,6 +434,29 @@ def test_schema_version_is_tracked(tmp_path: Path, octascene_repo: Path) -> None
     fresh.close()
 
 
+def test_schema_upgrade_does_not_rerun_completed_legacy_project_adoption(
+    tmp_path: Path, octascene_repo: Path
+) -> None:
+    """A later schema bump must not relabel a post-migration NULL writer bug."""
+
+    state = State(tmp_path / "schema-upgrade" / "cp.db")
+    pr.ensure_octascene_project(state, octascene_repo)
+    state.set_control_setting(
+        pr.MIGRATION_MARKER_SETTING,
+        json.dumps({"project_id": OCTASCENE_PROJECT_ID, "adopted_rows": {}}),
+    )
+    state.set_schema_version(CURRENT_SCHEMA_VERSION - 1)
+    state.upsert_task(Task(id="late-null", task_ref="BUG-NULL", role="r", worker="w"))
+
+    result = pr.bootstrap_registry(state, octascene_repo)
+
+    assert result["migration"] is None
+    assert result["schema_version"] == CURRENT_SCHEMA_VERSION
+    assert state.get_task("late-null").project_id is None
+    assert state.list_tasks(project_id=OCTASCENE_PROJECT_ID) == []
+    state.close()
+
+
 def test_a_failed_migration_does_not_partially_corrupt_state(tmp_path: Path, monkeypatch) -> None:
     """Spec 10: migration failure must not leave a half-migrated database."""
 

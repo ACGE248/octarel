@@ -48,6 +48,9 @@
   let pipelinePrevTaskStates = new Map();
   let connectTerminalView = null;
   let validatedConfigurationRollback = null;
+  const approvalResolutionDrafts = new Map();
+  let pendingApprovalFocusKey = null;
+  let runDetailRenderGeneration = 0;
 
   // --------------------------------------------------------------------- helpers
 
@@ -4002,11 +4005,30 @@
         el("div", { class: "entity-meta", text: `Access: ${policy.read_write_mode || "unrecorded"} · fallback ${policy.fallback_reason || "none"} · context ${policy.approximate_context_characters ?? "unknown"} chars` }),
       ]);
       const override = el("button", { type: "button", class: "danger", text: "Premium override" });
+      const overrideStatus = el("div", {
+        class: "entity-meta approval-initiation-status",
+        role: "status",
+      });
       override.addEventListener("click", () => confirmAndRun(
         `Allow premium Codex routing for ${record.runbook_id}? This is audited.`,
-        () => postCommand("usage_override", { runbook_id: record.runbook_id, reason: "Control Center operator override", confirm: true }).then(refreshUsageRouting)
+        async () => {
+          const result = await postCommand("usage_override", {
+            runbook_id: record.runbook_id,
+            reason: "Control Center operator override",
+            confirm: true,
+          });
+          if (!result.ok) {
+            overrideStatus.textContent = result.body?.detail || "The approval request was refused.";
+            return;
+          }
+          const approval = result.body?.data?.approval_request;
+          overrideStatus.textContent = approval
+            ? `Approval request ${approval.id} created. Usage governance remains unchanged until it is approved.`
+            : "The server did not report an approval request.";
+          await Promise.all([refreshAttention(), refreshEvents()]);
+        }
       ));
-      card.appendChild(override);
+      card.append(override, overrideStatus);
       root.appendChild(card);
     });
     if (!(data.records || []).length) root.appendChild(el("p", { class: "hint", text: data.policy_note }));
@@ -4101,6 +4123,12 @@
         payload,
       );
       if (!result.ok) throw new Error(result.body?.detail || `Runtime service ${action} was refused.`);
+      if (result.body?.status === "APPROVAL_REQUESTED") {
+        const approvalId = result.body.approval_request?.id || "UNKNOWN";
+        window.alert(`Approval request ${approvalId} created. The runtime process was not changed; review it in Attention.`);
+        await Promise.all([refreshAttention(), refreshEvents(), refreshRuntimeServices(), refreshAppLifecycle()]);
+        return;
+      }
       await Promise.all([refreshRuntimeServices(), refreshAppLifecycle()]);
     };
     if (["stop", "restart"].includes(action)) {
@@ -4313,10 +4341,35 @@
 
   async function previewWorktreeCleanup(confirm) {
     const response = await postCommand("worktree_cleanup", confirm ? { confirm: true } : {});
-    const data = response.body?.data || {};
     const root = document.getElementById("worktrees-cleanup-result");
+    if (!response.ok) {
+      if (root) root.textContent = response.body?.detail || "Worktree cleanup request was refused.";
+      return;
+    }
+    const data = response.body?.data || {};
+    if (data.mode === "APPROVAL_REQUESTED") {
+      const approvalId = data.approval_request?.id || "UNKNOWN";
+      if (root) root.textContent = `Approval request ${approvalId} created. No worktree was removed; review it in Attention.`;
+      await Promise.all([refreshAttention(), refreshEvents(), refreshWorktrees(), refreshOperations(), refreshOverview(), refreshTasks()]);
+      return;
+    }
     if (root) root.textContent = `${data.mode || "PREVIEW"}: ${(data.eligible || []).length} eligible, ${(data.protected || []).length} protected, ${(data.removed || []).length} removed.`;
     await Promise.all([refreshWorktrees(), refreshOperations(), refreshOverview(), refreshTasks()]);
+  }
+
+  async function legacyRuntimeAction(action, payload) {
+    const result = await postJSON(`/api/app-lifecycle/${action}`, payload);
+    if (!result.ok) {
+      window.alert(result.body?.detail || `Runtime service ${action} was refused.`);
+      return;
+    }
+    if (result.body?.status === "APPROVAL_REQUESTED") {
+      const approvalId = result.body.approval_request?.id || "UNKNOWN";
+      window.alert(`Approval request ${approvalId} created. The runtime process was not changed; review it in Attention.`);
+      await Promise.all([refreshAttention(), refreshEvents(), refreshAppLifecycle(), refreshRuntimeServices()]);
+      return;
+    }
+    await Promise.all([refreshAppLifecycle(), refreshRuntimeServices()]);
   }
 
   async function refreshOperations() {
@@ -5116,9 +5169,14 @@
   function renderRunDetail(run) {
     const root = document.getElementById("run-detail");
     if (!root) return;
+    const renderGeneration = ++runDetailRenderGeneration;
     const runtimeFocusKey = root.contains(document.activeElement)
       ? document.activeElement?.dataset?.runtimeFocus || null
       : null;
+    const approvalFocusKey = root.contains(document.activeElement)
+      ? document.activeElement?.dataset?.approvalFocus || null
+      : null;
+    if (approvalFocusKey) pendingApprovalFocusKey = approvalFocusKey;
     root.innerHTML = "";
     if (!run) {
       root.appendChild(el("p", { class: "hint", text: "No run is selected." }));
@@ -5174,6 +5232,9 @@
     const recoveryEvidence = el("div", { class: "run-detail-recovery" }, [
       el("p", { class: "hint", text: "Loading recovery evidence…" }),
     ]);
+    const approvalEvidence = el("div", { class: "run-detail-approvals" }, [
+      el("p", { class: "hint", text: "Loading typed approval evidence…" }),
+    ]);
     const runtimeEvidence = el("div", {
       class: "run-detail-runtime runtime-service-panel",
       "data-runtime-runbook": run.id,
@@ -5196,6 +5257,8 @@
       contextEvidence,
       el("h4", { text: "Usage & budget evidence" }),
       usageEvidence,
+      el("h4", { text: "Approvals & decisions" }),
+      approvalEvidence,
       el("h4", { text: "Runtime service" }),
       runtimeEvidence,
       el("h4", { text: "Execution timeline" })
@@ -5208,6 +5271,42 @@
       [...root.querySelectorAll("[data-runtime-focus]")]
         .find((node) => node.dataset.runtimeFocus === runtimeFocusKey)?.focus({ preventScroll: true });
     }
+
+    getJSON(`/api/approvals?run_id=${encodeURIComponent(run.id)}`).then((rows) => {
+      if (
+        root.dataset.runId !== run.id
+        || renderGeneration !== runDetailRenderGeneration
+        || !root.contains(approvalEvidence)
+      ) return;
+      approvalEvidence.innerHTML = "";
+      if (!rows.length) {
+        approvalEvidence.appendChild(el("p", { class: "hint", text: "No typed approval request is recorded for this run." }));
+        return;
+      }
+      rows.forEach((approval) => {
+        if (approval.state !== "PENDING") approvalResolutionDrafts.delete(approval.id);
+        approvalEvidence.appendChild(approvalCard(approval, {
+          interactive: true,
+          afterResolve: async () => {
+            await Promise.all([refreshAttention(), refreshEvents(), refreshRunbooks()]);
+          },
+        }));
+      });
+      if (pendingApprovalFocusKey) {
+        const replacement = [...root.querySelectorAll("[data-approval-focus]")]
+          .find((node) => node.dataset.approvalFocus === pendingApprovalFocusKey);
+        if (replacement) replacement.focus({ preventScroll: true });
+        pendingApprovalFocusKey = null;
+      }
+    }).catch(() => {
+      if (
+        root.dataset.runId !== run.id
+        || renderGeneration !== runDetailRenderGeneration
+        || !root.contains(approvalEvidence)
+      ) return;
+      approvalEvidence.innerHTML = "";
+      approvalEvidence.appendChild(el("p", { class: "hint", text: "Approval evidence is UNKNOWN because the read failed." }));
+    });
 
     if (linkedTask) {
       getJSON(`/api/usage-telemetry?task=${encodeURIComponent(linkedTask.id)}`).then((payload) => {
@@ -5671,6 +5770,8 @@
     recoverable_orphan: { label: "Recoverable orphan", glyph: "↻", tone: "warn", view: "view-runs" },
     budget_warning: { label: "Budget warning", glyph: "△", tone: "warn", view: "view-providers" },
     budget_block: { label: "Budget hard block", glyph: "■", tone: "err", view: "view-providers" },
+    approval: { label: "Typed approval", glyph: "?", tone: "warn", view: "view-runs" },
+    approval_failure: { label: "Approval execution result", glyph: "✕", tone: "err", view: "view-worktrees" },
   };
 
   function attentionItems(data) {
@@ -5722,11 +5823,13 @@
     (state.runbooks || []).forEach((r) => {
       const a = r.advancement;
       if (!a) return;
-      if (a.state === "OWNER_DECISION_REQUIRED") add("owner", `Next task for ${r.name}: owner decision`, a.reason);
+      if (a.state === "OWNER_DECISION_REQUIRED") add(
+        "owner", `Next task for ${r.name}: owner decision`, a.reason, { advancementDerived: true },
+      );
       else if (a.state === "BLOCKED") {
         const kind = a.stop_kind === "stale_repository_state" ? "stale"
           : a.stop_kind === "provider_unavailable" ? "quota" : "blocked";
-        add(kind, `Next task for ${r.name}: blocked`, a.reason);
+        add(kind, `Next task for ${r.name}: blocked`, a.reason, { advancementDerived: true });
       }
     });
     // ENG-PC-01 (issue #29): a genuinely stale execution lease (owner pid
@@ -5757,7 +5860,135 @@
         `${budget.constraint_type} at ${budget.bounding_scope} · ${budget.evidence_class} · ${budget.source}`
       );
     });
+    (data.approvals || []).forEach((approval) => {
+      const impact = approval.safe_payload_summary || {};
+      add(
+        "approval",
+        `${approval.action_type} · ${approval.risk} · ${approval.state}`,
+        [impact.operation, impact.decision, impact.impact, `Expires ${approval.expires_at}`].filter(Boolean).join(" — "),
+        { approval },
+      );
+    });
+    (data.approval_results || []).forEach((approval) => {
+      const result = approval.result_summary || {};
+      const failures = (result.failed || []).map((failure) =>
+        `${failure.path || failure.target || "unknown target"}: ${failure.reason || "removal failed"}`
+      );
+      add(
+        "approval_failure",
+        `${approval.action_type} · ${approval.state}`,
+        [result.message, ...failures].filter(Boolean).join(" — "),
+        { approval, historical: true },
+      );
+    });
     return items;
+  }
+
+  function approvalResolutionControls(approval, afterResolve) {
+    const note = el("input", {
+      type: "text",
+      maxlength: "1000",
+      placeholder: "Resolution note (required)",
+      "aria-label": "Approval resolution note",
+      "data-approval-focus": `${approval.id}:note`,
+      value: approvalResolutionDrafts.get(approval.id) || "",
+    });
+    note.addEventListener("input", () => {
+      approvalResolutionDrafts.set(approval.id, note.value);
+    });
+    const status = el("span", { class: "hint approval-resolution-status", role: "status" });
+    const approve = el("button", {
+      type: "button", class: "btn-primary", text: "Approve",
+      "data-approval-focus": `${approval.id}:approve`,
+    });
+    const reject = el("button", {
+      type: "button", text: "Reject", "data-approval-focus": `${approval.id}:reject`,
+    });
+    const resolve = async (decision) => {
+      const resolutionNote = note.value.trim();
+      if (!resolutionNote) {
+        status.textContent = "Add a resolution note before deciding.";
+        note.focus();
+        return;
+      }
+      if (decision === "APPROVE" && !window.confirm(`Approve ${approval.action_type}? The server will revalidate current state before execution.`)) return;
+      approve.disabled = true;
+      reject.disabled = true;
+      status.textContent = decision === "APPROVE" ? "Revalidating and executing…" : "Rejecting…";
+      const result = await postJSON(`/api/approvals/${encodeURIComponent(approval.id)}/resolve`, {
+        decision,
+        resolution_note: resolutionNote,
+      });
+      if (result.ok) {
+        approvalResolutionDrafts.delete(approval.id);
+        status.textContent = result.body?.state === "REJECTED" ? "Rejected." : "Approved and executed.";
+        await afterResolve();
+      } else {
+        status.textContent = result.body?.detail || "Resolution was refused.";
+        approve.disabled = false;
+        reject.disabled = false;
+      }
+    };
+    approve.addEventListener("click", () => resolve("APPROVE"));
+    reject.addEventListener("click", () => resolve("REJECT"));
+    return el("div", { class: "approval-resolution" }, [note, approve, reject, status]);
+  }
+
+  function approvalCard(approval, { interactive = false, afterResolve = async () => {} } = {}) {
+    const summary = approval.safe_payload_summary || {};
+    const result = approval.result_summary || {};
+    const summaryRows = Object.entries(summary)
+      .filter(([key]) => !["operation", "impact"].includes(key))
+      .flatMap(([key, value]) => [
+        el("dt", { text: displayName(key.replaceAll("_", "-")) }),
+        el("dd", { text: typeof value === "object" ? JSON.stringify(value) : String(value) }),
+      ]);
+    const removalRows = [];
+    if (Object.hasOwn(result, "removed")) {
+      removalRows.push(
+        el("dt", { text: "Removed" }),
+        el("dd", { text: (result.removed || []).join(", ") || "None" }),
+      );
+    }
+    if (Object.hasOwn(result, "failed")) {
+      removalRows.push(
+        el("dt", { text: "Failed" }),
+        el("dd", {
+          text: (result.failed || []).map((failure) =>
+            `${failure.path || failure.target || "unknown target"}: ${failure.reason || "removal failed"}`
+          ).join("; ") || "None",
+        }),
+      );
+    }
+    const card = el("article", {
+      class: `approval-card is-${String(approval.state || "unknown").toLowerCase()}`,
+      "data-approval-id": approval.id,
+      "data-approval-state": approval.state,
+    }, [
+      el("header", { class: "approval-card-head" }, [
+        el("strong", { text: approval.action_type }),
+        el("span", { class: `status-pill ${approval.risk === "CRITICAL" ? "failed" : "blocked"}`, text: approval.risk }),
+      ]),
+      el("p", { class: "approval-impact", text: summary.operation || "Typed operator decision" }),
+      el("p", { class: "hint", text: summary.impact || "No additional impact detail is reported." }),
+      el("dl", { class: "run-detail-facts approval-facts" }, [
+        el("dt", { text: "State" }), el("dd", { text: approval.state }),
+        ...summaryRows,
+        el("dt", { text: "Requested by" }), el("dd", { text: approval.requested_by }),
+        el("dt", { text: "Reason" }), el("dd", { text: approval.reason }),
+        el("dt", { text: "Expires" }), el("dd", { text: approval.expires_at }),
+        el("dt", { text: "Resolved by" }), el("dd", { text: approval.resolved_by || "NOT_REPORTED" }),
+        el("dt", { text: "Resolution" }), el("dd", { text: approval.resolution_note || "NOT_REPORTED" }),
+        ...(approval.result_summary ? [
+          el("dt", { text: "Result" }), el("dd", { text: result.message || "NOT_REPORTED" }),
+          ...removalRows,
+        ] : []),
+      ]),
+    ]);
+    if (interactive && approval.state === "PENDING") {
+      card.appendChild(approvalResolutionControls(approval, afterResolve));
+    }
+    return card;
   }
 
   function attentionRow(item, opts) {
@@ -5770,7 +6001,14 @@
         item.detail ? el("span", { class: "attn-detail", text: item.detail }) : null,
       ]),
     ]);
-    if (opts && opts.action) {
+    if (item.approval && item.approval.state === "PENDING") {
+      row.classList.add("attn-approval");
+      row.querySelector(".attn-copy").appendChild(
+        approvalResolutionControls(item.approval, async () => {
+          await Promise.all([refreshAttention(), refreshEvents(), refreshRunbooks()]);
+        })
+      );
+    } else if (opts && opts.action) {
       const go = el("button", { type: "button", class: "attn-action", text: "Open", "aria-label": `Open ${spec.view.replace("view-", "")} for ${spec.label}` });
       go.addEventListener("click", () => { closeAttention(); showView(spec.view); });
       row.appendChild(go);
@@ -5785,6 +6023,8 @@
     const staleLeases = data.execution_leases || [];
     const poisonedWakes = data.wakes || [];
     const troubledBudgets = data.usage_budgets || [];
+    const approvalAttention = data.approvals || [];
+    const approvalResults = data.approval_results || [];
     renderKV("attention-body", [
       ["Tasks needing attention", data.tasks.length],
       ["Recovery / wait conditions", recoveryAttention.length],
@@ -5793,20 +6033,24 @@
       ["Stale execution leases", staleLeases.length],
       ["Poisoned wakes", poisonedWakes.length],
       ["Budget warnings / hard blocks", troubledBudgets.length],
+      ["Approval decisions requiring attention", approvalAttention.length],
+      ["Recent failed approval actions", approvalResults.length],
     ]);
     const items = attentionItems(data);
     const list = document.getElementById("attention-list");
     const attentionSignature = JSON.stringify([data, items]);
     if (list.dataset.signature === attentionSignature) {
-      state.attentionCount = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
+      state.attentionCount = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length + approvalAttention.length;
       return;
     }
     list.dataset.signature = attentionSignature;
     list.innerHTML = "";
     // The popover keeps one row per /api/attention entry; advancement-derived
-    // rows appear on the Overview card only.
-    const base = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length;
-    items.slice(0, base).forEach((item) => list.appendChild(attentionRow(item, { action: true })));
+    // rows appear on the Overview card only. Filter by provenance rather than
+    // slicing by count because derived rows are interleaved before approvals.
+    const base = data.tasks.length + recoveryAttention.length + data.providers.length + runbooksNeedingAttention.length + staleLeases.length + poisonedWakes.length + troubledBudgets.length + approvalAttention.length;
+    items.filter((item) => !item.advancementDerived && !item.historical)
+      .forEach((item) => list.appendChild(attentionRow(item, { action: true })));
     const card = document.getElementById("overview-attention-list");
     if (card) {
       card.innerHTML = "";
@@ -6296,9 +6540,9 @@
     document.getElementById("terminal-history-limit")?.addEventListener("change", refreshTerminalHistory);
     document.getElementById("terminal-history-search")?.addEventListener("input", refreshTerminalHistory);
     document.getElementById("terminal-history-clear")?.addEventListener("click", () => confirmAndRun("Clear local Control Center terminal command metadata?", () => postCommand("terminal_history_clear", { confirm: true }).then(refreshTerminalHistory)));
-    document.getElementById("app-start")?.addEventListener("click", () => postJSON("/api/app-lifecycle/start", {}).then(() => Promise.all([refreshAppLifecycle(), refreshRuntimeServices()])));
-    document.getElementById("app-stop")?.addEventListener("click", () => confirmAndRun("Stop only the selected project's verified Octarel-owned runtime process?", () => postJSON("/api/app-lifecycle/stop", { confirm: true }).then(() => Promise.all([refreshAppLifecycle(), refreshRuntimeServices()]))));
-    document.getElementById("app-restart")?.addEventListener("click", () => confirmAndRun("Restart the selected project's verified Octarel-owned runtime process?", () => postJSON("/api/app-lifecycle/restart", { confirm: true }).then(() => Promise.all([refreshAppLifecycle(), refreshRuntimeServices()]))));
+    document.getElementById("app-start")?.addEventListener("click", () => legacyRuntimeAction("start", {}));
+    document.getElementById("app-stop")?.addEventListener("click", () => confirmAndRun("Stop only the selected project's verified Octarel-owned runtime process?", () => legacyRuntimeAction("stop", { confirm: true })));
+    document.getElementById("app-restart")?.addEventListener("click", () => confirmAndRun("Restart the selected project's verified Octarel-owned runtime process?", () => legacyRuntimeAction("restart", { confirm: true })));
     document.getElementById("graphify-refresh")?.addEventListener("click", async () => {
       const result = await postJSON("/api/graphify/refresh", {});
       document.getElementById("graphify-action-result").textContent = result.reason || result.status;

@@ -298,11 +298,49 @@ def list_worktree_statuses(ctx: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def cleanup_worktrees(ctx: Any, *, confirm: bool = False) -> dict[str, Any]:
-    """Preview or remove only deterministically FINISHED_CLEAN worktrees."""
+def cleanup_worktrees(
+    ctx: Any,
+    *,
+    confirm: bool = False,
+    approved_project_id: str | None = None,
+    approved_project_root: str | None = None,
+    approved_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Preview or remove only deterministically FINISHED_CLEAN worktrees.
+
+    The optional approval identity is internal server state.  When present it
+    pins both the managed project/root and the exact eligible target set all
+    the way into the destructive handler, closing the resolution check/act
+    window without accepting a caller-selected path.
+    """
+
+    constrained = any(
+        value is not None
+        for value in (approved_project_id, approved_project_root, approved_paths)
+    )
+    if constrained and (
+        not confirm
+        or approved_project_id is None
+        or approved_project_root is None
+        or approved_paths is None
+    ):
+        raise OperationError("approved cleanup requires a complete confirmed server-derived target identity")
+    fixed_root = Path(approved_project_root).resolve() if approved_project_root is not None else None
+    if constrained and (
+        ctx.selected_project_id != approved_project_id
+        or ctx.project_root.resolve() != fixed_root
+    ):
+        raise OperationError("approved cleanup project selection or repository root changed")
 
     rows = refresh_worktree_statuses(ctx)
     eligible = [row for row in rows if row.get("cleanup_eligible") and not row.get("canonical_checkout")]
+    eligible_paths = sorted(str(Path(row["path"]).resolve()) for row in eligible)
+    if constrained and (
+        ctx.selected_project_id != approved_project_id
+        or ctx.project_root.resolve() != fixed_root
+        or eligible_paths != sorted(str(Path(path).resolve()) for path in approved_paths)
+    ):
+        raise OperationError("approved cleanup targets or managed-project state changed")
     protected = [
         {"path": row["path"], "classification": row.get("classification", "UNKNOWN"),
          "reason": row.get("protected_reason") or "not cleanup eligible"}
@@ -313,6 +351,7 @@ def cleanup_worktrees(ctx: Any, *, confirm: bool = False) -> dict[str, Any]:
         "eligible": eligible,
         "protected": protected,
         "removed": [],
+        "failed": [],
     }
     if not confirm:
         return preview
@@ -320,11 +359,17 @@ def cleanup_worktrees(ctx: Any, *, confirm: bool = False) -> dict[str, Any]:
     # checkout, not the Control Plane's. Until CPX-05 those two may coincide;
     # once a second project is selected they must not. Never remove the live
     # Control Plane checkout even if it is not the selected project.
-    git_root = ctx.project_root
+    git_root = fixed_root or ctx.project_root
     for row in eligible:
         target = Path(row["path"]).resolve()
         if target == git_root.resolve() or target == ctx.repo_root.resolve():
-            protected.append({"path": str(target), "classification": "ACTIVE", "reason": "Control Center checkout is running here"})
+            failure = {
+                "path": str(target),
+                "classification": "ACTIVE",
+                "reason": "Control Center checkout is running here",
+            }
+            preview["failed"].append(failure)
+            protected.append(failure)
             continue
         result = _run(["git", "worktree", "remove", str(target)], git_root, timeout=120)
         if result.returncode == 0:
@@ -332,12 +377,22 @@ def cleanup_worktrees(ctx: Any, *, confirm: bool = False) -> dict[str, Any]:
             ctx.state.record_event(
                 category="worktrees",
                 message=f"safely removed finished clean worktree {target}",
-                project_id=ctx.selected_project_id,
+                project_id=approved_project_id if constrained else ctx.selected_project_id,
             )
         else:
-            protected.append({"path": str(target), "classification": row.get("classification"), "reason": redact_text(result.stderr or result.stdout or "git worktree remove failed")})
+            failure = {
+                "path": str(target),
+                "classification": row.get("classification"),
+                "reason": redact_text(result.stderr or result.stdout or "git worktree remove failed"),
+            }
+            preview["failed"].append(failure)
+            protected.append(failure)
     _run(["git", "worktree", "prune"], git_root, timeout=30)
-    refresh_repository_health(ctx)
+    if not constrained or (
+        ctx.selected_project_id == approved_project_id
+        and ctx.project_root.resolve() == git_root.resolve()
+    ):
+        refresh_repository_health(ctx)
     return preview
 
 

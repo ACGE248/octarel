@@ -68,7 +68,7 @@ test('attention rows share one language: glyph + text label + action, never colo
   for (let i = 0; i < count; i += 1) {
     await expect(rows.nth(i).locator('.attn-icon')).toHaveAttribute('aria-hidden', 'true');
     await expect(rows.nth(i).locator('.attn-kind')).not.toBeEmpty();
-    await expect(rows.nth(i).locator('.attn-action')).toBeVisible();
+    await expect(rows.nth(i).locator('.attn-action, .approval-resolution button').first()).toBeVisible();
   }
   // "Open" navigates to the place the operator can act.
   await page.locator('#overview-attention-list [data-attention-kind="quota"] .attn-action').first().click();
