@@ -571,14 +571,37 @@
       </section>
 
       <section class="view" id="view-flow" role="tabpanel" hidden>
-        <div class="card wide">
-          <h2>Development Pipeline</h2>
-          <p class="hint">Task → orchestrator → worker/provider/model → worktree → implementation → tests → review → checkpoint → PR → CI. Unreported stages stay explicitly unreported.</p>
-          <p class="hint">Cards for the same state render side by side, so simultaneous workers are visible at a glance. A connector line traces a real task dependency from /api/flow; click any card for its full detail.</p>
-          <div class="flow-graph-wrap">
-            <svg id="flow-edges-svg" class="flow-edges-svg" aria-hidden="true"></svg>
-            <div id="flow-graph" class="flow-graph"></div>
+        <div class="card wide flow-canvas-card" id="flow-canvas-card">
+          <div class="card-head flow-canvas-head">
+            <div>
+              <h2>Development Pipeline</h2>
+              <p class="hint">Task → orchestrator → worker/provider/model → worktree → implementation → tests → review → checkpoint → PR → CI. Unreported stages stay explicitly unreported.</p>
+              <p class="hint">Cards for the same state render side by side, so simultaneous workers are visible at a glance. Dependency lines come from /api/flow; click any card for its full detail.</p>
+            </div>
+            <div class="flow-toolbar" role="toolbar" aria-label="Flow canvas controls">
+              <button type="button" id="flow-zoom-out" aria-label="Zoom out flow canvas">−</button>
+              <span id="flow-zoom-value" aria-label="Flow canvas zoom">100%</span>
+              <button type="button" id="flow-zoom-in" aria-label="Zoom in flow canvas">+</button>
+              <button type="button" id="flow-fit" aria-label="Fit flow canvas to screen">Fit</button>
+              <button type="button" id="flow-fullscreen" aria-label="Enter flow canvas fullscreen" aria-pressed="false">Fullscreen</button>
+            </div>
           </div>
+          <p class="sr-only" id="flow-canvas-help">Use the toolbar to zoom or fit the canvas. Scroll the canvas to pan. The minimap shows the rendered nodes and visible region.</p>
+          <div class="flow-canvas" id="flow-canvas">
+            <div class="flow-viewport" id="flow-viewport" tabindex="0" aria-label="Development pipeline canvas" aria-describedby="flow-canvas-help">
+              <div class="flow-stage-shell" id="flow-stage-shell">
+                <div class="flow-stage" id="flow-stage">
+                  <svg id="flow-edges-svg" class="flow-edges-svg" aria-hidden="true"></svg>
+                  <div id="flow-graph" class="flow-graph"></div>
+                </div>
+              </div>
+            </div>
+            <div class="flow-minimap" id="flow-minimap" role="group" tabindex="0" aria-label="Flow canvas minimap. Use arrow keys to pan.">
+              <svg id="flow-minimap-svg" aria-hidden="true"></svg>
+              <span id="flow-minimap-viewport" aria-hidden="true"></span>
+            </div>
+          </div>
+          <span class="hint flow-canvas-status" id="flow-canvas-status" role="status"></span>
         </div>
       </section>
 

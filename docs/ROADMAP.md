@@ -57,7 +57,7 @@ The Glass Orchestration Studio program has landed. It is the live Control Center
 
 | Task | Status | What exists in `main` |
 |---|---|---|
-| **#23 OCTAREL-UI-04** — Glass Orchestration Studio | Merged in #27 (`a12daf9`, tree `78918c02`); issue open for deferred scope | Design tokens and light/dark parity, app shell and navigation IA, Priority & Fallback Matrix over `/api/priority-matrix`, cross-entity ⌘K command palette |
+| **#23 OCTAREL-UI-04** — Glass Orchestration Studio | Merged in #27 (`a12daf9`, tree `78918c02`); Flow canvas delivered in a follow-up; issue open for inspector planning | Design tokens and light/dark parity, app shell and navigation IA, Priority & Fallback Matrix over `/api/priority-matrix`, cross-entity ⌘K command palette, and the `/api/flow`-backed minimap/zoom/fit/fullscreen canvas |
 | **#24 OCTAREL-UI-05** — Manager Chat | Delivered in #27, issue closed | `control_plane/manager_chat.py`: orchestration-backed chat that proposes deterministic commands for review; not a model client. Cross-entity navigation is the ⌘K palette, not this module |
 | **#25 OCTAREL-UI-06** — usage/context/cost telemetry | Delivered in #27, issue closed | `control_plane/usage_telemetry.py` behind `/api/usage-telemetry`: per-run rows with `MEASURED`/`DERIVED`/`UNKNOWN`/`NOT_EXPOSED` classes, plus windowed aggregates |
 | **#26 OCTAREL-UI-07** — Graphify status | Delivered in #27, issue closed | Per-run recorded Graphify status, reason, injection and precedence in agent activity; no page view can build a graph |
@@ -67,9 +67,9 @@ The Glass Orchestration Studio program has landed. It is the live Control Center
 
 The `OCTAREL-UI-07` label is used by two different things and always has been: issue #26 (Graphify status) and the commit/engineering-doc name for issue #42 (subscription-aware cost). Cite the issue number, not the label.
 
-**#23 remains open for two unbuilt surfaces,** named in its merge comment on #27: the Flow canvas (minimap, fit-to-screen, zoom %, fullscreen) and shared entity inspectors. ENG-PC-04 shipped the shared Runs → Run Detail split, and ENG-PC-02 extends that one panel with task-scoped session facts and its bounded fresh-next-attempt control.
+**#23 remains open for shared entity-inspector scope.** Its formally deferred Flow canvas is now delivered over the existing `/api/flow` projection with a rendered-data minimap, bounded zoom percentage, measured fit-to-screen, real Fullscreen API control, and dependency-edge redraw across zoom/expansion. ENG-PC-04 shipped the shared Runs → Run Detail split, and ENG-PC-02 extends that one panel with task-scoped session facts and its bounded fresh-next-attempt control.
 
-Their provenance differs, and the difference matters to whoever picks them up. Only the Flow canvas is recorded as **Deferred** in `docs/engineering/OCTAREL-UI-04.md`; shared entity inspectors are not in that file's decision table. Treat the remaining inspector work as this roadmap's planning rather than as scope #23 formally logged. ENG-PC tasks that need run evidence extend the existing Run Detail panel rather than rebuilding it.
+The remaining inspector work is roadmap planning rather than scope formally logged in the original OCTAREL-UI-04 decision table. Do not close #23 until that boundary is reconciled explicitly. ENG-PC tasks that need run evidence extend the existing Run Detail panel rather than rebuilding it.
 
 Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather than estimated, and no ENG-PC task may quietly fill them with an approximation: **cache categories** (nothing in the stack records fresh input, cache reads or cache writes, so no cache hit rate can be derived) and **effective context limit** (no runtime reports one, and a context window is never inferred from a model name).
 
