@@ -2,7 +2,7 @@
 
 This file is the canonical product/engineering roadmap for **Octarel itself**. It does not copy or replace the roadmap, ledger, ADRs, or task truth of any managed project. Current repository code and `AGENTS.md` override historical planning notes.
 
-**Reconciled against `main` at `ed4ca59` (2026-09-29)**, after the Glass Orchestration Studio UI program (#27) and the telemetry follow-ups (#43, #47) landed. Where this file describes delivered behaviour it is a pointer to the code, not a second specification; where a delivered surface is named as the home for future work, extend that surface rather than rebuilding it.
+**Reconciled through `main` at `0cb7ece` (2026-10-06)**, after the Glass Orchestration Studio follow-ups (#78, #79), the ENG-PC program, and ENG-PC-12 landed. Where this file describes delivered behaviour it is a pointer to the code, not a second specification; where a delivered surface is named as the home for future work, extend that surface rather than rebuilding it.
 
 ## Current direction
 
@@ -20,8 +20,8 @@ Octarel is a standalone, multi-repository development orchestration control plan
 
 - **Issue:** [#41](https://github.com/ACGE248/octarel/issues/41)
 
-ENG-AO-10 is implemented in `scripts/agents/graph_lifecycle.py` and extends the existing ENG-AO-01/#26 seams;
-it remains the sequencing prerequisite before beginning the ENG-PC implementation waves below.
+ENG-AO-10 is implemented in `scripts/agents/graph_lifecycle.py` and extends the existing ENG-AO-01/#26 seams.
+It supplied the sequencing prerequisite for the now-delivered ENG-PC implementation waves below.
 
 Octarel already has safe tree-matched Graphify context from ENG-AO-01 (`scripts/agents/graph_context.py`), and #26 has since delivered its **per-run** Control Center evidence: `agent_activity._graph_context_row` exposes the recorded status, reason, injection flag and precedence for an attempt, reading only the run manifest and never invoking Graphify.
 
@@ -57,7 +57,7 @@ The Glass Orchestration Studio program has landed. It is the live Control Center
 
 | Task | Status | What exists in `main` |
 |---|---|---|
-| **#23 OCTAREL-UI-04** — Glass Orchestration Studio | Merged in #27 (`a12daf9`, tree `78918c02`); Flow canvas delivered in a follow-up; issue open for inspector planning | Design tokens and light/dark parity, app shell and navigation IA, Priority & Fallback Matrix over `/api/priority-matrix`, cross-entity ⌘K command palette, and the `/api/flow`-backed minimap/zoom/fit/fullscreen canvas |
+| **#23 OCTAREL-UI-04** — Glass Orchestration Studio | Delivered in #27 (`a12daf9`, tree `78918c02`) and #78 (`89bf423`, tree `8c8d67b`); existing contextual inspectors accepted as the shared architecture | Design tokens and light/dark parity, app shell and navigation IA, Priority & Fallback Matrix over `/api/priority-matrix`, cross-entity ⌘K command palette, the `/api/flow`-backed minimap/zoom/fit/fullscreen canvas, and the shared Run Detail, Context, and Worktree inspector surfaces |
 | **#24 OCTAREL-UI-05** — Manager Chat | Delivered in #27, issue closed | `control_plane/manager_chat.py`: orchestration-backed chat that proposes deterministic commands for review; not a model client. Cross-entity navigation is the ⌘K palette, not this module |
 | **#25 OCTAREL-UI-06** — usage/context/cost telemetry | Delivered in #27, issue closed | `control_plane/usage_telemetry.py` behind `/api/usage-telemetry`: per-run rows with `MEASURED`/`DERIVED`/`UNKNOWN`/`NOT_EXPOSED` classes, plus windowed aggregates |
 | **#26 OCTAREL-UI-07** — Graphify status | Delivered in #27, issue closed | Per-run recorded Graphify status, reason, injection and precedence in agent activity; no page view can build a graph |
@@ -67,9 +67,7 @@ The Glass Orchestration Studio program has landed. It is the live Control Center
 
 The `OCTAREL-UI-07` label is used by two different things and always has been: issue #26 (Graphify status) and the commit/engineering-doc name for issue #42 (subscription-aware cost). Cite the issue number, not the label.
 
-**#23 remains open for shared entity-inspector scope.** Its formally deferred Flow canvas is now delivered over the existing `/api/flow` projection with a rendered-data minimap, bounded zoom percentage, measured fit-to-screen, real Fullscreen API control, and dependency-edge redraw across zoom/expansion. ENG-PC-04 shipped the shared Runs → Run Detail split, and ENG-PC-02 extends that one panel with task-scoped session facts and its bounded fresh-next-attempt control.
-
-The remaining inspector work is roadmap planning rather than scope formally logged in the original OCTAREL-UI-04 decision table. Do not close #23 until that boundary is reconciled explicitly. ENG-PC tasks that need run evidence extend the existing Run Detail panel rather than rebuilding it.
+**#23 is materially complete.** Its formally deferred Flow canvas is delivered over the existing `/api/flow` projection with a rendered-data minimap, bounded zoom percentage, measured fit-to-screen, real Fullscreen API control, and dependency-edge redraw across zoom/expansion. The existing Runs → Run Detail split, embedded Context inspector, and Worktree inspector together satisfy the shared contextual entity-inspector requirement. They expose entity-specific evidence and only server-proven actions without adding a generic inspector shell or a top-level page per entity. Future work extends those surfaces where the preferred-home table below assigns ownership.
 
 Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather than estimated, and no ENG-PC task may quietly fill them with an approximation: **cache categories** (nothing in the stack records fresh input, cache reads or cache writes, so no cache hit rate can be derived) and **effective context limit** (no runtime reports one, and a context window is never inferred from a model name).
 
@@ -260,7 +258,7 @@ Large logs remain redacted evidence files. SQLite stores safe structured summari
 
 Execution Events becomes a chronological, filterable timeline in the shipped Glass Orchestration Studio shell. Visually distinguish lifecycle, model/tool, safety/approval and validation events. Evidence pointers can expand/open safely. Preserve `UNKNOWN`/`NOT_REPORTED`.
 
-The Runs → Run Detail split is still deferred #23 scope. ENG-PC-04 is the first task whose evidence genuinely needs it, so if it is still unbuilt when this task starts, ENG-PC-04 builds it once as shared structure and later tasks extend it — it does not get rebuilt per task, and it does not become a reason to defer the timeline.
+ENG-PC-04 delivered the Runs → Run Detail split once as shared structure for this evidence. Later tasks extend that same surface; they do not rebuild it per task or create a parallel inspector.
 
 ### Acceptance
 
@@ -430,7 +428,7 @@ Expiry/staleness, changed-state revalidation, remote identity/audit, rejection, 
 
 The **Glass Orchestration Studio** shell is live in `main` (#27). All ENG-PC UI work integrates into it rather than creating a parallel dashboard, and reuses its design tokens, light/dark parity and inspector conventions.
 
-Run Detail is delivered shared structure and now owns the run-scoped evidence added by later ENG-PC tasks. The broader shared entity-inspector boundary remains deferred #23 roadmap planning: new work should extend the existing Run Detail, context, and Worktree inspectors where they fit, and must not invent a duplicate inspector shell until that remaining product scope is explicitly reconciled.
+Run Detail, its embedded Context inspector, and the Worktree inspector are the accepted shared contextual entity-inspector architecture. Run Detail owns run-scoped evidence added by later ENG-PC tasks; Context owns bounded task/worker bundle and provenance facts; Worktree owns checkout/runtime identity and server-proven service actions. New work extends these surfaces where it fits and does not create an additional generic inspector shell solely to satisfy historical #23 wording.
 
 Preferred homes:
 
