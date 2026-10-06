@@ -23,12 +23,12 @@ system exists, and no static mock-up replaced a dynamic surface.
 | Manager Chat | `view-steering` (labelled **Manager**) | `/api/manager/route`, `/api/manager/message`, `/api/steering/*` |
 | Flow / Orchestrator Studio | `view-flow` | `/api/flow` |
 | Priority & Fallback Matrix | `view-priority` *(new)* | `/api/priority-matrix` |
-| Runs / Run Detail | `view-runs` | `/api/quickstart`, `/api/runbooks*`, `/api/agent-sessions/{task_ref}/{worker}` |
+| Runs / Run Detail | `view-runs` | `/api/quickstart`, `/api/runbooks*`, `/api/agent-sessions/{task_ref}/{worker}`, `/api/context-inspector/{task_id}/{consumer_id}`, `/api/recovery/{task_ref}`, `/api/approvals`, `/api/runtime-services`, `/api/usage-telemetry` |
 | Tasks | `view-tasks` | `/api/tasks` |
 | Agent Fleet | `view-agents` | `/api/models`, `/api/agent-activity/*` |
 | Providers | `view-providers` | `/api/providers`, `/api/opencode-models`, `/api/native-models`, `/api/usage-routing`, `/api/usage-telemetry` |
 | History & Evidence | `view-history` | `/api/events`, `/api/run-evidence` |
-| Worktrees & Branch Isolation | `view-worktrees` | `/api/worktrees`, `/api/operations`, `/api/repository-health` |
+| Worktrees & Branch Isolation | `view-worktrees` | `/api/worktrees`, `/api/operations`, `/api/repository-health`, `/api/runtime-services` |
 | System & Runtime Health | `view-system` | `/api/resources`, `/api/local-gate`, `/api/tests` |
 | Terminal | `view-terminal` | `/api/terminal/*` (real PTY over WebSocket) |
 | Settings | `view-settings` | `localStorage` (appearance/notifications), `set_max_writers` |
@@ -45,6 +45,30 @@ Two deliberate departures from the mock-up's information architecture:
 - **Roadmap owns its live table.** It previously rendered inside Settings with
   the roadmap view left as a stub pointing back at it — one concern in two
   places. It is now a real destination and the duplicate is gone.
+
+## Contextual entity inspectors
+
+The delivered contextual surfaces, taken together, satisfy the shared
+entity-inspector requirement from #23:
+
+- **Run Detail** (`#run-detail`) is the shared selected-run surface. It composes
+  durable run/task/worker identity with session, usage and budget, approval,
+  recovery, runtime-service, and chronological event evidence rather than
+  creating a separate page for each record type.
+- **Context inspector** (`.run-detail-context`) is embedded in Run Detail and
+  projects the bounded task/worker context bundle, ancestry, Graphify status,
+  and explicit `MEASURED`/`DERIVED`/`UNKNOWN` provenance from
+  `/api/context-inspector/{task_id}/{consumer_id}`. It does not expose opaque
+  native session payloads or copied managed-project truth.
+- **Worktree inspector** is the existing worktree card and scoped runtime
+  service detail. It combines checkout/branch condition with service health,
+  ownership, preview/log metadata, and only the start/restart/stop actions the
+  server currently proves safe.
+
+These entity-specific contextual surfaces are the architecture; Octarel does
+not add a generic inspector shell merely to match historical wording. Future
+features extend the existing owner surface instead of duplicating state,
+navigation, or action authority.
 
 ## Unsupported-control triage
 
