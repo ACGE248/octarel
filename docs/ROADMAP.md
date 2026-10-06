@@ -430,7 +430,7 @@ Expiry/staleness, changed-state revalidation, remote identity/audit, rejection, 
 
 The **Glass Orchestration Studio** shell is live in `main` (#27). All ENG-PC UI work integrates into it rather than creating a parallel dashboard, and reuses its design tokens, light/dark parity and inspector conventions.
 
-Two homes named in the table below — Run Detail and shared entity inspectors — are deferred #23 scope that no task has built yet. The first ENG-PC task to need one builds it as shared structure; the rest extend it.
+Run Detail is delivered shared structure and now owns the run-scoped evidence added by later ENG-PC tasks. The broader shared entity-inspector boundary remains deferred #23 roadmap planning: new work should extend the existing Run Detail, context, and Worktree inspectors where they fit, and must not invent a duplicate inspector shell until that remaining product scope is explicitly reconciled.
 
 Preferred homes:
 
