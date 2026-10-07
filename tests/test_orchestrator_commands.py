@@ -358,10 +358,24 @@ def test_provider_failure_clear_resets_consecutive_failures_and_restores_availab
     assert recovered.last_error is None
 
 
-def test_provider_failure_clear_refuses_when_not_failed(ctx):
+def test_provider_failure_clear_clears_stale_evidence_after_successful_probe(ctx):
+    provider = ctx.state.get_provider_state("grok-build")
+    provider.state = STATE_AVAILABLE
+    provider.consecutive_failures = 1
+    provider.last_error = "transient review rate limit"
+    ctx.state.upsert_provider_state(provider)
+
+    result = apply_command(ctx, "provider_failure_clear", name="grok-build")
+    assert result.ok is True
+    recovered = ctx.state.get_provider_state("grok-build")
+    assert recovered.state == STATE_AVAILABLE
+    assert recovered.consecutive_failures == 0
+    assert recovered.last_error is None
+
+
+def test_provider_failure_clear_refuses_without_failure_evidence(ctx):
     result = apply_command(ctx, "provider_failure_clear", name="grok-build")
     assert result.ok is False
-    # Not FAILED to begin with, so nothing should have changed.
     assert ctx.state.get_provider_state("grok-build").consecutive_failures == 0
 
 
@@ -376,6 +390,23 @@ def test_provider_failure_clear_does_not_touch_a_cost_blocked_provider(ctx):
     result = apply_command(ctx, "provider_failure_clear", name="grok-build")
     assert result.ok is False
     assert ctx.state.get_provider_state("grok-build").state == STATE_COST_BLOCKED
+
+
+def test_provider_failure_clear_does_not_enable_a_disabled_provider(ctx):
+    provider = ctx.state.get_provider_state("grok-build")
+    provider.state = STATE_DISABLED
+    provider.reason = "DISABLED"
+    provider.consecutive_failures = 1
+    provider.last_error = "old transient failure"
+    ctx.state.upsert_provider_state(provider)
+
+    result = apply_command(ctx, "provider_failure_clear", name="grok-build")
+    assert result.ok is True
+    recovered = ctx.state.get_provider_state("grok-build")
+    assert recovered.state == STATE_DISABLED
+    assert recovered.reason == "DISABLED"
+    assert recovered.consecutive_failures == 0
+    assert recovered.last_error is None
 
 
 def test_provider_failure_clear_raises_for_unknown_provider(ctx):
