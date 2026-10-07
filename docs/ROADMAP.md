@@ -71,6 +71,126 @@ The `OCTAREL-UI-07` label is used by two different things and always has been: i
 
 Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather than estimated, and no ENG-PC task may quietly fill them with an approximation: **cache categories** (nothing in the stack records fresh input, cache reads or cache writes, so no cache hit rate can be derived) and **effective context limit** (no runtime reports one, and a context window is never inferred from a model name).
 
+## Observed operational defects awaiting triage
+
+These are Octarel defects observed while operating the shipped Control Center against a managed project. They
+record Octarel mechanism/UI behavior only; the managed project's task truth remains in that repository.
+
+### OCTAREL-BUG-01 — Cost display must agree with billing prohibition
+
+A run launched through `grok-build` recorded `cost_class=metered-configured` and the Run Detail UI rendered
+`BILLING API-billed` with unknown actual incremental cost, even though the executable worker contract has
+`allow_api_billing=false` and authenticates through the configured grok.com CLI session. This is an unsafe
+operator-facing contradiction: the admission contract says API billing is prohibited while telemetry implies
+that an API-billed route executed.
+
+Triage the persisted route classification and the `execution_route_for_cost_class` mapping together. The UI
+must distinguish a configured metered-capacity/session route from an authorized API-billed route, preserve the
+API-equivalent estimate as an estimate, and never label actual billing as API-billed without affirmative billing
+authorization/evidence. Add backend and Run Detail regression coverage for this exact worker contract.
+
+### OCTAREL-BUG-02 — Provider auth state changes during Quick Start launch
+
+Quick Start prepared `VE-DIR-04` with `grok-build` AVAILABLE, then launch changed the provider to
+`NOT_CONFIGURED` / `NOT_AUTHENTICATED` and blocked the task. The same registry auth command (`grok models`)
+immediately reported an authenticated grok.com session, and an explicit Octarel probe restored AVAILABLE.
+Determine whether launch and probe use different environments, parsers, timeouts, or stale provider-state
+writes. A launch-time auth failure must retain truthful evidence and must not contradict an immediately
+successful identical probe.
+
+The Control Center also left the prepared-run button disabled at `Starting…` after the backend task became
+BLOCKED. The launch response/polling path must settle to the durable runbook/task state and expose the safe
+retry/re-probe action instead of leaving a permanent in-flight presentation.
+
+### OCTAREL-BUG-03 — Blocked-task dry-run must not crash
+
+Running `orchestrator start --id <blocked-task> --dry-run` for the launch-blocked task raised an uncaught
+`StopIteration` in `dispatch.managed_admit` because no matching admission fact existed. Dry-run is a safety
+boundary and must always return a structured allowed/blocked verdict. Cover blocked, terminal, missing,
+provider-unavailable, and admission-fact-missing task states; none may escape as a traceback or mutate the task.
+
+### OCTAREL-BUG-04 — Recovery must ingest a completed worker manifest before replay
+
+The `VE-DIR-04` worker process finished with a retained PASS manifest and exit status 0, including its focused
+test evidence and final report, but the durable task remained `RUNNING` with the old PID. After the daemon was
+restarted it correctly proved that PID dead and reclaimed the execution lease, then immediately queued and
+relaunched the entire implementation worker in the same worktree. Recovery did not first reconcile the
+completed manifest or calculate the minimum remaining stage.
+
+On recovery, Octarel must inspect the exact retained attempt manifest/result bound to the recorded task and
+tree before deciding that implementation needs replay. A valid completed implementation result should advance
+to the missing checkpoint/test/review stage while preserving the worker report and usage evidence. Missing,
+ambiguous, mismatched, or non-terminal evidence must still fail closed. Add crash-at-each-boundary coverage for
+worker exit, manifest persistence, task-state persistence, usage recording, lease release, and runbook-stage
+advancement; prove that only the minimum unproven stage reruns and that a second write worker is not launched
+for an already completed implementation attempt.
+
+### OCTAREL-BUG-05 — Dashboard must surface daemon liveness separately
+
+The dashboard service remained healthy on port 8877 while `octarel daemon status` reported `NOT_RUNNING`.
+During that interval the Control Center continued to present the run as actively `RUNNING`, although the exact
+worker PID was gone and no daemon remained to reconcile it. A healthy dashboard is not evidence that the
+advancement daemon or worker is healthy.
+
+Expose dashboard, daemon-authority, scheduler/reconciler, and exact worker-process health as separate facts in
+System and Run Detail. A stale `RUNNING` row with a missing exact PID must become an actionable recovery state,
+not live activity. The UI must not infer daemon liveness from port 8877, and restarting the dashboard must not
+silently start or duplicate the daemon.
+
+### OCTAREL-BUG-06 — Relaunch must reset stale ownership evidence
+
+After stale-PID recovery relaunched the same task with a new live PID, the task row kept
+`ownership_evidence_class=PID_ABSENT` while its `pid` field pointed at the verified replacement process. That
+mixes the previous attempt's recovery evidence with the current attempt's ownership identity and can mislead
+Run Detail or later recovery decisions.
+
+Ownership evidence must be attempt-scoped or atomically reset/re-established during launch. A replacement
+process may become `RUNNING` only with evidence describing that replacement; the prior attempt's `PID_ABSENT`
+fact remains in immutable recovery history/events instead of the live task projection. Cover stale-owner
+reclaim followed by successful relaunch, PID reuse, launch identity-capture failure, and restart persistence.
+
+### OCTAREL-BUG-07 — Active Work must include live acceptance processes
+
+While `VE-DIR-05` was `ACCEPTANCE_PENDING` at the review stage, the daemon had a live exact-tree
+`scripts/ci/local_gate.py` process with a running `pytest` child. The Overview correctly offered
+`View Active Run` for that runbook, but its adjacent Active Work card simultaneously reported `Idle`,
+`Nothing is running`, and zero running agents. That presentation hides expensive, long-running acceptance
+work and can prompt an operator to start conflicting work or assume the gate is stuck.
+
+Model acceptance review/test/checkpoint/PR-readiness work as first-class active execution, even when the
+implementation worker task is already terminal. Overview, workflow, run detail, and status counts must derive
+from one truthful runbook-plus-execution projection and distinguish the active acceptance stage from an idle
+project. Add coverage for synchronous and delegated review, an active local gate with no `RUNNING` worker row,
+stage transitions, daemon restart during acceptance, and truly idle completed/blocked runbooks.
+
+### OCTAREL-BUG-08 — Quick Start must not offer an already-running task as ready
+
+Immediately after launching `GATE-DIR`, the Runs surface truthfully showed the active-task pill and run card as
+`RUNNING` / `Implementing`, but both Quick Start choices for that same stable task still displayed `READY` and
+remained actionable. Even if admission would eventually reject a second writer, the operator surface must not
+invite a duplicate launch or represent a task with an active admitted run as launch-ready.
+
+Resolve Quick Start against durable active runbook/task ownership as well as repository eligibility. The same
+stable task should become `ACTIVE` with a `View Active Run` action while any non-terminal run owns it; launch
+must also retain a server-side atomic conflict refusal for stale clients. Cover the hydration race immediately
+after launch, multiple browser tabs, daemon restart, acceptance-pending ownership, terminal completion, and
+repository advancement to the next task.
+
+### OCTAREL-BUG-09 — Continue Quick Start must surface resumable in-progress tasks
+
+After OctaScene's merged task history was reconciled, its canonical ledger truthfully contained three
+`in-progress` product-validation gates and no `pending` row. Both **Continue Video Editor** and **Continue
+OctaScene** then reported that no task was eligible and that a maintainer decision was required. The resolver
+only considers `pending`, so a control explicitly labelled Continue cannot represent or recover unfinished
+work whose durable ledger state is already `in-progress`.
+
+Resolve continuation against both repository status and durable Octarel ownership/evidence. A single safe,
+unowned `in-progress` task should be shown as resumable with its remaining acceptance scope; multiple candidates
+must be listed for explicit operator selection rather than silently reordered. A task owned by a non-terminal
+run remains `ACTIVE` under OCTAREL-BUG-08, and terminal completed work must never be replayed. Cover a merged
+harness with an open product gate, an abandoned worktree, a live owner, multiple in-progress candidates,
+dependency ordering, stale ledgers, and the transition from resumed work to complete or blocked.
+
 ---
 
 # ENG-PC — Paperclip-derived orchestration hardening
