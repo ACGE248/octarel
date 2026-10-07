@@ -482,7 +482,7 @@ def cmd_provider_cost_clear(ctx: CommandContext, *, name: str) -> CommandResult:
 
 
 def cmd_provider_failure_clear(ctx: CommandContext, *, name: str) -> CommandResult:
-    """Recover a provider stuck ``FAILED`` after a resolved transient failure.
+    """Clear retained non-cost failure evidence after a resolved transient failure.
 
     Symmetric to ``provider_cost_clear``, but for the plain (non-cost) failure
     path: nothing else ever resets ``consecutive_failures``/``last_error``, so
@@ -497,11 +497,15 @@ def cmd_provider_failure_clear(ctx: CommandContext, *, name: str) -> CommandResu
     provider = ctx.state.get_provider_state(name)
     if provider is None:
         raise CommandError(f"unknown provider {name!r}")
-    if provider.state != STATE_FAILED:
-        return CommandResult(ok=False, message=f"{name} is not FAILED (currently {provider.state})")
+    from .provider_state import STATE_COST_BLOCKED
+
+    if provider.state == STATE_COST_BLOCKED:
+        return CommandResult(ok=False, message=f"{name} is COST_BLOCKED; clear the cost block separately")
+    if provider.consecutive_failures == 0 and provider.last_error is None:
+        return CommandResult(ok=False, message=f"{name} has no retained failure state to clear")
     provider.consecutive_failures = 0
     provider.last_error = None
-    if provider.configured:
+    if provider.state == STATE_FAILED and provider.configured:
         provider.state = STATE_AVAILABLE
         provider.reason = REASON_AVAILABLE
     ctx.state.upsert_provider_state(provider)
