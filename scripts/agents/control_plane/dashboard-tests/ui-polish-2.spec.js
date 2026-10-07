@@ -412,6 +412,54 @@ test('Quick Start shows why an already-accepted task cannot be started again', a
   await expect(page.locator('#prepared-run-feedback')).toContainText('will not start it again');
 });
 
+test('Quick Start routes an active task to its existing run instead of Prepared Run', async ({ page, request, baseURL }) => {
+  const runbooks = await (await request.get(`${baseURL}/api/runbooks`)).json();
+  expect(runbooks.length).toBeGreaterThan(0);
+  const active = runbooks[0];
+  await serveMutated(page, request, baseURL, '/api/quickstart', (options) => {
+    options[0] = {
+      ...options[0],
+      action: 'view-active',
+      active_run_id: active.id,
+      ready: false,
+      unavailable_reason: `${options[0].task_id} is already owned by active run ${active.id}`,
+    };
+  });
+  await page.goto('/');
+  await navTo(page, 'view-runs');
+  const first = page.locator('#quickstart-row .quickstart-btn').first();
+  await expect(first.locator('.status-pill')).toHaveText('Active', { timeout: 15000 });
+  await first.click();
+  await expect(page.locator(`[data-runbook-id="${active.id}"]`)).toBeVisible();
+  await expect(page.locator('#card-prepared-run')).toBeHidden();
+});
+
+test('Quick Start renders multiple in-progress tasks as explicit resume cards', async ({ page, request, baseURL }) => {
+  await serveMutated(page, request, baseURL, '/api/quickstart', (options) => {
+    const template = options[0];
+    options[0] = {
+      ...template,
+      title: 'Continue Video Editor — choose work to resume',
+      ready: false,
+      resume_candidates: ['GATE-A', 'GATE-B'],
+      unavailable_reason: 'Multiple in-progress tasks require explicit selection.',
+    };
+    options.splice(2, 0,
+      { ...template, key: 'continue-video-editor:GATE-A', task_id: 'GATE-A', task_title: 'First gate', title: 'Resume Video Editor — GATE-A', source_ref: 'GATE-A (First gate)', ledger_status: 'in-progress', ready: true, unavailable_reason: null },
+      { ...template, key: 'continue-video-editor:GATE-B', task_id: 'GATE-B', task_title: 'Second gate', title: 'Resume Video Editor — GATE-B', source_ref: 'GATE-B (Second gate)', ledger_status: 'in-progress', ready: true, unavailable_reason: null },
+    );
+  });
+  await page.goto('/');
+  await navTo(page, 'view-runs');
+  const row = page.locator('#quickstart-row');
+  await expect(row.locator('.quickstart-btn')).toHaveCount(8, { timeout: 15000 });
+  const gateB = row.locator('.quickstart-btn', { hasText: 'Resume Video Editor — GATE-B' });
+  await expect(gateB.locator('.status-pill')).toHaveText('Ready');
+  await gateB.click();
+  await expect(page.locator('#card-prepared-run')).toContainText('GATE-B');
+  await expect(page.locator('#prepared-run-start')).toBeEnabled();
+});
+
 test('Active Work does not present a finished task as the current one', async ({ page, request, baseURL }) => {
   await serveMutated(page, request, baseURL, '/api/workflow', (wf) => {
     wf.task = { ...wf.task, state: 'SUCCEEDED' };

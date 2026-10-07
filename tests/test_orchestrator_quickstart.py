@@ -168,6 +168,56 @@ def test_continue_video_editor_option_reflects_worktree_existence(tmp_path, has_
         assert option.branch == "video-editor/v1-01-local-import"
 
 
+def test_single_in_progress_task_is_resumed_before_pending_work(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _init_git_repo(repo_root)
+    ledger = _SAMPLE_LEDGER.replace("| V1-01 | pending |", "| V1-01 | in-progress |")
+    (repo_root / VIDEO_EDITOR_LEDGER_RELATIVE).parent.mkdir(parents=True, exist_ok=True)
+    (repo_root / VIDEO_EDITOR_LEDGER_RELATIVE).write_text(ledger, encoding="utf-8")
+
+    option = continue_video_editor_option(repo_root)
+
+    assert option.task_id == "V1-01"
+    assert option.ledger_status == "in-progress"
+    assert option.title == "Resume Video Editor — V1-01"
+    assert option.unavailable_reason is None
+    assert option.dependency_state == "Resume — canonical ledger status is in-progress"
+    assert "Complete only its remaining scope" in option.objective
+
+
+def test_multiple_in_progress_tasks_require_explicit_server_resolved_selection(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _init_git_repo(repo_root)
+    ledger = _SAMPLE_LEDGER.replace("| V1-01 | pending |", "| V1-01 | in-progress |").replace(
+        "| V1-02 | pending |", "| V1-02 | in-progress |"
+    )
+    (repo_root / VIDEO_EDITOR_LEDGER_RELATIVE).parent.mkdir(parents=True, exist_ok=True)
+    (repo_root / VIDEO_EDITOR_LEDGER_RELATIVE).write_text(ledger, encoding="utf-8")
+
+    chooser = resolve_quickstart_option(repo_root, "continue-video-editor")
+    assert chooser.resume_candidates == ("V1-01", "V1-02")
+    assert chooser.unavailable_reason and "Select one" in chooser.unavailable_reason
+
+    listed = list_quickstart_options(repo_root)
+    resume_cards = [item for item in listed if item["key"].startswith("continue-video-editor:")]
+    assert [item["task_id"] for item in resume_cards] == ["V1-01", "V1-02"]
+    assert all(item["ready"] and item["ledger_status"] == "in-progress" for item in resume_cards)
+
+
+def test_stale_explicit_resume_selection_fails_closed(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _init_git_repo(repo_root)
+    (repo_root / VIDEO_EDITOR_LEDGER_RELATIVE).parent.mkdir(parents=True, exist_ok=True)
+    (repo_root / VIDEO_EDITOR_LEDGER_RELATIVE).write_text(_SAMPLE_LEDGER, encoding="utf-8")
+
+    option = resolve_quickstart_option(repo_root, "continue-video-editor:V1-01")
+
+    assert option.unavailable_reason and "not currently an 'in-progress' task" in option.unavailable_reason
+
+
 def test_continue_video_editor_option_is_honest_when_nothing_is_pending(tmp_path):
     repo_root = tmp_path
     (repo_root / VIDEO_EDITOR_LEDGER_RELATIVE).parent.mkdir(parents=True, exist_ok=True)
@@ -249,14 +299,10 @@ def test_list_quickstart_options_against_the_real_repository_ledger():
     if repo_root is None:
         pytest.skip("set OCTAREL_OCTASCENE_ROOT to a real Octages checkout")
     options = list_quickstart_options(repo_root)
-    assert [option["key"] for option in options] == [
-        "continue-video-editor",
-        "continue-octascene",
-        "finish-current-pr",
-        "focused-test-fix",
-        "review-current-diff",
-        "custom-run",
-    ]
+    keys = [option["key"] for option in options]
+    assert keys[:2] == ["continue-video-editor", "continue-octascene"]
+    assert keys[-4:] == ["finish-current-pr", "focused-test-fix", "review-current-diff", "custom-run"]
+    assert all(key.startswith("continue-video-editor:") for key in keys[2:-4])
     option = options[0]
     assert option["key"] == "continue-video-editor"
     if option["ready"]:

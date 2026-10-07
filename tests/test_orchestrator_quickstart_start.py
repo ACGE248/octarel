@@ -101,6 +101,39 @@ def test_start_quickstart_option_provisions_a_worktree_when_none_exists(tmp_path
     assert runbook.worker_routes == advertised["worker_routes"]
 
 
+def test_explicit_in_progress_resume_key_is_revalidated_and_started(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _git_repo(repo_root)
+    ledger = repo_root / VIDEO_EDITOR_LEDGER_RELATIVE
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        """\
+| ID | Status | Notes/evidence |
+|---|---|---|
+| GATE-A | in-progress | First open gate. |
+| GATE-B | in-progress | Second open gate. |
+""",
+        encoding="utf-8",
+    )
+    _fake_running_supervisor(monkeypatch)
+    registry = load_registry()
+    state = State(":memory:")
+    supervisor = Supervisor(registry=registry, repo_root=repo_root, state=state)
+
+    runbook = start_quickstart_option(
+        state=state,
+        registry=registry,
+        supervisor=supervisor,
+        repo_root=repo_root,
+        key="continue-video-editor:GATE-B",
+    )
+
+    assert runbook.status == RUNBOOK_RUNNING
+    assert runbook.source_ref.startswith("GATE-B")
+    assert Path(runbook.worktree).name == "repo-gate-b"
+
+
 def test_start_quickstart_option_reuses_an_already_existing_worktree(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()

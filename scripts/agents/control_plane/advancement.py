@@ -176,6 +176,24 @@ def accepted_run_for_task(state: State, project_id: str | None, task_id: str) ->
     return None
 
 
+def active_run_for_task(state: State, project_id: str | None, task_id: str) -> Runbook | None:
+    """The newest non-terminal launched run that currently owns ``task_id``.
+
+    DRAFT rows have not acquired execution ownership. Terminal rows no longer
+    own the task and therefore do not prevent an explicit repository-backed
+    resume; intake/worktree admission still provides the final atomic guard.
+    """
+
+    for other in state.list_runbooks(project_id=project_id):
+        if (
+            other.status != RUNBOOK_DRAFT
+            and other.status not in RUNBOOK_TERMINAL_STATES
+            and _mentions(other, task_id)
+        ):
+            return other
+    return None
+
+
 _SETTLED_FOR_SUPERSESSION = frozenset({"FAILED", "BLOCKED", "CANCELLED", "OWNER_ACTION_REQUIRED", "DEADLINE_REACHED"})
 
 

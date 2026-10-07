@@ -881,9 +881,16 @@ table; a `REMOTE ACCESS` badge shows the verified identity in the UI.
 `control_plane/quickstart.py` adds a "Continue Video Editor" Quick Start
 resolver: `GET /api/quickstart` re-parses
 [`docs/video-editor/IMPLEMENTATION_STATUS_V2.md`](../../docs/video-editor/IMPLEMENTATION_STATUS_V2.md)'s
-ledger tables on every call for the first `pending` task in document order
-— never a hard-coded task ID — and checks whether a matching git worktree
-already exists. `control_plane/provisioning.py`'s `provision_worktree()` is
+ledger tables on every call. A sole `in-progress` task is resumed before new
+`pending` work; multiple `in-progress` rows become separate, explicitly
+selectable server-resolved resume cards rather than being silently reordered.
+With no unfinished task it selects the first `pending` row in document order —
+never a hard-coded task ID — and checks whether a matching git worktree already
+exists. A task owned by a non-terminal run is shown as **Active** with a **View
+Active Run** action and cannot be launched twice. A terminal accepted run blocks
+replay of a still-`pending` row, while an `in-progress` repository row may resume
+remaining product-gate scope after an earlier accepted slice.
+`control_plane/provisioning.py`'s `provision_worktree()` is
 the one write-shaped git action the Control Center can trigger on the
 operator's behalf (only a path/branch the process itself derived, only a
 sibling directory of the repository root); the new `quickstart_start`
@@ -924,8 +931,9 @@ The completed issue #97 surface exposes six Quick Start cards. Continue Video
 Editor and Continue OctaScene resolve the next eligible maintained editor task
 from the canonical ledger; Finish Current PR, Focused Test & Fix, and Review
 Current Diff resolve the checkout's real branch/worktree; Custom Run opens the
-collapsed Advanced Settings form. Every executable key is re-resolved by the
-server before start. Prepared Run includes the program/task/dependency and
+collapsed Advanced Settings form. Every executable key, including an explicit
+`continue-video-editor:<task-id>` resume choice, is re-resolved by the server
+before start. Prepared Run includes the program/task/dependency and
 implementer/tester/reviewer/check/PR expectations needed to start without
 knowing orchestrator internals. Overview changes to View Active Run while a
 Runbook is active.
