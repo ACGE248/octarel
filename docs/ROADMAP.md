@@ -163,7 +163,7 @@ from one truthful runbook-plus-execution projection and distinguish the active a
 project. Add coverage for synchronous and delegated review, an active local gate with no `RUNNING` worker row,
 stage transitions, daemon restart during acceptance, and truly idle completed/blocked runbooks.
 
-### OCTAREL-BUG-08 — Quick Start must not offer an already-running task as ready
+### OCTAREL-BUG-08 — Quick Start must not offer an already-running task as ready — resolved
 
 Immediately after launching `GATE-DIR`, the Runs surface truthfully showed the active-task pill and run card as
 `RUNNING` / `Implementing`, but both Quick Start choices for that same stable task still displayed `READY` and
@@ -176,7 +176,12 @@ must also retain a server-side atomic conflict refusal for stale clients. Cover 
 after launch, multiple browser tabs, daemon restart, acceptance-pending ownership, terminal completion, and
 repository advancement to the next task.
 
-### OCTAREL-BUG-09 — Continue Quick Start must surface resumable in-progress tasks
+Resolution: Quick Start now overlays non-terminal runbook ownership on every repository-selected task. The
+card becomes `Active`, carries the durable runbook ID, and routes to **View Active Run**; the start endpoint
+also refuses a stale direct launch. Terminal rows do not retain live ownership, and existing intake/worktree
+admission remains the final atomic conflict guard.
+
+### OCTAREL-BUG-09 — Continue Quick Start must surface resumable in-progress tasks — resolved
 
 After OctaScene's merged task history was reconciled, its canonical ledger truthfully contained three
 `in-progress` product-validation gates and no `pending` row. Both **Continue Video Editor** and **Continue
@@ -190,6 +195,12 @@ must be listed for explicit operator selection rather than silently reordered. A
 run remains `ACTIVE` under OCTAREL-BUG-08, and terminal completed work must never be replayed. Cover a merged
 harness with an open product gate, an abandoned worktree, a live owner, multiple in-progress candidates,
 dependency ordering, stale ledgers, and the transition from resumed work to complete or blocked.
+
+Resolution: a sole `in-progress` ledger row now resumes before new `pending` work. When several rows are in
+progress, the base Continue card fails closed with a selection-required explanation and the API emits one
+server-revalidated resume card per candidate. The selected task ID is re-read from the canonical ledger on
+start, so a stale browser cannot resume a row whose repository status changed. An earlier accepted slice does
+not override the repository's explicit `in-progress` status.
 
 ---
 

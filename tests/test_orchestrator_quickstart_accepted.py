@@ -18,6 +18,7 @@ import pytest
 
 from scripts.agents.control_plane.models import (
     RUNBOOK_FAILED,
+    RUNBOOK_RUNNING,
     RUNBOOK_SUCCEEDED,
     ProviderState,
     Runbook,
@@ -89,6 +90,31 @@ def test_accepted_run_blocks_the_option_and_names_the_run(repo, state):
     assert "will not start it again" in opt.unavailable_reason
     assert opt.dependency_state.startswith("Blocked")
     assert "already has accepted run" in opt.why_next
+
+
+def test_active_run_becomes_view_active_instead_of_duplicate_start(repo, state):
+    active = run(state, "V1-08", status=RUNBOOK_RUNNING, stage="review", rid="RB-active")
+
+    opt = option(repo, state)
+
+    assert opt.action == "view-active"
+    assert opt.active_run_id == active.id
+    assert opt.unavailable_reason and "already owned by active runbook" in opt.unavailable_reason
+    assert opt.dependency_state == f"Active — run {active.id} is RUNNING"
+
+
+def test_accepted_slice_does_not_block_repository_owned_in_progress_resume(repo, state):
+    (repo / VIDEO_EDITOR_LEDGER_RELATIVE).write_text(
+        LEDGER.replace("| V1-08 | pending |", "| V1-08 | in-progress |"), encoding="utf-8"
+    )
+    run(state, "V1-08", rid="RB-accepted-slice")
+
+    opt = option(repo, state)
+
+    assert opt.task_id == "V1-08"
+    assert opt.ledger_status == "in-progress"
+    assert opt.action == "prepare"
+    assert opt.unavailable_reason is None
 
 
 def test_listing_marks_the_option_not_ready(repo, state):

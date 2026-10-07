@@ -37,11 +37,12 @@ VIDEO_EDITOR_LEDGER_RELATIVE = Path("docs/video-editor/IMPLEMENTATION_STATUS_V2.
 VIDEO_EDITOR_PRACTICAL_PLAN_RELATIVE = "docs/OCTASCENE_STANDALONE_VIDEO_EDITOR_PRACTICAL_PLAN.md"
 VIDEO_EDITOR_COMMANDS_RELATIVE = "docs/OCTASCENE_VIDEO_EDITOR_IMPLEMENTATION_COMMANDS_V2.md"
 
-# From the ledger's own "## Status values" line. Only "pending" is ever
-# eligible to become the proposed next task — every other status either
-# already resolved the task or requires a human decision this module must
-# never make silently (e.g. "blocked", "in-progress").
+# From the ledger's own "## Status values" line. A new task starts from
+# ``pending``. An unfinished task may be resumed from ``in-progress`` only
+# when it is the sole candidate or the operator explicitly selected its
+# server-validated task ID; blocked/terminal states are never inferred.
 ELIGIBLE_STATUS = "pending"
+RESUMABLE_STATUS = "in-progress"
 
 _TABLE_ROW_RE = re.compile(r"^\|\s*([A-Za-z0-9_.-]+)\s*\|\s*([a-z-]+)\s*\|\s*(.*?)\s*\|$")
 
@@ -94,6 +95,22 @@ def next_eligible_video_editor_task(repo_root: Path) -> LedgerTask | None:
         if task.status == ELIGIBLE_STATUS:
             return task
     return None
+
+
+def resumable_video_editor_tasks(repo_root: Path) -> list[LedgerTask]:
+    """Every ``in-progress`` ledger row, in document order.
+
+    Multiple rows are deliberately returned rather than silently choosing
+    the first. The dashboard exposes each as an explicit server-resolved
+    resume choice.
+    """
+
+    ledger_path = repo_root / VIDEO_EDITOR_LEDGER_RELATIVE
+    try:
+        text = ledger_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [task for task in parse_video_editor_ledger(text) if task.status == RESUMABLE_STATUS]
 
 
 def _slugify(notes: str, *, max_len: int = 40) -> str:
@@ -157,6 +174,9 @@ class QuickStartOption:
     codex_policy: str = "conserve"
     codex_auto_eligible: bool = False
     max_codex_invocations: int = 1
+    ledger_status: str | None = None
+    resume_candidates: tuple[str, ...] = ()
+    active_run_id: str | None = None
     # None means ready to start; otherwise the exact reason (and, where
     # applicable, the exact operator command) this option cannot be started
     # yet — the Control Center must show this truthfully rather than
@@ -226,6 +246,9 @@ class QuickStartOption:
             "codex_policy": self.codex_policy,
             "codex_auto_eligible": self.codex_auto_eligible,
             "max_codex_invocations": self.max_codex_invocations,
+            "ledger_status": self.ledger_status,
+            "resume_candidates": list(self.resume_candidates),
+            "active_run_id": self.active_run_id,
             "unavailable_reason": self.unavailable_reason,
             "ready": self.unavailable_reason is None,
             "resolution_evidence": self.resolution_evidence,
@@ -274,14 +297,70 @@ def _ledger_resolution_evidence(repo_root: Path, task: "LedgerTask | None") -> d
     }
 
 
-def continue_video_editor_option(repo_root: Path) -> QuickStartOption:
+def continue_video_editor_option(repo_root: Path, *, selected_task_id: str | None = None) -> QuickStartOption:
     """Build the "Continue Video Editor" Quick Start option from current ledger truth.
 
     Never hard-codes a task ID: the returned ``source_ref``/``branch`` are
     whatever the ledger and the repository's actual worktrees say right now.
     """
 
-    task = next_eligible_video_editor_task(repo_root)
+    resumable = resumable_video_editor_tasks(repo_root)
+    if selected_task_id is not None:
+        task = next((item for item in resumable if item.task_id == selected_task_id), None)
+        if task is None:
+            return QuickStartOption(
+                key="continue-video-editor",
+                title="Continue Video Editor",
+                objective="",
+                source_ref="",
+                preset="overnight-development",
+                parent_worker="claude-code",
+                duration_minutes=480,
+                permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
+                stop_conditions=DEFAULT_STOP_CONDITIONS,
+                program="Standalone Video Editor",
+                why_next="The requested resume candidate is no longer in progress in the canonical ledger.",
+                dependency_state="Blocked — stale resume selection",
+                branch_worktree_mode="automatic after a current candidate is selected",
+                expected_checks=("Defined by the selected maintained implementation command",),
+                checkpoint_pr_behavior="No branch or PR is created from a stale resume selection.",
+                unavailable_reason=(
+                    f"{selected_task_id!r} is not currently an {RESUMABLE_STATUS!r} task in "
+                    f"{VIDEO_EDITOR_LEDGER_RELATIVE}; refresh Quick Start and select current repository truth."
+                ),
+                resolution_evidence=_ledger_resolution_evidence(repo_root, None),
+            )
+    elif len(resumable) > 1:
+        task_ids = tuple(task.task_id for task in resumable)
+        return QuickStartOption(
+            key="continue-video-editor",
+            title="Continue Video Editor — choose work to resume",
+            objective="",
+            source_ref=", ".join(task_ids),
+            preset="overnight-development",
+            parent_worker="claude-code",
+            duration_minutes=480,
+            permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
+            stop_conditions=DEFAULT_STOP_CONDITIONS,
+            program="Standalone Video Editor",
+            why_next="The canonical ledger contains multiple unfinished tasks; Octarel will not reorder them silently.",
+            dependency_state="Selection required — multiple in-progress tasks",
+            proposed_tester="opencode2-gemini-flash-lite",
+            proposed_reviewer="codex-review",
+            branch_worktree_mode="automatic after explicit task selection",
+            expected_checks=("Defined by the explicitly selected maintained implementation command",),
+            checkpoint_pr_behavior="Select one resume card; no branch or PR is created until then.",
+            unavailable_reason=(
+                f"{VIDEO_EDITOR_LEDGER_RELATIVE} has multiple tasks with status {RESUMABLE_STATUS!r}: "
+                f"{', '.join(task_ids)}. Select one of the server-resolved resume cards."
+            ),
+            resume_candidates=task_ids,
+            resolution_evidence=_ledger_resolution_evidence(repo_root, None),
+        )
+    elif resumable:
+        task = resumable[0]
+    else:
+        task = next_eligible_video_editor_task(repo_root)
     if task is None:
         return QuickStartOption(
             key="continue-video-editor",
@@ -294,7 +373,7 @@ def continue_video_editor_option(repo_root: Path) -> QuickStartOption:
             permission_profile=PERMISSION_REPO_CONFIGURED_AUTO,
             stop_conditions=DEFAULT_STOP_CONDITIONS,
             program="Standalone Video Editor",
-            why_next="The canonical ledger currently has no pending row eligible to start.",
+            why_next="The canonical ledger currently has no pending or in-progress row eligible to continue.",
             dependency_state="Blocked — maintainer decision required",
             proposed_tester="opencode2-gemini-flash-lite",
             proposed_reviewer="codex-review",
@@ -302,8 +381,8 @@ def continue_video_editor_option(repo_root: Path) -> QuickStartOption:
             expected_checks=("Defined by the next eligible maintained implementation command",),
             checkpoint_pr_behavior="No branch or PR is created until the ledger exposes an eligible task.",
             unavailable_reason=(
-                f"{VIDEO_EDITOR_LEDGER_RELATIVE} reports no task with status "
-                f"{ELIGIBLE_STATUS!r} right now; the ledger needs a maintainer decision."
+                f"{VIDEO_EDITOR_LEDGER_RELATIVE} reports no task with status {ELIGIBLE_STATUS!r} or "
+                f"{RESUMABLE_STATUS!r} right now; the ledger needs a maintainer decision."
             ),
             resolution_evidence=_ledger_resolution_evidence(repo_root, None),
         )
@@ -321,18 +400,19 @@ def continue_video_editor_option(repo_root: Path) -> QuickStartOption:
     # option must stay startable — never disable "Start Development" for the
     # exact case the auto-provisioning feature exists to handle.
 
+    verb = "Resume" if task.status == RESUMABLE_STATUS else "Continue"
     objective = (
-        f"Continue the Standalone Video Editor from current repository truth. Read "
+        f"{verb} the Standalone Video Editor from current repository truth. Read "
         f"{VIDEO_EDITOR_PRACTICAL_PLAN_RELATIVE} and {VIDEO_EDITOR_COMMANDS_RELATIVE} for the implementation "
         f"contract, then inspect {VIDEO_EDITOR_LEDGER_RELATIVE}, git status, and recent commits in this "
-        f"worktree before assuming anything is stale. The ledger reports {task.task_id} ({task.notes}) as the "
-        f"next eligible task. Implement it completely, verify locally, checkpoint continuously, and update the "
+        f"worktree before assuming anything is stale. The ledger reports {task.task_id} ({task.notes}) as "
+        f"{task.status}. Complete only its remaining scope, verify locally, checkpoint continuously, and update the "
         f"ledger's status/evidence for {task.task_id} once real, tested work exists."
     )
 
     return QuickStartOption(
         key="continue-video-editor",
-        title=f"Continue Video Editor — {task.task_id}",
+        title=f"{verb} Video Editor — {task.task_id}",
         objective=objective,
         source_ref=f"{task.task_id} ({task.notes})",
         preset="overnight-development",
@@ -345,10 +425,16 @@ def continue_video_editor_option(repo_root: Path) -> QuickStartOption:
         task_title=task.notes.rstrip("."),
         issue_reference=task.task_id,
         why_next=(
-            f"{task.task_id} is the first pending row in the canonical Video Editor ledger; "
+            f"{task.task_id} is explicitly selected from the canonical ledger's in-progress work."
+            if task.status == RESUMABLE_STATUS
+            else f"{task.task_id} is the first pending row in the canonical Video Editor ledger; "
             "all earlier dependencies are recorded complete or superseded."
         ),
-        dependency_state="Ready — earlier ledger tasks are complete or superseded",
+        dependency_state=(
+            "Resume — canonical ledger status is in-progress"
+            if task.status == RESUMABLE_STATUS
+            else "Ready — earlier ledger tasks are complete or superseded"
+        ),
         proposed_tester="opencode2-gemini-flash-lite",
         proposed_reviewer="codex-review",
         branch_worktree_mode="automatic",
@@ -372,6 +458,7 @@ def continue_video_editor_option(repo_root: Path) -> QuickStartOption:
         codex_policy="balanced",
         codex_auto_eligible=True,
         max_codex_invocations=1,
+        ledger_status=task.status,
         unavailable_reason=None,
         resolution_evidence=_ledger_resolution_evidence(repo_root, task),
     )
@@ -668,10 +755,27 @@ def _apply_run_truth(
 
     changes: dict[str, Any] = {}
     if option.action == "prepare" and option.task_id and option.unavailable_reason is None:
-        from .advancement import accepted_run_for_task
+        from .advancement import accepted_run_for_task, active_run_for_task
 
-        accepted = accepted_run_for_task(state, getattr(project, "project_id", None), option.task_id)
-        if accepted is not None:
+        project_id = getattr(project, "project_id", None)
+        active = active_run_for_task(state, project_id, option.task_id)
+        if active is not None:
+            changes.update(
+                action="view-active",
+                active_run_id=active.id,
+                branch=active.branch,
+                worktree=active.worktree,
+                continues_existing_worktree=True,
+                unavailable_reason=(
+                    f"{option.task_id} is already owned by active runbook {active.id} ({active.status}); "
+                    "view that run instead of starting a duplicate."
+                ),
+                dependency_state=f"Active — run {active.id} is {active.status}",
+                why_next=f"{option.task_id} is the repository-selected task and active run {active.id} owns it.",
+                checkpoint_pr_behavior="Continue through the existing active run; no duplicate run is created.",
+            )
+        accepted = accepted_run_for_task(state, project_id, option.task_id)
+        if active is None and option.ledger_status != RESUMABLE_STATUS and accepted is not None:
             changes.update(
                 unavailable_reason=(
                     f"{option.task_id} was already implemented and accepted by run {accepted.id} (every acceptance "
@@ -755,10 +859,26 @@ def _resolve_quickstart_option_base(repo_root: Path, key: str, project: Any | No
         if project is None:
             raise QuickStartError("continue-next-task requires a selected project")
         return continue_next_task_option(project, repo_root)
-    if key in {"continue-video-editor", "continue-octascene"}:
-        option = continue_video_editor_option(repo_root)
-        if key == "continue-octascene":
-            return QuickStartOption(**{**option.__dict__, "key": key, "title": "Continue OctaScene next eligible task"})
+    video_editor_prefix = "continue-video-editor:"
+    octascene_prefix = "continue-octascene:"
+    if key in {"continue-video-editor", "continue-octascene"} or key.startswith(
+        (video_editor_prefix, octascene_prefix)
+    ):
+        selected_task_id = None
+        if key.startswith(video_editor_prefix):
+            selected_task_id = key.removeprefix(video_editor_prefix)
+        elif key.startswith(octascene_prefix):
+            selected_task_id = key.removeprefix(octascene_prefix)
+        option = continue_video_editor_option(repo_root, selected_task_id=selected_task_id)
+        if key == "continue-octascene" or key.startswith(octascene_prefix):
+            title = (
+                f"Resume OctaScene — {option.task_id}"
+                if selected_task_id and option.task_id
+                else "Continue OctaScene next eligible task"
+            )
+            return QuickStartOption(**{**option.__dict__, "key": key, "title": title})
+        if selected_task_id:
+            return QuickStartOption(**{**option.__dict__, "key": key})
         return option
     program = "Current OctaScene branch"
     if project is not None and not _uses_video_editor_quickstart(project):
@@ -866,7 +986,23 @@ def list_quickstart_options(
             "review-current-diff",
             "custom-run",
         )
-    return [resolve_quickstart_option(repo_root, key, project=project, state=state, registry=registry).as_dict() for key in keys]
+    options = [resolve_quickstart_option(repo_root, key, project=project, state=state, registry=registry) for key in keys]
+    if _uses_video_editor_quickstart(project):
+        chooser = next((option for option in options if option.key == "continue-video-editor"), None)
+        if chooser and len(chooser.resume_candidates) > 1:
+            insert_at = 2
+            resumes = [
+                resolve_quickstart_option(
+                    repo_root,
+                    f"continue-video-editor:{task_id}",
+                    project=project,
+                    state=state,
+                    registry=registry,
+                )
+                for task_id in chooser.resume_candidates
+            ]
+            options[insert_at:insert_at] = resumes
+    return [option.as_dict() for option in options]
 
 
 class QuickStartError(ValueError):
@@ -906,6 +1042,8 @@ def start_quickstart_option(
     """
 
     option = resolve_quickstart_option(repo_root, key, project=project, state=state, registry=registry)
+    if option.action == "view-active":
+        raise QuickStartError(option.unavailable_reason or f"quickstart option {key!r} already has an active runbook")
     if option.action != "prepare":
         raise QuickStartError(f"quickstart option {key!r} must be configured in Advanced Settings")
     if option.unavailable_reason is not None:

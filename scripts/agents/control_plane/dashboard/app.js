@@ -4654,6 +4654,7 @@
     row.innerHTML = "";
     options.forEach((option) => {
       const btn = el("button", { type: "button", class: "quickstart-btn" });
+      const active = option.action === "view-active" && option.active_run_id;
       btn.appendChild(el("strong", { text: option.title }));
       btn.appendChild(
         el("span", {
@@ -4663,8 +4664,8 @@
       );
       btn.appendChild(
         el("span", {
-          class: `status-pill ${option.ready ? "st-available" : "st-blocked"}`,
-          text: option.ready ? "Ready" : "Needs setup",
+          class: `status-pill ${active ? "st-running" : option.ready ? "st-available" : "st-blocked"}`,
+          text: active ? "Active" : option.ready ? "Ready" : "Needs setup",
         })
       );
       // Say why it cannot start (e.g. the task is already accepted) right on the card.
@@ -4672,7 +4673,9 @@
         btn.appendChild(el("span", { class: "quickstart-reason", text: option.unavailable_reason }));
       }
       btn.addEventListener("click", () => {
-        if (option.action === "advanced") {
+        if (active) {
+          focusRunbook(option.active_run_id);
+        } else if (option.action === "advanced") {
           openAdvancedSettings();
         } else {
           showPreparedRun(option);
