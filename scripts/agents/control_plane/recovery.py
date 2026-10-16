@@ -129,7 +129,7 @@ def classify_process_owner(
 
     if not pid or not pid_is_alive(pid):
         return OwnershipProof(OWNERSHIP_RECLAIMABLE, EVIDENCE_PID_ABSENT, "recorded pid is not alive")
-    observed = process_create_time(pid, allow_subprocess=allow_subprocess)
+    observed = process_create_time(pid) if allow_subprocess else process_create_time(pid, allow_subprocess=False)
     if observed is None:
         return OwnershipProof(
             OWNERSHIP_AMBIGUOUS,
