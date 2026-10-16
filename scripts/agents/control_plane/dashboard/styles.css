@@ -1685,7 +1685,7 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
 .quickstart-row { display: grid; gap: 10px; grid-template-columns: 1fr; }
 .quickstart-btn {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) max-content;
   align-items: start;
   gap: 10px;
   min-height: 56px;
@@ -1699,7 +1699,8 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
   cursor: pointer;
 }
 .quickstart-btn:hover, .quickstart-btn:focus-visible { border-color: var(--border-strong); }
-.quickstart-btn strong { font-size: 14px; overflow-wrap: anywhere; }
+.quickstart-btn strong { grid-column: 1; grid-row: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.quickstart-btn > .status-pill { grid-column: 2; grid-row: 1; justify-self: end; white-space: nowrap; }
 .quickstart-summary { grid-column: 1 / -1; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
 .identity-badges { display: inline-flex; align-items: center; flex: none; }
 .identity-badges .provider-badge + .provider-badge { margin-left: -5px; box-shadow: 0 0 0 2px var(--bg-elevated); }
@@ -2659,7 +2660,7 @@ body { padding-bottom: calc(var(--bottom-nav-h) + var(--sticky-h) + 16px); }
 .log-flag-warn[data-flag]::after { background: color-mix(in srgb, var(--console-bg) 90%, #fbbf24); }
 .agent-activity-log.wrap .log-line[data-flag]::after { display: none; }
 
-.quickstart-btn .quickstart-reason { display: block; margin-top: 6px; font-size: 12px; font-weight: 400; color: var(--muted); text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.quickstart-btn .quickstart-reason { grid-column: 1 / -1; display: block; margin-top: 6px; font-size: 12px; font-weight: 400; color: var(--muted); text-align: left; white-space: normal; overflow-wrap: anywhere; }
 
 /* ======================================================================
    OCTAREL-UI-04 — Glass Orchestration Studio surface layer (issue #23)
