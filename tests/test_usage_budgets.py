@@ -76,7 +76,7 @@ class FakeSupervisor:
         return task
 
 
-def _worker(name="worker", *, cost_class="metered-configured"):
+def _worker(name="worker", *, cost_class="metered-configured", allow_api_billing=False):
     return SimpleNamespace(
         name=name,
         provider="Provider",
@@ -84,6 +84,7 @@ def _worker(name="worker", *, cost_class="metered-configured"):
         default_model="model",
         execution_system="Provider CLI",
         cost_class=cost_class,
+        allow_api_billing=allow_api_billing,
     )
 
 
@@ -104,7 +105,7 @@ def _context(*, task_id="task-1", fallback=False):
 
 def _attempt(
     run_id="run-1", *, quality="exact", tokens=(10, 2), cost_class="metered-configured",
-    reported_cost=None, automatic=False,
+    reported_cost=None, automatic=False, api_billing_authorized=False,
 ):
     item = {
         "run_id": run_id,
@@ -119,6 +120,7 @@ def _attempt(
         "input_tokens": tokens[0],
         "output_tokens": tokens[1],
         "automatic": automatic,
+        "api_billing_authorized": api_billing_authorized,
     }
     if reported_cost is not None:
         item["reported_cost_usd"] = reported_cost
@@ -340,8 +342,8 @@ def test_api_equivalent_estimate_never_consumes_metered_cash_budget():
 
 def test_reaching_any_hard_limit_blocks_including_zero_measured_cash():
     state = State(":memory:")
-    registry = _registry(_worker())
-    _record(state, _attempt(reported_cost=0.0))
+    registry = _registry(_worker(cost_class="optional-overflow", allow_api_billing=True))
+    _record(state, _attempt(cost_class="optional-overflow", reported_cost=0.0, api_billing_authorized=True))
     _budget(state, "cash-zero", constraint=CONSTRAINT_METERED_CASH, limit=0)
     cash = evaluate(state, registry=registry, context=_context(), pricing_book=FixedBook())
     assert cash.status == STATUS_BLOCKED
@@ -356,7 +358,7 @@ def test_reaching_any_hard_limit_blocks_including_zero_measured_cash():
 
 def test_each_consumption_budget_allows_n_units_and_blocks_the_next():
     cases = (
-        (CONSTRAINT_METERED_CASH, _attempt(tokens=(0, 0), reported_cost=1.0), 0.0, 1.0),
+        (CONSTRAINT_METERED_CASH, _attempt(tokens=(0, 0), cost_class="optional-overflow", reported_cost=1.0, api_billing_authorized=True), 0.0, 1.0),
         (CONSTRAINT_TOKENS, _attempt(tokens=(1, 0)), 0.0, 1.0),
         (CONSTRAINT_WALL_CLOCK, _attempt(tokens=(0, 0)), 0.0, 1.0),
         (CONSTRAINT_ATTEMPTS, _attempt(tokens=(0, 0)), 1.0, 2.0),
@@ -364,7 +366,10 @@ def test_each_consumption_budget_allows_n_units_and_blocks_the_next():
     )
     for constraint, incurred, nth_value, next_value in cases:
         state = State(":memory:")
-        registry = _registry(_worker())
+        registry = _registry(_worker(
+            cost_class="optional-overflow" if constraint == CONSTRAINT_METERED_CASH else "metered-configured",
+            allow_api_billing=constraint == CONSTRAINT_METERED_CASH,
+        ))
         _budget(state, constraint, constraint=constraint, limit=1)
 
         nth = evaluate(

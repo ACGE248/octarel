@@ -275,6 +275,11 @@ def advance_acceptance_pipeline(
             _advance_pr_readiness(
                 runbook=runbook, worktree=worktree, evidence=evidence, github_remote=github_remote,
             )
+        elif stage == STAGE_DONE:
+            # A crash after the last stage persisted can leave the runbook
+            # awaiting its final terminalization tick. Recheck the recorded
+            # evidence below; do not rerun an already proven stage.
+            pass
         else:  # pragma: no cover - defensive; stage is always one of the above
             evidence[stage] = _evidence(EVIDENCE_FAIL, f"unknown acceptance stage {stage!r}")
             runbook.status = RUNBOOK_BLOCKED

@@ -472,6 +472,23 @@ test('Quick Start renders multiple in-progress tasks as explicit resume cards', 
   await expect(page.locator('#prepared-run-start')).toBeEnabled();
 });
 
+test('blocked Quick Start response settles the prepared button and explains recovery', async ({ page, request, baseURL }) => {
+  await serveMutated(page, request, baseURL, '/api/quickstart', (options) => {
+    options[0] = { ...options[0], ready: true, action: 'start', unavailable_reason: null };
+  });
+  await page.route('**/api/commands/quickstart_start', (route) => route.fulfill({
+    status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'Provider auth needs re-probe' }),
+  }));
+  await page.goto('/');
+  await navTo(page, 'view-runs');
+  await page.locator('#quickstart-row .quickstart-btn').first().click();
+  const start = page.locator('#prepared-run-start');
+  await expect(start).toBeEnabled();
+  await start.click();
+  await expect(page.locator('#prepared-run-feedback')).toContainText('Provider auth needs re-probe');
+  await expect(start).toBeEnabled();
+});
+
 test('Active Work does not present a finished task as the current one', async ({ page, request, baseURL }) => {
   await serveMutated(page, request, baseURL, '/api/workflow', (wf) => {
     wf.task = { ...wf.task, state: 'SUCCEEDED' };
@@ -484,4 +501,29 @@ test('Active Work does not present a finished task as the current one', async ({
   await expect(active).toContainText('Last activity:');
   await expect(active.locator('.active-work-facts')).toHaveCount(0);
   await expect(page.locator('#active-work-state')).toHaveText('Idle');
+});
+
+test('Active Work shows an observed acceptance gate after implementation finishes', async ({ page, request, baseURL }) => {
+  await serveMutated(page, request, baseURL, '/api/workflow', (wf) => {
+    wf.task = { ...wf.task, state: 'ACCEPTANCE_PENDING' };
+    wf.stages = wf.stages.map((stage) => ({ ...stage, state: 'SUCCEEDED' }));
+    wf.acceptance = { stage: 'test', execution: 'RUNNING', source: 'RUNBOOK_ADVANCEMENT_LEASE' };
+  });
+  await page.goto('/');
+  const active = page.locator('#overview-active-work');
+  await expect(active).toContainText('Acceptance: test — running');
+  await expect(page.locator('#active-work-state')).toContainText('acceptance running');
+  await expect(active).not.toContainText('Nothing is running');
+});
+
+test('Active Work warns when a persisted running worker has no verified process', async ({ page, request, baseURL }) => {
+  await serveMutated(page, request, baseURL, '/api/workflow', (wf) => {
+    wf.stages = wf.stages.map((stage) => stage.state === 'RUNNING'
+      ? { ...stage, worker_ownership: 'RECLAIMABLE' }
+      : stage);
+  });
+  await page.goto('/');
+  const active = page.locator('#overview-active-work');
+  await expect(active).toContainText('no verified live worker process');
+  await expect(active.locator('.active-work-agent')).toHaveCount(0);
 });

@@ -37,11 +37,11 @@ test('a run with real counts shows them as measured, with a derived total', asyn
 });
 
 test('fallback attempts remain separate with truthful worker and token attribution', async ({ page }) => {
-  // Seven governance records produce eight attempt rows because this runbook
+  // Eight governance records produce nine attempt rows because this runbook
   // preserves both the failed first worker and its successful replacement.
   const rows = page.locator('.usage-row');
   const fallbackRows = rows.filter({ hasText: 'fx-rb-fallback' });
-  await expect(rows).toHaveCount(8);
+  await expect(rows).toHaveCount(9);
   await expect(fallbackRows).toHaveCount(2);
 
   const earlier = fallbackWorkerRow(page, 'claude-code');
@@ -141,6 +141,7 @@ test('the route pill does not borrow run-state styling', async ({ page }) => {
    host's cached catalog and no provider is ever contacted. */
 
 const API_ROW = { hasText: 'fx-usage-api-billed' };
+const METERED_ROW = { hasText: 'fx-usage-metered-session' };
 const FREE_ROW = { hasText: 'fx-usage-free-route' };
 const UNCLASSIFIED_ROW = { hasText: 'fx-usage-unclassified' };
 
@@ -184,6 +185,13 @@ test('an API-billed run is labelled as API-billed, not as subscription-included'
   const chip = page.locator('.usage-row', API_ROW).locator('.billing-chip');
   await expect(chip).toHaveText('API-billed');
   await expect(chip).toHaveClass(/is-api/);
+});
+
+test('configured Grok CLI capacity is not presented as an API charge', async ({ page }) => {
+  const row = page.locator('.usage-row', METERED_ROW);
+  await expect(row.locator('.billing-chip')).toHaveText('Configured metered session');
+  await expect(row.locator('.usage-money-cell.is-estimate')).toContainText('~$');
+  await expect(row.locator('.usage-money-cell.is-actual')).toContainText('UNKNOWN');
 });
 
 test('a free route is called free, never included with a subscription', async ({ page }) => {
@@ -232,7 +240,7 @@ test('the aggregates keep value and spend in separate rows for every window', as
 
   for (const label of ['Today', 'This week', 'This month']) {
     const window = page.locator('.usage-window', { hasText: label });
-    await expect(window.locator('.usage-agg.is-estimate')).toHaveCount(3);
+    await expect(window.locator('.usage-agg.is-estimate')).toHaveCount(4);
     await expect(window.locator('.usage-agg.is-actual')).toHaveCount(1);
     // Every estimated total is marked approximate; spend never is.
     await expect(window.locator('.usage-agg.is-estimate dd').first()).toContainText('~');
@@ -381,7 +389,7 @@ test('the window breakdown counts unclassified runs instead of dropping them', a
      why. The fixture seeds one run whose billing cannot be established. */
   const count = page.locator('.usage-window', { hasText: 'Today' }).locator('.usage-window-count');
   await expect(count).toContainText('billing unknown');
-  await expect(count).toContainText('8 run(s)');
+  await expect(count).toContainText('9 run(s)');
 });
 
 test('runs counted in no window at all are stated, not silently dropped', async ({ page, request, baseURL }) => {

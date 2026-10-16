@@ -235,6 +235,11 @@ def build_ledger_rows(
             cost_class_from_record=bool(recorded_cost_class),
             reported_cost_usd=attempt.get("reported_cost_usd"),
             reported_cost_source=attempt.get("reported_cost_source"),
+            api_billing_authorized=(
+                attempt.get("api_billing_authorized") is True
+                and worker is not None
+                and bool(getattr(worker, "allow_api_billing", False))
+            ),
         )
         lookup = pricing_book.lookup(provider=facts.provider, model=facts.model)
         rows.append(

@@ -134,9 +134,27 @@ def test_start_dry_run_never_reaches_a_real_worker_cli(ctx, monkeypatch):
     )
     spawned = []
     monkeypatch.setattr(ctx.supervisor, "_spawn", lambda argv, cwd, env=None: spawned.append(argv) or _FakeProcess())
+    before = ctx.state.get_task("t1").to_row()
+    claims_before = ctx.state.list_task_identity_claims()
     result = apply_command(ctx, "start", task_id="t1", dry_run=True)
     assert result.ok is True
-    assert spawned and "--dry-run" in spawned[0]
+    assert spawned == []
+    assert ctx.state.get_task("t1").to_row() == before
+    assert ctx.state.list_task_identity_claims() == claims_before
+
+
+def test_blocked_and_missing_task_dry_runs_return_verdicts_without_mutation(ctx):
+    apply_command(ctx, "enqueue", task_id="t1", task_ref="ENG-AGENT-02",
+                  role="focused-tests", worker="opencode2-gemini-flash-lite")
+    task = ctx.state.get_task("t1")
+    task.state = "BLOCKED"
+    ctx.state.upsert_task(task)
+    before = ctx.state.get_task("t1").to_row()
+    blocked = apply_command(ctx, "start", task_id="t1", dry_run=True)
+    missing = apply_command(ctx, "start", task_id="missing", dry_run=True)
+    assert blocked.ok is False and blocked.data["admission"] == "BLOCKED"
+    assert missing.ok is False and missing.data["admission"] == "BLOCKED"
+    assert ctx.state.get_task("t1").to_row() == before
 
 
 class _FakeProcess:

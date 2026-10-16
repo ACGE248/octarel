@@ -72,10 +72,14 @@ def test_launch_task_allows_a_write_worker_when_no_lock_is_held(tmp_path, monkey
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
 
     task = _write_task(tmp_path)
+    task.ownership_evidence_class = "PID_ABSENT"
     result = supervisor.launch_task(task)
 
     assert result.state == TASK_RUNNING
     assert result.pid == 424242
+    assert result.ownership_evidence_class in {"PID_ONLY", "PID_CREATE_TIME"}
+    assert state.get_task(task.id).ownership_evidence_class == result.ownership_evidence_class
+    assert result.launch_id
     assert task.id in supervisor.live_task_ids()
 
 
@@ -551,19 +555,14 @@ def test_poll_once_frees_the_execution_lease_on_completion(tmp_path, monkeypatch
     supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
 
-    class FinishingProcess:
-        pid = os.getpid()
-
-        def poll(self):
-            return 0
-
-        def communicate(self, timeout=None):
-            return "", ""
-
-    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FinishingProcess())
+    # poll_once reaps the worker's process group. A fake whose pid is the
+    # pytest process would send SIGTERM to the test runner itself.
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: process)
     first = _write_task(tmp_path)
     first.id = "first"
     supervisor.launch_task(first)
+    process.wait(timeout=5)
     supervisor.poll_once()
 
     class FakeProcess:

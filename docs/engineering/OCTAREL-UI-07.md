@@ -43,8 +43,14 @@ mapping routing already uses, so there is no second classifier to drift.
 |---|---|---|
 | `SUBSCRIPTION_INCLUDED` | Included with subscription | `$0.00` |
 | `API_BILLED` | API-billed | computed, or `UNKNOWN` |
+| `METERED_SESSION` | Configured metered session | `UNKNOWN`; API-equivalent value remains an estimate |
 | `FREE_TIER` | Free tier | `$0.00` |
 | `UNKNOWN` | Billing not established | `UNKNOWN` |
+
+`metered-configured` means a configured CLI session with metered capacity, not an API charge. The
+`optional-overflow` cost class is shown as API-billed only when the attributed attempt records affirmative
+API-billing authorization and the current worker contract permits API billing. The shipped overflow worker
+does not permit it. A missing authorization leaves actual cost and billing class unknown.
 
 Two wording decisions worth stating:
 
@@ -110,7 +116,7 @@ the run's own fact.
 ## Aggregates
 
 Three windows (UTC calendar day, ISO week from Monday, calendar month), each
-reporting three *value* totals split by who paid, and exactly one *spend*
+reporting four *value* totals split by billing class, and exactly one *spend*
 total drawn only from API-billed rows' actual-cost cells. Nothing crosses
 between them, and the payload states that invariant in text.
 

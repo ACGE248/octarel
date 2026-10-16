@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from ..redaction import redact_text
@@ -54,6 +55,91 @@ _AGENT_OUTPUT_DIRNAME = ".agent-output"
 
 class SupervisorError(RuntimeError):
     pass
+
+
+def record_usage_for_task(state: State, task: Task, stdout: str) -> None:
+    if not task.runbook_id:
+        return
+    record = state.get_usage_governance(task.runbook_id)
+    if not record:
+        return
+    from .telemetry import (
+        estimated_token_usage,
+        extract_reported_cost,
+        extract_token_usage,
+    )
+
+    payload = stdout
+    pointer = re.search(r"^LOG:\s+(.+)$", stdout, re.MULTILINE)
+    if pointer and task.worktree:
+        target_root = Path(task.worktree).resolve()
+        log_path = (target_root / pointer.group(1).strip()).resolve()
+        evidence_root = (target_root / _AGENT_OUTPUT_DIRNAME).resolve()
+        if log_path.is_relative_to(evidence_root) and log_path.is_file():
+            try:
+                payload = log_path.read_text(encoding="utf-8")
+            except OSError:
+                pass
+    usage = extract_token_usage(payload)
+    if usage.mode == "UNKNOWN" and payload.strip():
+        # Explicitly labelled approximation only; never presented as a
+        # provider-reported count. Four characters/token is a bounded
+        # local preprocessing heuristic, not billing/quota truth.
+        usage = estimated_token_usage(
+            input_tokens=max(1, sum(len(value) for value in task.command) // 4),
+            output_tokens=max(1, len(payload) // 4),
+        )
+    record["telemetry_quality"] = usage.mode.lower()
+    record["input_tokens"] = usage.input_tokens
+    record["output_tokens"] = usage.output_tokens
+
+    # OCTAREL-UI-08 (issue #44): a cost the worker CLI stated about itself,
+    # read from the same structured payload as the token counts above.
+    #
+    # Written onto the *attempt* that produced it, never onto the record as
+    # a whole. Independent review (Grok Build) found a record-level figure
+    # misattributing across a fallback: a subscription worker's number --
+    # which means "what this would have cost on the API", not a charge --
+    # outlived the attempt that reported it, and once a later API-billed
+    # attempt became the attributed one it was served as that worker's
+    # MEASURED spend and summed into actual API spend. Binding the cost to
+    # the attempt makes that unrepresentable, because the reader takes the
+    # worker and the cost from the same attempt.
+    #
+    # Within one attempt it is still only ever written, never cleared: a
+    # later reconcile over output that no longer carries the field (a
+    # truncated tail, a re-read that found only the pointer) must not
+    # demote that attempt to the derived path.
+    reported = extract_reported_cost(payload)
+    history = list(record.get("route_history") or [])
+    for index in range(len(history) - 1, -1, -1):
+        attempt = history[index]
+        # The newest still-live attempt for this worker: the same one
+        # finalize_route_attempt terminalizes, so the two can never
+        # disagree about which attempt a completing task belongs to.
+        if not isinstance(attempt, dict) or attempt.get("worker") != task.worker:
+            continue
+        if attempt.get("status") not in {None, "STARTING", "RUNNING"}:
+            continue
+        scoped = {
+            **attempt,
+            "usage_recorded": True,
+            "telemetry_quality": usage.mode.lower(),
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+        }
+        if reported.usd is not None:
+            scoped.update(
+                {
+                    "reported_cost_usd": reported.usd,
+                    "reported_cost_source": reported.source,
+                }
+            )
+        history[index] = scoped
+        record["route_history"] = history
+        break
+    state.upsert_usage_governance(record)
+
 
 
 class Supervisor:
@@ -379,8 +465,12 @@ class Supervisor:
         # Execute the wrapper from the Octarel/Control Center code checkout so
         # ``scripts.agents`` exists even when the selected project worktree is
         # a different repository. ``--repo-root`` still targets the task worktree.
+        task.launch_id = uuid.uuid4().hex
+        self.state.upsert_task(task)
+        child_env = self._child_environment(task)
+        child_env["OCTAREL_LAUNCH_ID"] = task.launch_id
         try:
-            process = self._spawn(argv, cwd=cp_code_root(), env=self._child_environment(task))
+            process = self._spawn(argv, cwd=cp_code_root(), env=child_env)
         except Exception as exc:  # noqa: BLE001 - bad argv/OSError/permissions/missing interpreter, all fatal here
             # Grok Build review (issue #29 follow-up), defect 1: without releasing
             # here, the lease row stays ACQUIRED forever with this (live) supervisor
@@ -431,6 +521,7 @@ class Supervisor:
         self._processes[task.id] = process
         task.pid = process.pid
         task.pid_create_time = execution_lease.process_create_time(process.pid)
+        task.ownership_evidence_class = "PID_CREATE_TIME" if task.pid_create_time is not None else "PID_ONLY"
         task.worktree = str(worktree)
         task.state = TASK_RUNNING
         task.stale_recovered = False
@@ -522,87 +613,7 @@ class Supervisor:
         return finished
 
     def _record_usage(self, task: Task, stdout: str) -> None:
-        if not task.runbook_id:
-            return
-        record = self.state.get_usage_governance(task.runbook_id)
-        if not record:
-            return
-        from .telemetry import (
-            estimated_token_usage,
-            extract_reported_cost,
-            extract_token_usage,
-        )
-
-        payload = stdout
-        pointer = re.search(r"^LOG:\s+(.+)$", stdout, re.MULTILINE)
-        if pointer and task.worktree:
-            target_root = Path(task.worktree).resolve()
-            log_path = (target_root / pointer.group(1).strip()).resolve()
-            evidence_root = (target_root / _AGENT_OUTPUT_DIRNAME).resolve()
-            if log_path.is_relative_to(evidence_root) and log_path.is_file():
-                try:
-                    payload = log_path.read_text(encoding="utf-8")
-                except OSError:
-                    pass
-        usage = extract_token_usage(payload)
-        if usage.mode == "UNKNOWN" and payload.strip():
-            # Explicitly labelled approximation only; never presented as a
-            # provider-reported count. Four characters/token is a bounded
-            # local preprocessing heuristic, not billing/quota truth.
-            usage = estimated_token_usage(
-                input_tokens=max(1, sum(len(value) for value in task.command) // 4),
-                output_tokens=max(1, len(payload) // 4),
-            )
-        record["telemetry_quality"] = usage.mode.lower()
-        record["input_tokens"] = usage.input_tokens
-        record["output_tokens"] = usage.output_tokens
-
-        # OCTAREL-UI-08 (issue #44): a cost the worker CLI stated about itself,
-        # read from the same structured payload as the token counts above.
-        #
-        # Written onto the *attempt* that produced it, never onto the record as
-        # a whole. Independent review (Grok Build) found a record-level figure
-        # misattributing across a fallback: a subscription worker's number --
-        # which means "what this would have cost on the API", not a charge --
-        # outlived the attempt that reported it, and once a later API-billed
-        # attempt became the attributed one it was served as that worker's
-        # MEASURED spend and summed into actual API spend. Binding the cost to
-        # the attempt makes that unrepresentable, because the reader takes the
-        # worker and the cost from the same attempt.
-        #
-        # Within one attempt it is still only ever written, never cleared: a
-        # later reconcile over output that no longer carries the field (a
-        # truncated tail, a re-read that found only the pointer) must not
-        # demote that attempt to the derived path.
-        reported = extract_reported_cost(payload)
-        history = list(record.get("route_history") or [])
-        for index in range(len(history) - 1, -1, -1):
-            attempt = history[index]
-            # The newest still-live attempt for this worker: the same one
-            # finalize_route_attempt terminalizes, so the two can never
-            # disagree about which attempt a completing task belongs to.
-            if not isinstance(attempt, dict) or attempt.get("worker") != task.worker:
-                continue
-            if attempt.get("status") not in {None, "STARTING", "RUNNING"}:
-                continue
-            scoped = {
-                **attempt,
-                "usage_recorded": True,
-                "telemetry_quality": usage.mode.lower(),
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-            }
-            if reported.usd is not None:
-                scoped.update(
-                    {
-                        "reported_cost_usd": reported.usd,
-                        "reported_cost_source": reported.source,
-                    }
-                )
-            history[index] = scoped
-            record["route_history"] = history
-            break
-        self.state.upsert_usage_governance(record)
+        record_usage_for_task(self.state, task, stdout)
 
     def _record_route_outcome(self, task: Task) -> None:
         """Finalize the current durable route attempt without erasing history."""
@@ -685,16 +696,24 @@ class Supervisor:
         for task in self.state.list_tasks(state=TASK_RUNNING):
             if task.id in self._processes or pid_is_alive(task.pid):
                 continue
-            task.state = TASK_FAILED
-            task.result = "FAIL"
-            task.last_error = "recovered worker PID exited; final outcome unavailable"
-            self.state.upsert_task(task)
-            self.state.record_event(
-                category="supervisor",
-                task_id=task.id,
-                level="error",
-                message=task.last_error,
+            from .recovery import (
+                ownership_proof_for_task,
+                preserve_unresolved_launch,
+                reconcile_completed_manifest,
             )
+
+            from_manifest = reconcile_completed_manifest(self.state, task)
+            if not from_manifest:
+                if task.launch_id:
+                    preserve_unresolved_launch(self.state, task, ownership_proof_for_task(task))
+                else:
+                    task.state = TASK_FAILED
+                    task.result = "FAIL"
+                    task.last_error = "recovered worker PID exited; final outcome unavailable"
+                    self.state.upsert_task(task)
+                self.state.record_event(
+                    category="supervisor", task_id=task.id, level="error", message=task.last_error,
+                )
             finished.append(task)
         # ENG-PC-01: a recovered task's dead pid is exactly the proof
         # ``reconcile_stale_leases`` requires to free its execution lease --

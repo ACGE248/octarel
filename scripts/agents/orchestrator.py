@@ -37,6 +37,7 @@ from .control_plane.advancement_lease import (
 )
 from .control_plane.commands import CommandContext, CommandError, apply_command
 from .control_plane.dispatch import managed_admit
+from .control_plane.models import utc_now_iso
 from .control_plane.overnight import recover_on_restart as recover_overnight_on_restart
 from .control_plane.overnight import tick as overnight_tick
 from .control_plane.provider_state import reconcile_provider_states
@@ -332,6 +333,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                         repo_root=root,
                         task=task,
                     )
+            # Separate scheduler/reconciler progress from the daemon's OS
+            # authority lock. The dashboard reports a stale tick honestly if
+            # the process is alive but no longer making progress.
+            ctx.state.set_control_setting("daemon_last_reconcile_at", utc_now_iso())
             if args.once:
                 return EXIT_OK
             time.sleep(args.poll_interval)

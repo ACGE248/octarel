@@ -8,6 +8,7 @@ it and retries cannot overwrite it. Stdout gets only a short pointer block.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -137,6 +138,7 @@ class RunRecord:
         return {
             "manifest_version": MANIFEST_VERSION,
             "task": self.task,
+            "launch_id": os.environ.get("OCTAREL_LAUNCH_ID"),
             "role": self.role,
             "worker": self.worker,
             "planned": {

@@ -24,6 +24,7 @@ from .models import (
     KIND_WRITE,
     LAUNCH_SESSION,
     TASK_BLOCKED,
+    TASK_PENDING,
     TASK_QUEUED,
     Task,
 )
@@ -222,6 +223,10 @@ def managed_admit(
 ) -> ManagedAdmission:
     """Check intake, select a provider, admit against the DAG/caps, then launch."""
 
+    if task.state not in {TASK_PENDING, TASK_QUEUED}:
+        reason = f"task {task.id} is {task.state}; only PENDING or QUEUED tasks can be admitted"
+        return ManagedAdmission(task, False, ADMISSION_BLOCKED, reason, {})
+
     owner_ref = task.owner_ref or f"task:{task.task_ref.split(maxsplit=1)[0]}"
     preferred = registry.workers.get(task.worker)
     if (
@@ -330,7 +335,13 @@ def managed_admit(
     )
 
     all_tasks = [item for item in state.list_tasks() if item.id != task.id] + [task]
-    fact = next(item for item in scheduler.admission_facts(all_tasks) if item.task_id == task.id)
+    fact = next((item for item in scheduler.admission_facts(all_tasks) if item.task_id == task.id), None)
+    if fact is None:
+        return _persist_block(
+            state, task, intake.owner_ref,
+            "scheduler did not return an admission fact for this task; refusing launch",
+            permanent=True, scores=scores,
+        )
     task.dependency_wave = fact.wave
     if not fact.runnable:
         permanent = "cycle" in fact.reason or "overlap" in fact.reason

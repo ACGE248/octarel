@@ -244,12 +244,13 @@ def test_the_endpoint_attributes_a_reported_cost_to_the_worker_that_ran(ctx, tmp
     row = TestClient(app).get("/api/usage-telemetry").json()["rows"][0]
 
     assert row["attribution"]["worker"] == "grok-build"
-    assert row["billing"]["class"] == "API_BILLED"
+    assert row["billing"]["class"] == "METERED_SESSION"
     cost = row["metrics"]["actual_cost_usd"]
-    assert cost["value"] == pytest.approx(0.42), "must be the replacement's own figure"
-    assert cost["value"] != pytest.approx(0.99), "never the failed attempt's figure"
-    assert cost["class"] == "MEASURED"
-    assert cost["basis"] == "reported"
+    assert cost["value"] is None, "the CLI report does not establish an API charge"
+    assert cost["class"] == "UNKNOWN"
+    attempts = ctx.state.get_usage_governance("rb-fb")["route_history"]
+    assert attempts[-1]["reported_cost_usd"] == pytest.approx(0.42)
+    assert attempts[0]["reported_cost_usd"] == pytest.approx(0.99)
 
 
 def test_a_subscription_attempts_figure_never_becomes_a_later_workers_api_spend(ctx, tmp_path):
@@ -379,9 +380,9 @@ def test_a_run_captured_then_finalized_is_served_as_measured_end_to_end(ctx, tmp
 
     app = create_app(ctx, roadmap_path=tmp_path / "R.md", pricing_loader=lambda: FIXED_BOOK)
     cost = TestClient(app).get("/api/usage-telemetry").json()["rows"][0]["metrics"]["actual_cost_usd"]
-    assert cost["value"] == pytest.approx(0.75)
-    assert cost["class"] == "MEASURED"
-    assert cost["basis"] == "reported"
+    assert cost["value"] is None
+    assert cost["class"] == "UNKNOWN"
+    assert ctx.state.get_usage_governance("rb-e2e")["route_history"][-1]["reported_cost_usd"] == pytest.approx(0.75)
 
 
 # ------------------------------------------ supervisor attempt selection

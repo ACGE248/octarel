@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -72,6 +73,7 @@ from scripts.agents.control_plane.provider_state import (  # noqa: E402
 from scripts.agents.control_plane.quickstart import (
     VIDEO_EDITOR_LEDGER_RELATIVE,  # noqa: E402
 )
+from scripts.agents.control_plane.recovery import process_create_time  # noqa: E402
 from scripts.agents.control_plane.remote_access import (  # noqa: E402
     AccessVerifier,
     RemoteAccessConfig,
@@ -357,6 +359,12 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
     _seed_configuration_revisions(state, current_ref_at)
     for provider in seed_provider_states(registry):
         state.upsert_provider_state(provider)
+    # Test-only contract for the API-billed telemetry examples. It cannot be
+    # routed by the fixture, and no shipped worker permits API billing.
+    registry.workers["authorized-api-fixture"] = replace(
+        registry.get("grok-build"), name="authorized-api-fixture",
+        cost_class="optional-overflow", allow_api_billing=True, enabled=False,
+    )
     state.upsert_worktree(WorktreeRecord(path=str(root), branch=FIXTURE_BRANCH, locked=False))
     state.upsert_worktree(WorktreeRecord(path=str(second_worktree), branch=FIXTURE_SECOND_BRANCH, locked=False))
     state.upsert_worktree(
@@ -377,6 +385,10 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             role="focused-tests",
             worker="grok-build",
             state="RUNNING",
+            # Synthetic UI liveness: this fixture process stands in for a
+            # worker and supplies matching PID/create-time evidence.
+            pid=os.getpid(),
+            pid_create_time=process_create_time(os.getpid()),
             # These are test/verification tasks, not implementation writes;
             # leaving `kind` at its Task-model write default previously
             # overcounted the managed-dispatch write cap (ENG-AGENT-10)
@@ -392,6 +404,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             role="mechanical-testing",
             worker="opencode2-gemini-flash-lite",
             state="RUNNING",
+            pid=os.getpid(),
+            pid_create_time=process_create_time(os.getpid()),
             kind=KIND_READ,
         ),
         updated_at=current_ref_at,
@@ -459,6 +473,8 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             worker="claude-code",
             state="RUNNING",
             launch_mode="session",
+            pid=os.getpid(),
+            pid_create_time=process_create_time(os.getpid()),
             worktree=str(root),
         ),
         updated_at=other_ref_at,
@@ -699,15 +715,14 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
     )
 
     # OCTAREL-UI-07 (issue #42): one usage record per billing class, so the
-    # browser suite can assert that a subscription-included run, an API-billed
-    # run, a free-route run and an unclassified one are each presented as what
-    # they are. The route history records cost_class the way a real run now
-    # does, which is also what makes these rows independent of whatever
-    # workers.json happens to say today.
+    # browser suite can assert subscription, authorized synthetic API,
+    # configured metered CLI, free and unclassified routes truthfully.
+    # Route history records cost_class and authorization independently of the
+    # current workers.json, so later configuration changes cannot relabel history.
     for runbook_id, history, tokens, reported in (
         (
             "fx-usage-api-billed",
-            [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
+            [{"worker": "authorized-api-fixture", "provider": "xAI", "model": "grok-4.6", "cost_class": "optional-overflow", "api_billing_authorized": True}],
             (80_000, 4_000),
             None,
         ),
@@ -717,9 +732,15 @@ def build_fixture_context(root: Path, *, state_path: Path | None = None) -> Comm
             # produce, so a row showing the derived number here would be
             # visible as a bug rather than a coincidence.
             "fx-usage-reported-cost",
-            [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
+            [{"worker": "authorized-api-fixture", "provider": "xAI", "model": "grok-4.6", "cost_class": "optional-overflow", "api_billing_authorized": True}],
             (61_000, 3_100),
             (0.69791188, "worker CLI structured total_cost_usd"),
+        ),
+        (
+            "fx-usage-metered-session",
+            [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6", "cost_class": "metered-configured"}],
+            (20_000, 1_000),
+            None,
         ),
         (
             # A subscription-backed run whose CLI also reports a cost. The

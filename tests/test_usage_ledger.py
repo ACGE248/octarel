@@ -554,8 +554,20 @@ def test_filters_select_exact_attribution_and_totals():
 
     today = filtered["windows"]["today"]
     assert today["counts"]["rows"] == 1
-    assert today["actual_api_spend_usd"]["value"] == pytest.approx(0.02)
+    assert today["metered_session_equivalent_usd"]["value"] == pytest.approx(0.02)
+    assert today["actual_api_spend_usd"]["value"] == 0.0
     assert state.list_usage_ledger(project_id="project-b", task_id="task-2", provider="P2", model="m2")
+
+
+def test_missing_worker_contract_cannot_authorize_api_billing():
+    state = State(":memory:")
+    candidate = attempt("run-api", "unknown-worker", tokens=(1_000, 0), cost_class="optional-overflow")
+    candidate["api_billing_authorized"] = True
+    record_usage_attempts(state, governance(candidate), project_id="p")
+
+    row = build_ledger_rows(state.list_usage_ledger(), registry=registry(), pricing_book=FixedBook())[0]
+    assert row["billing"]["class"] == BILLING_UNKNOWN
+    assert row["metrics"]["actual_cost_usd"]["value"] is None
 
 
 def test_cache_categories_and_context_limit_remain_not_exposed_with_reasons():

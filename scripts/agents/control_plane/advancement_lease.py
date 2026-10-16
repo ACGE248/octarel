@@ -181,3 +181,35 @@ def daemon_authority_active(state: State) -> bool:
         return False
     finally:
         os.close(fd)
+
+
+def daemon_authority_observed(state: State) -> bool | None:
+    """Report a live daemon lock, including one held by this process."""
+
+    path = _authority_path(state)
+    if path is None:
+        return None
+    return str(path) in _DAEMON_FDS or daemon_authority_active(state)
+
+
+def runbook_advancement_active(state: State, runbook_id: str) -> bool | None:
+    """Observe the exact per-runbook flock while its acceptance tick runs."""
+
+    path = _lease_path(state, runbook_id)
+    if path is None:
+        return None
+    if str(path) in _held():
+        return True
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)

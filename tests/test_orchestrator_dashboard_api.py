@@ -92,6 +92,8 @@ def client(ctx, roadmap_file) -> TestClient:
 
 def test_overview_endpoint(client):
     body = client.get("/api/overview").json()
+    assert body["runtime_health"]["dashboard"] == "SERVING"
+    assert body["runtime_health"]["daemon"] == "UNKNOWN"  # in-memory fixture has no authority lock
     assert body["task_count"] == 0
     assert body["task_counts"]["queued"] == 1
     assert body["provider_count"] > 0
@@ -185,7 +187,7 @@ def test_recovery_detail_preserves_truthful_attempt_and_acceptance_evidence(
         },
     ))
     monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: True)
-    monkeypatch.setattr(recovery, "process_create_time", lambda _pid: None)
+    monkeypatch.setattr(recovery, "process_create_time", lambda _pid, **_kwargs: None)
     monkeypatch.setattr(recovery, "_candidate_tree_sha", lambda _worktree: "new-tree")
 
     response = client.get(f"/api/recovery/{task.task_ref}")
@@ -228,7 +230,7 @@ def test_recovery_endpoint_reverifies_and_audits_success_and_refusal(
 
     live = {8101: False, 8102: False}
     monkeypatch.setattr(recovery, "pid_is_alive", lambda pid: live[pid])
-    monkeypatch.setattr(recovery, "process_create_time", lambda _pid: None)
+    monkeypatch.setattr(recovery, "process_create_time", lambda _pid, **_kwargs: None)
     monkeypatch.setattr(
         dashboard_api,
         "_remote_identity_of",
@@ -316,7 +318,7 @@ def test_attention_keeps_each_recovery_wait_reason_and_next_action_distinct(
             pid=9000 + index, ownership_evidence_class="PID_ONLY",
         ))
     monkeypatch.setattr(recovery, "pid_is_alive", lambda _pid: True)
-    monkeypatch.setattr(recovery, "process_create_time", lambda _pid: None)
+    monkeypatch.setattr(recovery, "process_create_time", lambda _pid, **_kwargs: None)
 
     response = client.get("/api/attention")
     rows = {row["state"]: row for row in response.json()["recovery"]}
@@ -701,7 +703,58 @@ def test_workflow_endpoint_has_an_explicit_idle_shape(client, ctx):
         "stages": [],
         "worktrees": [],
         "results": [],
+        "acceptance": None,
     }
+
+
+def test_workflow_distinguishes_stale_worker_from_live_acceptance(client, ctx, tmp_path, monkeypatch):
+    from scripts.agents.control_plane import advancement_lease
+
+    ctx.state.delete_task("t1")
+    ctx.state.upsert_task(Task(
+        id="implementation", task_ref="ENG-AGENT-02", role="primary-implementation",
+        worker="claude-code", state="SUCCEEDED", result="PASS", worktree=str(tmp_path),
+    ))
+    ctx.state.upsert_runbook(Runbook(
+        id="acceptance", name="Acceptance run", preset="test-fix", objective="verify",
+        source_ref="ENG-AGENT-02", branch="test", worktree=str(tmp_path),
+        parent_worker="claude-code", max_duration_minutes=60,
+        status="ACCEPTANCE_PENDING", acceptance_stage="review", task_id="implementation",
+    ))
+    monkeypatch.setattr(advancement_lease, "daemon_authority_observed", lambda _state: True)
+    monkeypatch.setattr(advancement_lease, "runbook_advancement_active", lambda _state, _id: True)
+
+    body = client.get("/api/workflow").json()
+    assert body["task"]["state"] == "ACCEPTANCE_PENDING"
+    assert body["stages"][0]["state"] == "SUCCEEDED"
+    assert body["acceptance"] == {
+        "stage": "review", "execution": "RUNNING", "source": "RUNBOOK_ADVANCEMENT_LEASE",
+    }
+    runbooks = client.get("/api/runbooks").json()
+    assert next(r for r in runbooks if r["id"] == "acceptance")["acceptance_execution"] == "RUNNING"
+
+
+def test_runtime_health_does_not_count_a_stale_running_row_as_a_live_worker(client, ctx):
+    task = ctx.state.get_task("t1")
+    task.state = "RUNNING"
+    task.pid = None
+    ctx.state.upsert_task(task)
+
+    health = client.get("/api/overview").json()["runtime_health"]
+    assert health["dashboard"] == "SERVING"
+    assert health["worker_live"] == 0
+    assert health["worker_stale_or_unverified"] == 1
+    assert client.get("/api/workflow").json()["stages"][0]["worker_ownership"] == "RECLAIMABLE"
+
+
+def test_runtime_health_distinguishes_held_daemon_authority_from_stale_scheduler(client, ctx, monkeypatch):
+    from scripts.agents.control_plane import advancement_lease
+
+    monkeypatch.setattr(advancement_lease, "daemon_authority_observed", lambda _state: True)
+    ctx.state.set_control_setting("daemon_last_reconcile_at", "2020-01-01T00:00:00+00:00")
+    health = client.get("/api/overview").json()["runtime_health"]
+    assert health["daemon"] == "RUNNING"
+    assert health["scheduler_reconciler"] == "STALE"
 
 
 def test_flow_endpoint_enriches_nodes_with_the_full_pipeline_chain(client):
@@ -1233,7 +1286,8 @@ def test_enqueue_and_start_dry_run_through_the_http_api(client, ctx, monkeypatch
     resp = client.post("/api/commands/start", json={"task_id": "t2", "dry_run": True})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
-    assert spawned and "--dry-run" in spawned[0]
+    assert spawned == []
+    assert ctx.state.get_task("t2").state == "PENDING"
 
 
 def test_unknown_command_returns_400(client):
@@ -1416,7 +1470,7 @@ def test_dashboard_reconciles_a_dashboard_launched_task_that_exits_zero(ctx, roa
     app = create_app(ctx, roadmap_path=roadmap_file)
 
     with TestClient(app) as client:
-        resp = client.post("/api/commands/start", json={"task_id": "t1", "dry_run": True})
+        resp = client.post("/api/commands/start", json={"task_id": "t1", "dry_run": False})
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
@@ -1433,7 +1487,7 @@ def test_dashboard_reconciles_a_dashboard_launched_task_that_exits_nonzero(ctx, 
     app = create_app(ctx, roadmap_path=roadmap_file)
 
     with TestClient(app) as client:
-        resp = client.post("/api/commands/start", json={"task_id": "t1", "dry_run": True})
+        resp = client.post("/api/commands/start", json={"task_id": "t1", "dry_run": False})
         assert resp.status_code == 200
 
         task = _wait_for_task_state(ctx, "t1", "FAILED")
@@ -1462,7 +1516,7 @@ def test_dashboard_reconciliation_loop_only_polls_its_own_supervisor(ctx, roadma
     app = create_app(ctx, roadmap_path=roadmap_file)
 
     with TestClient(app) as client:
-        resp = client.post("/api/commands/start", json={"task_id": "t1", "dry_run": True})
+        resp = client.post("/api/commands/start", json={"task_id": "t1", "dry_run": False})
         assert resp.status_code == 200
         _wait_for_task_state(ctx, "t1", "SUCCEEDED")
 

@@ -40,7 +40,16 @@ from scripts.agents.control_plane.usage_telemetry import (
 
 SUBSCRIPTION = WorkerFacts("claude-code", "Anthropic", "Claude Code", "claude-sonnet-5", "premium-subscription")
 FREE = WorkerFacts("opencode-free-tests", "OpenCode Zen", "OpenCode2", "free-model", "free-dynamic")
-METERED = WorkerFacts("grok-build", "xAI", "Grok Build", "grok-4.6", "metered-configured")
+API_ROUTE = WorkerFacts("authorized-api-fixture", "xAI", "Grok Build", "grok-4.6", "optional-overflow", api_billing_authorized=True)
+METERED_SESSION = WorkerFacts("grok-build", "xAI", "Grok Build", "grok-4.6", "metered-configured")
+
+
+def test_api_cost_class_without_billing_authorization_is_not_api_billed():
+    facts = replace(API_ROUTE, api_billing_authorized=False)
+    row = build_row(record(telemetry_quality="exact", input_tokens=1000, output_tokens=100), facts=facts, project_id="p")
+    assert row["billing"]["class"] == BILLING_UNKNOWN
+    assert row["route"]["billable"] is False
+    assert row["metrics"]["actual_cost_usd"]["class"] == CLASS_UNKNOWN
 
 
 def record(**over):
@@ -118,7 +127,7 @@ def test_cache_hit_rate_is_never_approximated_even_with_exact_tokens():
 def test_a_metered_route_without_pricing_reports_unknown_not_a_guess():
     cost = build_row(
         record(telemetry_quality="exact", input_tokens=1000, output_tokens=100),
-        facts=METERED,
+        facts=API_ROUTE,
         project_id="p",
     )["metrics"]["actual_cost_usd"]
     assert cost["value"] is None
@@ -144,9 +153,27 @@ def test_duration_is_unknown_when_not_recorded():
 
 
 def test_route_records_billability_from_cost_class():
-    assert build_row(record(), facts=METERED, project_id="p")["route"]["billable"] is True
+    assert build_row(record(), facts=API_ROUTE, project_id="p")["route"]["billable"] is True
+    assert build_row(record(), facts=METERED_SESSION, project_id="p")["route"]["billable"] is False
     assert build_row(record(), facts=SUBSCRIPTION, project_id="p")["route"]["billable"] is False
     assert build_row(record(), facts=FREE, project_id="p")["route"]["billable"] is False
+
+
+def test_configured_metered_cli_session_is_never_labeled_api_billed():
+    row = build_row(
+        record(telemetry_quality="exact", input_tokens=100_000, output_tokens=10_000),
+        facts=METERED_SESSION, project_id="p", pricing=FLASH_RATES,
+    )
+    assert row["route"]["execution_route"] == "METERED_SESSION"
+    assert row["billing"]["class"] == "METERED_SESSION"
+    assert row["billing"]["label"] == "Configured metered session"
+    assert row["metrics"]["estimated_api_equivalent_usd"]["value"] == pytest.approx(0.055)
+    assert row["metrics"]["actual_cost_usd"]["class"] == CLASS_UNKNOWN
+    assert row["metrics"]["actual_cost_usd"]["value"] is None
+    counts = build_aggregates([dated_row(METERED_SESSION, NOW)], now=NOW)["windows"]["today"]
+    assert counts["counts"]["metered_session"] == 1
+    assert counts["counts"]["api_billed"] == 0
+    assert counts["actual_api_spend_usd"]["value"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -213,10 +240,10 @@ def test_a_free_route_is_called_free_and_never_included_with_a_subscription():
 
 
 def test_api_billed_usage_reports_a_real_cost_and_is_distinguishable():
-    m = money(METERED)
+    m = money(API_ROUTE)
     row = build_row(
         record(telemetry_quality="exact", input_tokens=100_000, output_tokens=10_000),
-        facts=METERED,
+        facts=API_ROUTE,
         project_id="p",
         pricing=FLASH_RATES,
     )
@@ -229,7 +256,7 @@ def test_api_billed_usage_reports_a_real_cost_and_is_distinguishable():
 def test_equivalent_and_actual_stay_separate_fields_even_when_they_match():
     """Issue #42 requires two backend fields, not one value formatted twice."""
 
-    m = money(METERED)
+    m = money(API_ROUTE)
     assert m["estimated_api_equivalent_usd"]["value"] == m["actual_cost_usd"]["value"]
     # Same number, different provenance: one is what it would have cost, the
     # other is what it did cost, and they are established differently.
@@ -275,7 +302,7 @@ def test_missing_token_data_means_no_estimate_at_all():
 def test_an_approximate_token_count_values_but_never_bills():
     """A character-length approximation can inform an estimate, never a charge."""
 
-    m = money(METERED, telemetry_quality="estimated")
+    m = money(API_ROUTE, telemetry_quality="estimated")
     assert m["estimated_api_equivalent_usd"]["value"] == pytest.approx(0.055)
     assert "locally approximated" in m["estimated_api_equivalent_usd"]["formula"]
 
@@ -308,7 +335,7 @@ def test_billing_class_recorded_by_the_run_outranks_the_current_registry():
     assert recorded["established"] == CLASS_MEASURED
     assert "recorded by the run" in recorded["source"]
 
-    inferred = build_row(record(), facts=METERED, project_id="p")["billing"]
+    inferred = build_row(record(), facts=API_ROUTE, project_id="p")["billing"]
     assert inferred["established"] == CLASS_DERIVED
     assert "current registry" in inferred["source"]
 
@@ -393,7 +420,7 @@ def test_subscription_value_is_never_added_to_actual_api_spend():
 
     rows = [
         dated_row(SUBSCRIPTION, NOW),  # $0.055 of value, $0.00 of spend
-        dated_row(METERED, NOW),  # $0.055 of value, $0.055 of spend
+        dated_row(API_ROUTE, NOW),  # $0.055 of value, $0.055 of spend
         dated_row(FREE, NOW),  # $0.055 of value, $0.00 of spend
     ]
     today = build_aggregates(rows, now=NOW)["windows"]["today"]
@@ -453,7 +480,7 @@ def test_an_unpriced_row_is_excluded_from_totals_and_the_shortfall_is_visible():
 
 
 def test_rows_are_bucketed_by_billing_class_not_by_whether_a_number_exists():
-    rows = [dated_row(SUBSCRIPTION, NOW), dated_row(METERED, NOW), dated_row(FREE, NOW)]
+    rows = [dated_row(SUBSCRIPTION, NOW), dated_row(API_ROUTE, NOW), dated_row(FREE, NOW)]
     counts = build_aggregates(rows, now=NOW)["windows"]["today"]["counts"]
     assert counts["subscription_included"] == 1
     assert counts["api_billed"] == 1
@@ -527,7 +554,7 @@ def test_a_window_with_rows_but_no_figures_reports_unknown_not_zero():
                 output_tokens=100_000,
                 route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}],
             ),
-            facts=METERED,
+            facts=API_ROUTE,
             project_id="p",
             pricing=None,
             pricing_reason="no catalog entry",
@@ -546,7 +573,7 @@ def test_a_window_with_rows_but_no_figures_reports_unknown_not_zero():
 
 
 def test_a_partial_total_carries_its_own_coverage():
-    priced = dated_row(METERED, NOW)
+    priced = dated_row(API_ROUTE, NOW)
     unpriced = build_row(
         record(
             telemetry_quality="exact",
@@ -554,7 +581,7 @@ def test_a_partial_total_carries_its_own_coverage():
             output_tokens=10,
             route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}],
         ),
-        facts=METERED,
+        facts=API_ROUTE,
         project_id="p",
         pricing=None,
         pricing_reason="no catalog entry",
@@ -600,7 +627,7 @@ def test_a_row_whose_billing_is_unknown_can_never_enter_actual_spend():
 def test_an_api_billed_row_is_not_told_it_was_never_billed():
     """The estimate's caveat has to be true of the run it sits on."""
 
-    metered = money(METERED)["estimated_api_equivalent_usd"]["reason"]
+    metered = money(API_ROUTE)["estimated_api_equivalent_usd"]["reason"]
     assert "reported separately" in metered
     assert "not billed at these rates" not in metered
 
@@ -654,7 +681,7 @@ def test_a_future_timestamp_is_excluded_and_reported_rather_than_dropped():
 def test_a_one_sided_token_count_prices_nothing(input_tokens, output_tokens):
     """Half a token count is not a basis for either figure."""
 
-    m = money(METERED, input_tokens=input_tokens, output_tokens=output_tokens)
+    m = money(API_ROUTE, input_tokens=input_tokens, output_tokens=output_tokens)
     assert m["estimated_api_equivalent_usd"]["value"] is None
     assert m["estimated_api_equivalent_usd"]["class"] == CLASS_UNKNOWN
     assert m["actual_cost_usd"]["value"] is None
@@ -676,7 +703,7 @@ def test_a_token_count_that_is_not_a_whole_number_prices_nothing(label, tokens):
     refused to display such a value; the money path is now at least as strict.
     """
 
-    m = money(METERED, input_tokens=tokens[0], output_tokens=tokens[1])
+    m = money(API_ROUTE, input_tokens=tokens[0], output_tokens=tokens[1])
     assert m["estimated_api_equivalent_usd"]["value"] is None, label
     assert m["estimated_api_equivalent_usd"]["class"] == CLASS_UNKNOWN
     assert m["actual_cost_usd"]["value"] is None
@@ -685,7 +712,7 @@ def test_a_token_count_that_is_not_a_whole_number_prices_nothing(label, tokens):
 def test_a_negative_token_count_is_refused_rather_than_understating_spend():
     """A negative count is not missing evidence, it is wrong evidence."""
 
-    m = money(METERED, input_tokens=-5000, output_tokens=-100)
+    m = money(API_ROUTE, input_tokens=-5000, output_tokens=-100)
     assert m["actual_cost_usd"]["value"] is None
     assert m["estimated_api_equivalent_usd"]["value"] is None
 
@@ -747,7 +774,7 @@ def actual(facts, usd, **over):
 def test_an_api_billed_run_prefers_the_cost_its_worker_reported():
     """The headline case: what the tool says it spent beats what a rate card implies."""
 
-    cell = actual(METERED, 0.69791188)
+    cell = actual(API_ROUTE, 0.69791188)
     assert cell["value"] == pytest.approx(0.69791188)
     assert cell["class"] == CLASS_MEASURED
     assert cell["source"] == "worker CLI structured total_cost_usd"
@@ -761,11 +788,11 @@ def test_a_reported_cost_is_never_overwritten_by_the_derived_figure():
     precedence ever inverted, this value would silently change to that.
     """
 
-    derived_only = money(METERED)["actual_cost_usd"]
+    derived_only = money(API_ROUTE)["actual_cost_usd"]
     assert derived_only["value"] == pytest.approx(0.055)
     assert derived_only["class"] == CLASS_DERIVED
 
-    measured = actual(METERED, 0.69791188)
+    measured = actual(API_ROUTE, 0.69791188)
     assert measured["value"] == pytest.approx(0.69791188)
     assert measured["value"] != pytest.approx(derived_only["value"])
 
@@ -773,7 +800,7 @@ def test_a_reported_cost_is_never_overwritten_by_the_derived_figure():
 def test_an_api_billed_run_without_a_reported_cost_keeps_the_derived_fallback():
     """Absence of the new field must change nothing that worked before."""
 
-    cell = money(METERED)["actual_cost_usd"]
+    cell = money(API_ROUTE)["actual_cost_usd"]
     assert cell["value"] == pytest.approx(0.055)
     assert cell["class"] == CLASS_DERIVED
     assert cell["basis"] == "tokens-and-pricing"
@@ -827,7 +854,7 @@ def test_a_monetary_value_that_cannot_stand_as_money_is_refused(bad):
     otherwise render as $1.00.
     """
 
-    cell = actual(METERED, bad)
+    cell = actual(API_ROUTE, bad)
     # Falls back to the derived figure rather than reporting the bad value.
     assert cell["value"] == pytest.approx(0.055)
     assert cell["class"] == CLASS_DERIVED
@@ -837,7 +864,7 @@ def test_the_equivalent_value_is_untouched_by_a_reported_cost():
     """Issue #44 must not change what estimated_api_equivalent_usd means."""
 
     metrics = build_row(
-        reported_record(), facts=with_cost(METERED, 0.69791188), project_id="p", pricing=FLASH_RATES
+        reported_record(), facts=with_cost(API_ROUTE, 0.69791188), project_id="p", pricing=FLASH_RATES
     )["metrics"]
     equivalent = metrics["estimated_api_equivalent_usd"]
     assert equivalent["value"] == pytest.approx(0.055)
@@ -849,7 +876,7 @@ def test_the_equivalent_value_is_untouched_by_a_reported_cost():
 def test_a_reported_cost_of_zero_is_a_figure_not_a_missing_one():
     """$0.00 reported by the tool is evidence, not absence of evidence."""
 
-    cell = actual(METERED, 0.0)
+    cell = actual(API_ROUTE, 0.0)
     assert cell["value"] == 0.0
     assert cell["class"] == CLASS_MEASURED
     assert cell["basis"] == "reported"
@@ -860,11 +887,11 @@ def test_a_measured_row_counts_once_in_actual_spend():
 
     measured = build_row(
         reported_record(route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}]),
-        facts=with_cost(METERED, 0.69791188),
+        facts=with_cost(API_ROUTE, 0.69791188),
         project_id="p",
         pricing=FLASH_RATES,
     )
-    derived = dated_row(METERED, NOW)  # contributes its derived $0.055
+    derived = dated_row(API_ROUTE, NOW)  # contributes its derived $0.055
     today = build_aggregates([measured, derived], now=NOW)["windows"]["today"]
 
     spend = today["actual_api_spend_usd"]
@@ -879,7 +906,7 @@ def test_aggregate_spend_prefers_the_measured_figure_for_a_row():
 
     measured = build_row(
         reported_record(route_history=[{"worker": "grok-build", "ended_at": NOW.isoformat()}]),
-        facts=with_cost(METERED, 2.5),
+        facts=with_cost(API_ROUTE, 2.5),
         project_id="p",
         pricing=FLASH_RATES,
     )
