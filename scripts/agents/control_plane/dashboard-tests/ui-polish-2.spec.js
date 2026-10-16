@@ -442,7 +442,7 @@ test('Quick Start renders multiple in-progress tasks as explicit resume cards', 
       title: 'Continue Video Editor — choose work to resume',
       ready: false,
       resume_candidates: ['GATE-A', 'GATE-B'],
-      unavailable_reason: 'Multiple in-progress tasks require explicit selection.',
+      unavailable_reason: 'docs/video-editor/IMPLEMENTATION_STATUS_V2.md has multiple tasks with status in-progress: GATE-A and GATE-B. Select one of the server-resolved resume cards.',
     };
     options.splice(2, 0,
       { ...template, key: 'continue-video-editor:GATE-A', task_id: 'GATE-A', task_title: 'First gate', title: 'Resume Video Editor — GATE-A', source_ref: 'GATE-A (First gate)', ledger_status: 'in-progress', ready: true, unavailable_reason: null },
@@ -453,6 +453,18 @@ test('Quick Start renders multiple in-progress tasks as explicit resume cards', 
   await navTo(page, 'view-runs');
   const row = page.locator('#quickstart-row');
   await expect(row.locator('.quickstart-btn')).toHaveCount(8, { timeout: 15000 });
+  const layout = await row.locator('.quickstart-btn').first().evaluate((button) => {
+    const title = button.querySelector('strong').getBoundingClientRect();
+    const status = button.querySelector('.status-pill').getBoundingClientRect();
+    const reason = button.querySelector('.quickstart-reason').getBoundingClientRect();
+    const card = button.getBoundingClientRect();
+    return { cardWidth: card.width, cardHeight: card.height, titleWidth: title.width,
+      statusHeight: status.height, reasonWidth: reason.width };
+  });
+  expect(layout.titleWidth).toBeGreaterThan(layout.cardWidth * 0.4);
+  expect(layout.statusHeight).toBeLessThan(35);
+  expect(layout.reasonWidth).toBeGreaterThan(layout.cardWidth * 0.8);
+  expect(layout.cardHeight).toBeLessThan(300);
   const gateB = row.locator('.quickstart-btn', { hasText: 'Resume Video Editor — GATE-B' });
   await expect(gateB.locator('.status-pill')).toHaveText('Ready');
   await gateB.click();
