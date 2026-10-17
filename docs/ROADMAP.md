@@ -2,7 +2,7 @@
 
 This file is the canonical product/engineering roadmap for **Octarel itself**. It does not copy or replace the roadmap, ledger, ADRs, or task truth of any managed project. Current repository code and `AGENTS.md` override historical planning notes.
 
-**Reconciled through `main` at `0cb7ece` (2026-10-06)**, after the Glass Orchestration Studio follow-ups (#78, #79), the ENG-PC program, and ENG-PC-12 landed. Where this file describes delivered behaviour it is a pointer to the code, not a second specification; where a delivered surface is named as the home for future work, extend that surface rather than rebuilding it.
+**Maintained against the repository's current main and active changes.** Where this file describes delivered behaviour it is a pointer to the code, not a second specification; where a delivered surface is named as the home for future work, extend that surface rather than rebuilding it.
 
 ## Current direction
 
@@ -71,12 +71,12 @@ The `OCTAREL-UI-07` label is used by two different things and always has been: i
 
 Two telemetry gaps are shipped as visible, explained `NOT_EXPOSED` cells rather than estimated, and no ENG-PC task may quietly fill them with an approximation: **cache categories** (nothing in the stack records fresh input, cache reads or cache writes, so no cache hit rate can be derived) and **effective context limit** (no runtime reports one, and a context window is never inferred from a model name).
 
-## Observed operational defects awaiting triage
+## Observed operational defects and remedies
 
 These are Octarel defects observed while operating the shipped Control Center against a managed project. They
 record Octarel mechanism/UI behavior only; the managed project's task truth remains in that repository.
 
-### OCTAREL-BUG-01 — Cost display must agree with billing prohibition
+### OCTAREL-BUG-01 — Cost display must agree with billing prohibition — resolved
 
 A run launched through `grok-build` recorded `cost_class=metered-configured` and the Run Detail UI rendered
 `BILLING API-billed` with unknown actual incremental cost, even though the executable worker contract has
@@ -89,7 +89,11 @@ must distinguish a configured metered-capacity/session route from an authorized 
 API-equivalent estimate as an estimate, and never label actual billing as API-billed without affirmative billing
 authorization/evidence. Add backend and Run Detail regression coverage for this exact worker contract.
 
-### OCTAREL-BUG-02 — Provider auth state changes during Quick Start launch
+The metered Grok CLI now renders as a configured metered session with unknown incremental charge and a separate
+API-equivalent estimate. API-billed presentation requires affirmative per-attempt authorization and a worker
+contract that permits API billing. Backend and browser fixtures cover both routes.
+
+### OCTAREL-BUG-02 — Provider auth state changes during Quick Start launch — resolved
 
 Quick Start prepared `VE-DIR-04` with `grok-build` AVAILABLE, then launch changed the provider to
 `NOT_CONFIGURED` / `NOT_AUTHENTICATED` and blocked the task. The same registry auth command (`grok models`)
@@ -102,14 +106,21 @@ The Control Center also left the prepared-run button disabled at `Starting…` a
 BLOCKED. The launch response/polling path must settle to the durable runbook/task state and expose the safe
 retry/re-probe action instead of leaving a permanent in-flight presentation.
 
-### OCTAREL-BUG-03 — Blocked-task dry-run must not crash
+Unrecognized auth output is classified as a launch-environment error rather than an explicit logout. A formerly
+routable provider receives one bounded repeat of the same local check before demotion. Prepared Run clears its
+in-flight state on success, block, or request failure, refreshes durable run state and opens the resulting run.
+
+### OCTAREL-BUG-03 — Blocked-task dry-run must not crash — resolved
 
 Running `orchestrator start --id <blocked-task> --dry-run` for the launch-blocked task raised an uncaught
 `StopIteration` in `dispatch.managed_admit` because no matching admission fact existed. Dry-run is a safety
 boundary and must always return a structured allowed/blocked verdict. Cover blocked, terminal, missing,
 provider-unavailable, and admission-fact-missing task states; none may escape as a traceback or mutate the task.
 
-### OCTAREL-BUG-04 — Recovery must ingest a completed worker manifest before replay
+Dry-run now evaluates admission against an in-memory SQLite snapshot with a no-spawn supervisor. Missing or
+non-runnable tasks return a structured blocked verdict; the real task, claim and process state remain untouched.
+
+### OCTAREL-BUG-04 — Recovery must ingest a completed worker manifest before replay — resolved
 
 The `VE-DIR-04` worker process finished with a retained PASS manifest and exit status 0, including its focused
 test evidence and final report, but the durable task remained `RUNNING` with the old PID. After the daemon was
@@ -125,7 +136,13 @@ worker exit, manifest persistence, task-state persistence, usage recording, leas
 advancement; prove that only the minimum unproven stage reruns and that a second write worker is not launched
 for an already completed implementation attempt.
 
-### OCTAREL-BUG-05 — Dashboard must surface daemon liveness separately
+A fresh launch ID is persisted on the task and emitted in its worker manifest. Recovery accepts only a matching
+terminal manifest, preserves route and usage evidence, and advances successful implementation to the runbook's
+remaining acceptance stage. Missing or ambiguous exact-launch evidence stays recoverable or needs owner action;
+it never authorizes an automatic second writer. The existing execution lease independently reclaims proven dead
+owners.
+
+### OCTAREL-BUG-05 — Dashboard must surface daemon liveness separately — resolved
 
 The dashboard service remained healthy on port 8877 while `octarel daemon status` reported `NOT_RUNNING`.
 During that interval the Control Center continued to present the run as actively `RUNNING`, although the exact
@@ -137,7 +154,11 @@ System and Run Detail. A stale `RUNNING` row with a missing exact PID must becom
 not live activity. The UI must not infer daemon liveness from port 8877, and restarting the dashboard must not
 silently start or duplicate the daemon.
 
-### OCTAREL-BUG-06 — Relaunch must reset stale ownership evidence
+Overview, System, workflow and Run Detail now show dashboard serving, daemon authority, scheduler/reconciler
+authority, and PID/create-time worker evidence separately. A persisted RUNNING task with no verified live worker
+is displayed as an actionable recovery warning rather than a live agent.
+
+### OCTAREL-BUG-06 — Relaunch must reset stale ownership evidence — resolved
 
 After stale-PID recovery relaunched the same task with a new live PID, the task row kept
 `ownership_evidence_class=PID_ABSENT` while its `pid` field pointed at the verified replacement process. That
@@ -149,7 +170,10 @@ process may become `RUNNING` only with evidence describing that replacement; the
 fact remains in immutable recovery history/events instead of the live task projection. Cover stale-owner
 reclaim followed by successful relaunch, PID reuse, launch identity-capture failure, and restart persistence.
 
-### OCTAREL-BUG-07 — Active Work must include live acceptance processes
+Every launch replaces the task's PID and ownership evidence together, using `PID_CREATE_TIME` when observed and
+`PID_ONLY` otherwise; prior recovery evidence remains in the transition/event history.
+
+### OCTAREL-BUG-07 — Active Work must include live acceptance processes — resolved
 
 While `VE-DIR-05` was `ACCEPTANCE_PENDING` at the review stage, the daemon had a live exact-tree
 `scripts/ci/local_gate.py` process with a running `pytest` child. The Overview correctly offered
@@ -162,6 +186,10 @@ implementation worker task is already terminal. Overview, workflow, run detail, 
 from one truthful runbook-plus-execution projection and distinguish the active acceptance stage from an idle
 project. Add coverage for synchronous and delegated review, an active local gate with no `RUNNING` worker row,
 stage transitions, daemon restart during acceptance, and truly idle completed/blocked runbooks.
+
+The active acceptance projection now uses the held per-runbook advancement lease or the exact delegated review
+worker's verified process. The same projection feeds workflow, Overview counts, Run Detail and the Active Work
+card; a pending stage without a daemon is labelled stalled rather than running or idle.
 
 ### OCTAREL-BUG-08 — Quick Start must not offer an already-running task as ready — resolved
 

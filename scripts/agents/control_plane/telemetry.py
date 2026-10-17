@@ -165,16 +165,19 @@ def extract_reported_cost(output: str) -> ReportedCost:
 
 ROUTE_SUBSCRIPTION = "SUBSCRIPTION"
 ROUTE_API = "API"
+ROUTE_METERED_SESSION = "METERED_SESSION"
 ROUTE_FREE = "FREE"
 ROUTE_UNKNOWN = "UNKNOWN"
-EXECUTION_ROUTES = frozenset({ROUTE_SUBSCRIPTION, ROUTE_API, ROUTE_FREE, ROUTE_UNKNOWN})
+EXECUTION_ROUTES = frozenset({ROUTE_SUBSCRIPTION, ROUTE_API, ROUTE_METERED_SESSION, ROUTE_FREE, ROUTE_UNKNOWN})
 
 # workers.json ``cost_class`` -> execution route. Hand-maintained on purpose,
 # the same way ``provider_state.py`` hand-seeds its catalog: a new cost_class
 # value defaults to UNKNOWN rather than silently becoming billable or free.
 _COST_CLASS_ROUTES: dict[str, str] = {
     "premium-subscription": ROUTE_SUBSCRIPTION,
-    "metered-configured": ROUTE_API,
+    # A configured CLI session may consume metered capacity, but its worker
+    # contract prohibits API billing. Cost class alone is not charge evidence.
+    "metered-configured": ROUTE_METERED_SESSION,
     "free-verified": ROUTE_FREE,
     "supplemental-configured": ROUTE_FREE,
     "free-dynamic": ROUTE_FREE,
@@ -230,6 +233,8 @@ def compute_cost(
         return CostResult(route=route, usd=None, reason="subscription route: not billed per token")
     if route == ROUTE_FREE:
         return CostResult(route=route, usd=None, reason="free route: no API cost")
+    if route == ROUTE_METERED_SESSION:
+        return CostResult(route=route, usd=None, reason="configured CLI session: incremental charge is not established")
     if route == ROUTE_UNKNOWN:
         return CostResult(route=route, usd=None, reason="execution route unknown: no cost_class mapping")
     # route == ROUTE_API

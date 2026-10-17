@@ -81,6 +81,7 @@ from .pricing import ModelPricing
 from .telemetry import (
     ROUTE_API,
     ROUTE_FREE,
+    ROUTE_METERED_SESSION,
     ROUTE_SUBSCRIPTION,
     ROUTE_UNKNOWN,
     SOURCE_WORKER_CLI,
@@ -118,12 +119,14 @@ REASON_NO_CONTEXT_LIMIT = (
 
 BILLING_SUBSCRIPTION = "SUBSCRIPTION_INCLUDED"
 BILLING_API = "API_BILLED"
+BILLING_METERED_SESSION = "METERED_SESSION"
 BILLING_FREE = "FREE_TIER"
 BILLING_UNKNOWN = "UNKNOWN"
 
 _ROUTE_BILLING: dict[str, str] = {
     ROUTE_SUBSCRIPTION: BILLING_SUBSCRIPTION,
     ROUTE_API: BILLING_API,
+    ROUTE_METERED_SESSION: BILLING_METERED_SESSION,
     ROUTE_FREE: BILLING_FREE,
     ROUTE_UNKNOWN: BILLING_UNKNOWN,
 }
@@ -135,6 +138,7 @@ _ROUTE_BILLING: dict[str, str] = {
 BILLING_LABELS: dict[str, str] = {
     BILLING_SUBSCRIPTION: "Included with subscription",
     BILLING_API: "API-billed",
+    BILLING_METERED_SESSION: "Configured metered session",
     BILLING_FREE: "Free tier",
     BILLING_UNKNOWN: "Billing not established",
 }
@@ -142,6 +146,10 @@ BILLING_LABELS: dict[str, str] = {
 BILLING_REASONS: dict[str, str] = {
     BILLING_SUBSCRIPTION: "subscription-backed CLI session: tokens are covered by the subscription",
     BILLING_API: "metered API route: tokens add to an API bill",
+    BILLING_METERED_SESSION: (
+        "configured CLI session with metered capacity; API billing is prohibited by its worker contract "
+        "and an incremental charge is not established"
+    ),
     BILLING_FREE: "free route: the provider charges nothing for these tokens",
     BILLING_UNKNOWN: (
         "no cost_class maps this route to a billing class, so whether these tokens "
@@ -176,6 +184,9 @@ _EQUIVALENT_REASONS: dict[str, str] = {
     ),
     BILLING_API: (
         "approximate API-equivalent value; the actual charge for this run is reported separately"
+    ),
+    BILLING_METERED_SESSION: (
+        "approximate API-equivalent value only; metered CLI capacity is not proof of an API charge"
     ),
     BILLING_UNKNOWN: (
         "approximate API-equivalent value only; how this run was billed is not established, "
@@ -231,6 +242,7 @@ class WorkerFacts:
     # anywhere else can be served against a worker that never produced it.
     reported_cost_usd: float | None = None
     reported_cost_source: str | None = None
+    api_billing_authorized: bool = False
 
 
 def _token_metrics(record: dict[str, Any]) -> dict[str, Any]:
@@ -460,7 +472,9 @@ def _actual_cost_metric(
             BASIS_BILLING_CLASS,
         )
     if billing_class != BILLING_API:
-        return metric(klass=CLASS_UNKNOWN, reason=BILLING_REASONS[BILLING_UNKNOWN], unit="usd")
+        if facts.cost_class == "optional-overflow" and not facts.api_billing_authorized:
+            return metric(klass=CLASS_UNKNOWN, reason="API billing authorization was not recorded for this route", unit="usd")
+        return metric(klass=CLASS_UNKNOWN, reason=BILLING_REASONS.get(billing_class, BILLING_REASONS[BILLING_UNKNOWN]), unit="usd")
 
     # API-billed. Strongest evidence first: what the worker itself reported
     # this run cost beats what a price list implies it should have cost.
@@ -580,7 +594,14 @@ def build_row(
     )
 
     route = execution_route_for_cost_class(facts.cost_class or "")
+    if route == ROUTE_API and not facts.api_billing_authorized:
+        route = ROUTE_UNKNOWN
     billing_class = billing_for_route(route)
+    billing_reason = (
+        "API route cost class lacks affirmative billing authorization; actual billing is not established"
+        if facts.cost_class == "optional-overflow" and not facts.api_billing_authorized
+        else BILLING_REASONS[billing_class]
+    )
     # Two cells, computed from different evidence, that are never summed
     # together. See the module docstring.
     metrics["estimated_api_equivalent_usd"] = _equivalent_metric(
@@ -644,7 +665,7 @@ def build_row(
         "billing": {
             "class": billing_class,
             "label": BILLING_LABELS[billing_class],
-            "reason": BILLING_REASONS[billing_class],
+            "reason": billing_reason,
             # How well established the classification itself is. A billing
             # class inferred from today's registry is weaker evidence than one
             # the run recorded, and an operator can see which they are reading.
@@ -847,6 +868,7 @@ def build_aggregates(
         by_billing: dict[str, list[dict[str, Any]]] = {
             BILLING_SUBSCRIPTION: [],
             BILLING_API: [],
+            BILLING_METERED_SESSION: [],
             BILLING_FREE: [],
             BILLING_UNKNOWN: [],
         }
@@ -864,6 +886,7 @@ def build_aggregates(
 
         sub_values = equivalents(by_billing[BILLING_SUBSCRIPTION])
         api_values = equivalents(by_billing[BILLING_API])
+        metered_values = equivalents(by_billing[BILLING_METERED_SESSION])
         free_values = equivalents(by_billing[BILLING_FREE])
 
         # Actual spend is drawn *only* from API-billed rows' actual-cost cells.
@@ -893,6 +916,11 @@ def build_aggregates(
                 formula="sum of estimated API-equivalent value over API-billed rows",
                 rows=len(by_billing[BILLING_API]),
             ),
+            "metered_session_equivalent_usd": _sum_cell(
+                metered_values,
+                formula="sum of estimated API-equivalent value over configured metered CLI sessions",
+                rows=len(by_billing[BILLING_METERED_SESSION]),
+            ),
             "actual_api_spend_usd": _sum_cell(
                 spend_values,
                 formula="sum of actual cost over API-billed rows only",
@@ -902,6 +930,7 @@ def build_aggregates(
                 "rows": len(window),
                 "subscription_included": len(by_billing[BILLING_SUBSCRIPTION]),
                 "api_billed": len(by_billing[BILLING_API]),
+                "metered_session": len(by_billing[BILLING_METERED_SESSION]),
                 "free_tier": len(by_billing[BILLING_FREE]),
                 "billing_unknown": len(by_billing[BILLING_UNKNOWN]),
             },

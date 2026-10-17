@@ -18,11 +18,54 @@ from scripts.agents.control_plane.provider_state import (
     failure_attribution,
     is_routable,
     next_state_after_success,
+    probe_and_update,
     reconcile_provider_states,
     seed_provider_states,
 )
 from scripts.agents.control_plane.state import State
-from scripts.agents.registry import REASON_CATALOG_ONLY, load_registry
+from scripts.agents.registry import (
+    REASON_AVAILABLE,
+    REASON_CATALOG_ONLY,
+    REASON_LAUNCH_ENVIRONMENT_ERROR,
+    Worker,
+    load_registry,
+)
+
+
+def test_previously_available_provider_retries_one_ambiguous_local_probe(monkeypatch):
+    registry = load_registry()
+    state = State(":memory:")
+    state.upsert_provider_state(ProviderState(
+        name="grok-build", execution_system="grok", provider="xai",
+        cost_class="metered-configured", state=STATE_AVAILABLE, configured=True,
+    ))
+    calls = iter((REASON_LAUNCH_ENVIRONMENT_ERROR, REASON_AVAILABLE))
+    monkeypatch.setattr(Worker, "availability_reason", lambda _self, **_kwargs: next(calls))
+
+    observed = probe_and_update(state, registry, "grok-build")
+    assert observed.state == STATE_AVAILABLE
+    assert observed.reason == REASON_AVAILABLE
+
+
+def test_repeated_ambiguous_provider_probe_fails_closed(monkeypatch):
+    registry = load_registry()
+    state = State(":memory:")
+    state.upsert_provider_state(ProviderState(
+        name="grok-build", execution_system="grok", provider="xai",
+        cost_class="metered-configured", state=STATE_AVAILABLE, configured=True,
+    ))
+    observed_calls = []
+
+    def ambiguous(_self, **_kwargs):
+        observed_calls.append(True)
+        return REASON_LAUNCH_ENVIRONMENT_ERROR
+
+    monkeypatch.setattr(Worker, "availability_reason", ambiguous)
+
+    observed = probe_and_update(state, registry, "grok-build")
+    assert len(observed_calls) == 2
+    assert observed.state != STATE_AVAILABLE
+    assert observed.reason == REASON_LAUNCH_ENVIRONMENT_ERROR
 
 
 def test_seed_includes_one_row_per_registry_worker_and_every_catalog_entry():

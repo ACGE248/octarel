@@ -13,6 +13,7 @@ import pytest
 from scripts.agents.control_plane.telemetry import (
     ROUTE_API,
     ROUTE_FREE,
+    ROUTE_METERED_SESSION,
     ROUTE_SUBSCRIPTION,
     ROUTE_UNKNOWN,
     SOURCE_CLI_REPORTED,
@@ -90,7 +91,7 @@ def test_estimated_token_usage_is_explicitly_labelled():
     "cost_class,expected",
     [
         ("premium-subscription", ROUTE_SUBSCRIPTION),
-        ("metered-configured", ROUTE_API),
+        ("metered-configured", ROUTE_METERED_SESSION),
         ("free-verified", ROUTE_FREE),
         ("supplemental-configured", ROUTE_FREE),
         ("optional-overflow", ROUTE_API),
@@ -129,7 +130,7 @@ def test_free_route_never_billed():
 
 def test_api_route_without_pricing_is_unknown_cost():
     result = compute_cost(
-        worker_cost_class="metered-configured",
+        worker_cost_class="optional-overflow",
         token_usage=extract_token_usage(json.dumps({"modelUsage": {"m": {"inputTokens": 100, "outputTokens": 100}}})),
         pricing=None,
     )
@@ -142,7 +143,7 @@ def test_api_route_with_unknown_tokens_is_unknown_cost():
         version="v1", worker="grok-build", model="grok-4.6", input_per_1k_usd=1.0, output_per_1k_usd=2.0
     )
     result = compute_cost(
-        worker_cost_class="metered-configured", token_usage=extract_token_usage("not json"), pricing=pricing
+        worker_cost_class="optional-overflow", token_usage=extract_token_usage("not json"), pricing=pricing
     )
     assert result.route == ROUTE_API
     assert result.usd is None
@@ -153,9 +154,19 @@ def test_api_route_with_pricing_and_exact_tokens_computes_cost():
         version="v1", worker="grok-build", model="grok-4.6", input_per_1k_usd=1.0, output_per_1k_usd=2.0
     )
     usage = extract_token_usage(json.dumps({"modelUsage": {"m": {"inputTokens": 1000, "outputTokens": 500}}}))
-    result = compute_cost(worker_cost_class="metered-configured", token_usage=usage, pricing=pricing)
+    result = compute_cost(worker_cost_class="optional-overflow", token_usage=usage, pricing=pricing)
     assert result.route == ROUTE_API
     assert result.usd == pytest.approx(1.0 * 1.0 + 0.5 * 2.0)
+
+
+def test_metered_cli_session_never_claims_incremental_api_cost():
+    pricing = PricingSnapshot(
+        version="v1", worker="grok-build", model="grok-4.6", input_per_1k_usd=1.0, output_per_1k_usd=2.0
+    )
+    usage = extract_token_usage(json.dumps({"modelUsage": {"m": {"inputTokens": 1000, "outputTokens": 500}}}))
+    result = compute_cost(worker_cost_class="metered-configured", token_usage=usage, pricing=pricing)
+    assert result.route == ROUTE_METERED_SESSION
+    assert result.usd is None
 
 
 # -------------------------------------------------------------- budgets

@@ -375,3 +375,11 @@ def test_daemon_authority_probe_tolerates_a_missing_or_removed_file(tmp_path, di
     (disk_state.db_path.parent / lease.DAEMON_AUTHORITY_FILENAME).unlink()
     assert lease.daemon_authority_active(disk_state) is False  # removed: no exception
     assert lease.daemon_authority_active(State(":memory:")) is False
+
+
+def test_acceptance_activity_tracks_the_real_advancement_lock(disk_state):
+    assert lease.runbook_advancement_active(disk_state, "run-one") is False
+    with lease.advancement_lease(disk_state, "run-one") as acquired:
+        assert acquired
+        assert lease.runbook_advancement_active(disk_state, "run-one") is True
+    assert lease.runbook_advancement_active(disk_state, "run-one") is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from scripts.agents.control_plane.models import (
     KIND_WRITE,
     TASK_QUEUED,
     TASK_RUNNING,
+    Runbook,
     Task,
 )
 from scripts.agents.control_plane.recovery import (
@@ -94,6 +96,116 @@ def test_reconcile_never_duplicates_a_task_with_a_live_pid():
     reconcile_tasks(state)
     assert state.get_task("t1").state == TASK_RUNNING
     assert state.get_task("t1").pid == os.getpid()
+
+
+def test_recovery_preserves_completed_worker_manifest_without_relaunch(tmp_path):
+    state = State(":memory:")
+    task = Task(
+        id="completed", task_ref="ENG-AGENT-02", role="primary-implementation",
+        worker="worker-one", state=TASK_RUNNING, pid=_dead_pid(),
+        worktree=str(tmp_path), launch_id="current-launch", runbook_id="rb",
+    )
+    state.upsert_task(task)
+    state.upsert_runbook(Runbook(
+        id="rb", name="Recovered implementation", preset="test-fix", objective="verify",
+        source_ref=task.task_ref, branch="feature", worktree=str(tmp_path),
+        parent_worker=task.worker, max_duration_minutes=60, status="RUNNING", task_id=task.id,
+    ))
+    state.upsert_usage_governance({
+        "runbook_id": "rb", "task_id": task.id,
+        "route_history": [{"worker": task.worker, "status": "RUNNING", "cost_class": "metered-configured"}],
+    })
+    attempt = tmp_path / ".agent-output" / task.task_ref / task.worker / "run-one"
+    attempt.mkdir(parents=True)
+    log = attempt / "logs" / "run.log"
+    log.parent.mkdir()
+    log.write_text(json.dumps({"modelUsage": {"grok-4.6": {"inputTokens": 100, "outputTokens": 20}}, "total_cost_usd": 0.5}), encoding="utf-8")
+    log_ref = str(log.relative_to(tmp_path))
+    (attempt / "manifest.json").write_text(json.dumps({
+        "launch_id": task.launch_id, "task": task.task_ref, "role": task.role,
+        "worker": task.worker, "finished_at": "2026-01-01T00:00:00Z",
+        "result": "PASS", "exit_status": 0,
+        "paths": {"log": log_ref},
+    }), encoding="utf-8")
+
+    assert reconcile_tasks(state)["reclaimed"] == 0
+    saved = state.get_task(task.id)
+    assert saved.state == "SUCCEEDED"
+    assert saved.result == "PASS"
+    assert saved.pid is None
+    usage = state.get_usage_governance("rb")
+    assert usage["telemetry_quality"] == "exact"
+    assert usage["input_tokens"] == 100
+    assert usage["route_history"][0]["reported_cost_usd"] == 0.5
+    assert usage["route_history"][0]["status"] == "SUCCEEDED"
+    runbook = state.get_runbook("rb")
+    assert runbook.status == "IMPLEMENTATION_COMPLETE"
+    assert runbook.acceptance_stage == "test"
+    assert runbook.acceptance_evidence["implementation"]["status"] == "PASS"
+
+
+def test_recovery_does_not_trust_previous_launch_manifest(tmp_path):
+    state = State(":memory:")
+    task = Task(
+        id="retry", task_ref="ENG-AGENT-02", role="primary-implementation",
+        worker="worker-one", state=TASK_RUNNING, pid=_dead_pid(),
+        worktree=str(tmp_path), launch_id="new-launch",
+    )
+    state.upsert_task(task)
+    attempt = tmp_path / ".agent-output" / task.task_ref / task.worker / "run-one"
+    attempt.mkdir(parents=True)
+    (attempt / "manifest.json").write_text(json.dumps({
+        "launch_id": "previous-launch", "task": task.task_ref, "role": task.role,
+        "worker": task.worker, "finished_at": "2026-01-01T00:00:00Z",
+        "result": "PASS", "exit_status": 0,
+    }), encoding="utf-8")
+
+    assert reconcile_tasks(state)["reclaimed"] == 0
+    assert state.get_task(task.id).state == "RECOVERABLE_ORPHAN"
+
+
+def test_recovery_preserves_failed_launch_without_replay(tmp_path):
+    state = State(":memory:")
+    task = Task(
+        id="failed", task_ref="ENG-AGENT-02", role="focused-tests",
+        worker="worker-one", state=TASK_RUNNING, pid=_dead_pid(),
+        worktree=str(tmp_path), launch_id="failed-launch",
+    )
+    state.upsert_task(task)
+    attempt = tmp_path / ".agent-output" / task.task_ref / task.worker / "run-one"
+    attempt.mkdir(parents=True)
+    (attempt / "manifest.json").write_text(json.dumps({
+        "launch_id": task.launch_id, "task": task.task_ref, "role": task.role,
+        "worker": task.worker, "finished_at": "2026-01-01T00:00:00Z",
+        "result": "FAIL", "exit_status": 1,
+    }), encoding="utf-8")
+
+    assert reconcile_tasks(state)["reclaimed"] == 0
+    saved = state.get_task(task.id)
+    assert saved.state == "FAILED"
+    assert saved.result == "FAIL"
+    assert saved.pid is None
+
+
+def test_recovery_requires_owner_action_for_duplicate_launch_manifests(tmp_path):
+    state = State(":memory:")
+    task = Task(
+        id="ambiguous", task_ref="ENG-AGENT-02", role="focused-tests",
+        worker="worker-one", state=TASK_RUNNING, pid=_dead_pid(),
+        worktree=str(tmp_path), launch_id="same-launch",
+    )
+    state.upsert_task(task)
+    for run_id in ("run-one", "run-two"):
+        attempt = tmp_path / ".agent-output" / task.task_ref / task.worker / run_id
+        attempt.mkdir(parents=True)
+        (attempt / "manifest.json").write_text(json.dumps({
+            "launch_id": task.launch_id, "task": task.task_ref, "role": task.role,
+            "worker": task.worker, "finished_at": "2026-01-01T00:00:00Z",
+            "result": "PASS", "exit_status": 0,
+        }), encoding="utf-8")
+
+    assert reconcile_tasks(state)["reclaimed"] == 0
+    assert state.get_task(task.id).state == "OWNER_ACTION_REQUIRED"
 
 
 def _git_repo(tmp_path: Path) -> Path:

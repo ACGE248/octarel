@@ -95,6 +95,13 @@ def test_auth_probe_with_no_stdin_answers_normally(tmp_path):
     assert worker.check_auth(timeout=10) is True
 
 
+def test_unfamiliar_auth_output_is_environment_error_not_logout(tmp_path):
+    grok = load_registry().get("grok-build")
+    cli = _script(tmp_path / "grok", "print('Authenticated session; model list unavailable in this launcher')\n")
+    worker = grok.__class__(**{**grok.__dict__, "cli_bin": str(cli)})
+    assert worker._classify_auth_check(timeout=10) == AuthCheckResult.LAUNCH_ERROR
+
+
 def test_no_provider_probe_bypasses_the_bounded_helper():
     root = Path(__file__).resolve().parents[1] / "scripts" / "agents"
     for rel in ("registry.py", "control_plane/telemetry.py"):

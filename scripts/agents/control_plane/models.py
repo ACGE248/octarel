@@ -168,6 +168,7 @@ class Task:
     # it is deliberately not a second status. The evidence class distinguishes
     # pid-only observation from pid/create-time identity proof.
     pid_create_time: float | None = None
+    launch_id: str | None = None
     ownership_evidence_class: str = "NOT_REPORTED"
     recovery_attempts: int = 0
     recovery_max_attempts: int = 3
@@ -228,6 +229,7 @@ class Task:
             "fallback_automatic": None if self.fallback_automatic is None else (1 if self.fallback_automatic else 0),
             "stale_recovered": 1 if self.stale_recovered else 0,
             "pid_create_time": self.pid_create_time,
+            "launch_id": self.launch_id,
             "ownership_evidence_class": self.ownership_evidence_class,
             "recovery_attempts": self.recovery_attempts,
             "recovery_max_attempts": self.recovery_max_attempts,
@@ -284,6 +286,7 @@ class Task:
             fallback_automatic=(bool(row["fallback_automatic"]) if row["fallback_automatic"] is not None else None) if "fallback_automatic" in row.keys() else None,
             stale_recovered=bool(row["stale_recovered"]) if "stale_recovered" in row.keys() else False,
             pid_create_time=row["pid_create_time"] if "pid_create_time" in row.keys() else None,
+            launch_id=row["launch_id"] if "launch_id" in row.keys() else None,
             ownership_evidence_class=(
                 row["ownership_evidence_class"]
                 if "ownership_evidence_class" in row.keys()

@@ -128,11 +128,15 @@ run added to a bill. They are separate fields in the read model, not one value f
 aggregates never add one to the other.
 
 Which of the two is meaningful is decided by a **billing class** derived from the worker's `cost_class`
-through the execution route routing already uses: subscription-included, API-billed, free tier, or unknown.
+through the execution route routing already uses: subscription-included, authorized API-billed,
+configured metered CLI session, free tier, or unknown.
 A subscription or free route reports `$0.00` incremental cost *because that classification establishes it*;
 an unclassified route reports unknown, never `$0.00`, since missing evidence is not a claim that a run was
 free. A run records its `cost_class` in `route_history` at launch, so a later `workers.json` edit cannot
 relabel what past runs cost, and a fallback is attributed to the billing class that actually executed.
+`metered-configured` is a CLI session with metered capacity; it has an estimated API-equivalent value but
+no established incremental API charge. An `optional-overflow` route is presented as API-billed only when
+its attempt records affirmative authorization and its worker contract permits API billing.
 
 Where a worker CLI states its own per-run cost in structured output, that figure is preferred (OCTAREL-UI-08,
 issue #44). Precedence for an API-billed route is strongest evidence first: a cost the worker reported
@@ -181,6 +185,17 @@ killed, so a crashed owner never needs stale-lease cleanup. `POST /api/runbooks/
 returns 409 with the owner record instead of advancing; the overnight tick's successor advancement withholds and retries next tick when another process owns the runbook. Lease file names carry a hash of the runbook id so distinct ids never share a lease. The daemon additionally holds `daemon-authority.lock` for its
 lifetime; while another process holds it the dashboard loop only polls its own subprocesses and never reconciles, so the
 dashboard stays a monitoring surface. Operator pause/resume/stop remain plain state writes that the next owner honours.
+
+Each worker launch stores a fresh launch ID on the task and passes it to the wrapper manifest. Startup and periodic
+reconciliation accept a completed manifest only when its launch ID, task reference, role and worker match the dead
+task. A matching PASS with exit status 0 advances the task to implementation complete and preserves its usage and
+route evidence; missing or ambiguous exact-launch evidence remains recoverable or requires owner action without an
+automatic second writer. Every new launch replaces stale PID ownership evidence with evidence for its new process.
+
+The Control Center reports dashboard serving, daemon authority, scheduler/reconciler authority and verified worker
+processes as separate facts. Acceptance activity is observed through the held per-runbook advancement lease or the
+exact delegated review task's live process. A persisted acceptance stage without active authority is shown as waiting
+or stalled, never inferred to be a running process from the runbook status alone.
 
 ## Runtime polling and process ownership
 

@@ -25,6 +25,7 @@
     tasks: [],
     flow: { nodes: [], edges: [], concurrent_running: [] },
     workflow: { task: null, orchestrator: null, stages: [], worktrees: [], results: [] },
+    runtimeHealth: null,
     providers: [],
     models: [],
     worktrees: [],
@@ -534,6 +535,7 @@
   const BILLING_CHIP_CLASS = {
     SUBSCRIPTION_INCLUDED: "is-subscription",
     API_BILLED: "is-api",
+    METERED_SESSION: "is-unestablished",
     FREE_TIER: "is-free",
     UNKNOWN: "is-unestablished",
   };
@@ -545,6 +547,7 @@
     SUBSCRIPTION_INCLUDED: "Approximate. Not a charge and not billed.",
     FREE_TIER: "Approximate. Not a charge and not billed.",
     API_BILLED: "Approximate. The actual charge is reported separately.",
+    METERED_SESSION: "Approximate. Metered CLI capacity is not an API charge.",
     UNKNOWN: "Approximate. Whether this run was charged is not established.",
   };
 
@@ -691,6 +694,7 @@
     ["subscription_equivalent_usd", "Included value (est.)", "estimate"],
     ["free_equivalent_usd", "Free-route value (est.)", "estimate"],
     ["api_equivalent_usd", "API-billed value (est.)", "estimate"],
+    ["metered_session_equivalent_usd", "Metered session value (est.)", "estimate"],
     ["actual_api_spend_usd", "Actual API spend", "actual"],
   ];
 
@@ -745,7 +749,7 @@
             class: "usage-window-count",
             text:
               `${counts.rows || 0} run(s) · ${counts.subscription_included || 0} included · ` +
-              `${counts.api_billed || 0} API-billed · ${counts.free_tier || 0} free` +
+              `${counts.api_billed || 0} API-billed · ${counts.metered_session || 0} metered session · ${counts.free_tier || 0} free` +
               (counts.billing_unknown ? ` · ${counts.billing_unknown} billing unknown` : ""),
           }),
         ]),
@@ -2948,8 +2952,9 @@
       const nextQueued = queued[0];
       // Active Work is only for work that is live. A finished task is history: say so
       // instead of presenting it as the current task.
-      const LIVE = ["RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED"];
-      const isLive = !!t && (LIVE.includes(t.state) || (wf.stages || []).some((x) => LIVE.includes(x.state)));
+      const LIVE = ["RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED", "WAITING_EXTERNAL", "WAITING_APPROVAL", "WAITING_PROVIDER", "OWNER_ACTION_REQUIRED", "RECOVERABLE_ORPHAN"];
+      const acceptance = wf && wf.acceptance;
+      const isLive = !!t && (acceptance || LIVE.includes(t.state) || (wf.stages || []).some((x) => LIVE.includes(x.state)));
       if (!t || !isLive) {
         if (stateEl) stateEl.textContent = "Idle";
         const last = t ? `Last activity: ${t.title || t.id} — ${statusText(t.state).toLowerCase()}${t.updated_at ? ` ${relativeTime(t.updated_at)}` : ""}.` : null;
@@ -2963,7 +2968,8 @@
         body.appendChild(open);
         return;
       }
-      const running = (wf.stages || []).filter((x) => x.state === "RUNNING");
+      const running = (wf.stages || []).filter((x) => x.state === "RUNNING" && x.worker_ownership === "LIVE");
+      const stale = (wf.stages || []).filter((x) => x.state === "RUNNING" && x.worker_ownership !== "LIVE");
       const troubled = (wf.stages || []).filter((x) => ["BLOCKED", "FAILED"].includes(x.state));
       const phases = phaseModel();
       // The orchestrator (Plan) runs throughout; the working stage is the first non-Plan phase in motion.
@@ -2973,7 +2979,7 @@
       const currentIndex = current ? phases.indexOf(current) : -1;
       const next = phases.slice(currentIndex + 1).find((ph) => !["complete", "skipped"].includes(ph.kind));
       const lead = running[0] || troubled[0];
-      if (stateEl) stateEl.textContent = `${running.length} running${troubled.length ? ` · ${troubled.length} need attention` : ""}`;
+      if (stateEl) stateEl.textContent = `${running.length} workers running${acceptance ? ` · acceptance ${acceptance.execution.toLowerCase()}` : ""}${stale.length ? ` · ${stale.length} worker status unverified` : ""}${troubled.length ? ` · ${troubled.length} need attention` : ""}`;
 
       const head = el("div", { class: "active-work-head" }, [
         el("div", { class: "active-work-title" }, [
@@ -2984,7 +2990,8 @@
       ]);
       const facts = el("dl", { class: "active-work-facts" });
       const addFact = (k, v) => { if (v) facts.appendChild(el("div", { class: "active-work-fact" }, [el("dt", { text: k }), el("dd", { text: String(v) })])); };
-      addFact("Stage", current ? `${current.label} — ${STATE_KINDS[current.kind].label}` : "Between stages");
+      addFact("Stage", acceptance ? `Acceptance: ${String(acceptance.stage || "pending").replaceAll("_", " ")} — ${acceptance.execution.toLowerCase()}` : current ? `${current.label} — ${STATE_KINDS[current.kind].label}` : "Between stages");
+      addFact("Daemon", state.runtimeHealth?.daemon || "UNKNOWN");
       if (lead) addFact("Agent", `${displayName(lead.worker)}${running.length > 1 ? ` +${running.length - 1} more` : ""}`);
       if (lead) addFact("Provider / model", [lead.execution_system, lead.provider, lead.model].filter(Boolean).join(" · "));
       const elapsed = elapsedFrom(t.started_at);
@@ -2994,6 +3001,9 @@
       addFact("Branch / worktree", (tree && (tree.branch || tree.path)) || (leadTask && leadTask.worktree));
       addFact("Next expected", next ? `${next.label}${next.entries[0] && next.entries[0].item.worker ? ` (${displayName(next.entries[0].item.worker)})` : ""}` : (running.length ? "Completion" : null));
       body.append(head, facts);
+
+      if (acceptance?.execution === "STALLED") body.appendChild(el("p", { class: "active-work-block blocked", role: "status", text: "Acceptance is waiting because the advancement daemon is not running. Open System to inspect it." }));
+      stale.forEach((item) => body.appendChild(el("p", { class: "active-work-block blocked", role: "status", text: `${item.label} has no verified live worker process. Open the run for recovery.` })));
 
       troubled.forEach((item) => {
         const task = (state.tasks || []).find((x) => x.id === item.id) || {};
@@ -3031,7 +3041,9 @@
       }, [
         el("div", { class: "workflow-stage-head" }, [icon, el("div", { class: "workflow-stage-title" }, [el("strong", { text: item.label }), el("span", { text: meta })])]),
         item.provider && item.worker ? el("div", { class: "workflow-stage-agent", text: `${displayName(item.worker)} · ${item.provider}` }) : null,
-        el("p", { class: "workflow-current", text: item.current_action || item.current_file || (item.state === "RUNNING" ? "Activity details not reported" : "Waiting for activity") }),
+        el("p", { class: "workflow-current", text: item.worker && item.state === "RUNNING" && item.worker_ownership !== "LIVE"
+          ? "Worker process is not verified; recovery is needed"
+          : item.current_action || item.current_file || (item.state === "RUNNING" ? "Activity details not reported" : "Waiting for activity") }),
         progressBar(item),
         el("div", { class: "workflow-card-foot" }, [statusPill(item.state), item.subagents && item.subagents.length ? el("span", { text: `${item.subagents.length} sub-agent${item.subagents.length === 1 ? "" : "s"}` }) : null]),
       ]);
@@ -3441,22 +3453,26 @@
 
   async function refreshOverview() {
     const data = await getJSON("/api/overview");
+    state.runtimeHealth = data.runtime_health || null;
     const wq = data.wake_queue || {};
     const wqAge = wq.oldest_pending_age_seconds;
     const wqLabel = `${wq.pending ?? 0} pending${wqAge == null ? "" : ` · oldest ${Math.round(wqAge)}s`}${wq.poisoned ? ` · ${wq.poisoned} poisoned` : ""}`;
     renderKV("overview-body", [
-      ["Active", data.task_count],
+      ["Active", data.active_work_count ?? data.task_count],
+      ["Acceptance", `${data.acceptance_counts?.running ?? 0} running · ${data.acceptance_counts?.waiting ?? 0} waiting · ${data.acceptance_counts?.stalled ?? 0} stalled`, data.acceptance_counts?.stalled ? "warn" : undefined],
       ["Queued", data.task_counts?.queued ?? 0],
       ["Paused", data.task_counts?.paused ?? 0],
       ["Needs attention", data.task_counts?.needs_attention ?? 0],
       ["Providers", `${data.configured_provider_count}/${data.provider_count} configured`],
       ["Stop after current", data.stop_after_current ? "yes" : "no"],
       ["Wake queue", wqLabel, wq.poisoned ? "warn" : undefined],
+      ["Daemon", data.runtime_health?.daemon || "UNKNOWN", data.runtime_health?.daemon === "NOT_RUNNING" ? "warn" : undefined],
     ]);
     const badge = document.getElementById("app-status");
     const status = data.octascene_app_status || "UNKNOWN";
     badge.textContent = `OctaScene app: ${status}`;
     badge.className = `badge badge-${String(status).toLowerCase()}`;
+    renderSystemHealth();
   }
 
   async function refreshWorkers() {
@@ -4776,19 +4792,28 @@
   function initPreparedRunActions() {
     document.getElementById("prepared-run-cancel").addEventListener("click", hidePreparedRun);
     document.getElementById("prepared-run-start").addEventListener("click", async (evt) => {
-      const key = evt.currentTarget.dataset.key;
+      const button = evt.currentTarget;
+      const key = button.dataset.key;
       const feedback = document.getElementById("prepared-run-feedback");
-      evt.currentTarget.disabled = true;
+      button.disabled = true;
       feedback.textContent = "Starting…";
-      const result = await postCommand("quickstart_start", { key });
-      if (result.ok && result.body && result.body.ok) {
-        feedback.textContent = result.body.message || "Started.";
-        hidePreparedRun();
-        showView("view-runs");
-        await Promise.all([refreshQuickStart(), refreshRunbooks()]);
-      } else {
-        feedback.textContent = `Error: ${(result.body && (result.body.detail || result.body.message)) || "could not start"}`;
-        evt.currentTarget.disabled = false;
+      try {
+        const result = await postCommand("quickstart_start", { key });
+        if (result.ok && result.body && result.body.ok) {
+          const runbookId = result.body.data?.runbook_id;
+          hidePreparedRun();
+          showView("view-runs");
+          await Promise.all([refreshQuickStart(), refreshRunbooks()]);
+          if (runbookId) focusRunbook(runbookId);
+        } else {
+          feedback.textContent = `Error: ${(result.body && (result.body.detail || result.body.message)) || "could not start"}`;
+          await Promise.allSettled([refreshQuickStart(), refreshRunbooks()]);
+        }
+      } catch (error) {
+        feedback.textContent = `Error: ${error?.message || "could not start"}`;
+        await Promise.allSettled([refreshQuickStart(), refreshRunbooks()]);
+      } finally {
+        button.disabled = false;
       }
     });
   }
@@ -5364,6 +5389,9 @@
       el("dt", { text: "Task" }), el("dd", { text: linkedTask?.task_ref || run.task_id || "NOT_REPORTED" }),
       el("dt", { text: "Worker" }), el("dd", { text: worker || "NOT_REPORTED" }),
       el("dt", { text: "Started" }), el("dd", { text: run.started_at || "NOT_REPORTED" }),
+      el("dt", { text: "Daemon" }), el("dd", { text: state.runtimeHealth?.daemon || "UNKNOWN" }),
+      el("dt", { text: "Worker process" }), el("dd", { text: linkedTask?.process_ownership || (linkedTask?.state === "RUNNING" ? "UNVERIFIED" : "NOT_ACTIVE") }),
+      el("dt", { text: "Acceptance" }), el("dd", { text: run.acceptance_execution === "NOT_ACTIVE" ? "Not active" : `${run.acceptance_stage || "pending"} · ${run.acceptance_execution || "UNKNOWN"}` }),
     ]);
     const sessionTargets = {};
     [
@@ -5873,6 +5901,10 @@
     const box = document.getElementById("system-summary");
     if (!box) return;
     const problems = [];
+    const runtime = state.runtimeHealth || {};
+    if (runtime.daemon === "NOT_RUNNING") problems.push(["Daemon", "Advancement daemon is not running; queued and acceptance work will not progress"]);
+    if (runtime.scheduler_reconciler === "STALE") problems.push(["Scheduler", "Daemon authority is held, but its reconciliation heartbeat is stale"]);
+    if (runtime.worker_stale_or_unverified > 0) problems.push(["Workers", `${runtime.worker_stale_or_unverified} running task${runtime.worker_stale_or_unverified === 1 ? " has" : "s have"} no verified live worker process`]);
     const r = state.resources || {};
     if (r.available) {
       if (r.cpu_percent >= 90) problems.push(["Runtime", `CPU is at ${r.cpu_percent}%`]);
@@ -5895,6 +5927,7 @@
     if (errors.length) problems.push(["Diagnostics", `${errors.length} recent error event${errors.length === 1 ? "" : "s"}`]);
 
     box.innerHTML = "";
+    box.appendChild(el("p", { class: "hint", text: `Dashboard: serving · Daemon: ${runtime.daemon || "UNKNOWN"} · Scheduler/reconciler: ${runtime.scheduler_reconciler || "UNKNOWN"} · Verified workers: ${runtime.worker_live ?? "UNKNOWN"}` }));
     box.dataset.problems = String(problems.length);
     if (!problems.length) {
       box.appendChild(el("p", { class: "system-ok" }, [el("span", { "aria-hidden": "true", text: "✓ " }), document.createTextNode("No warnings — resources, repository, services and diagnostics look healthy.")]));

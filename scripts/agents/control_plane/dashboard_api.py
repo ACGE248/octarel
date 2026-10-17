@@ -64,7 +64,12 @@ from .context_cursor import (
     REASON_TREE_CHANGED,
     context_reference,
 )
-from .models import utc_now_iso
+from .models import (
+    RUNBOOK_ACCEPTANCE_PENDING,
+    RUNBOOK_IMPLEMENTATION_COMPLETE,
+    TASK_RUNNING,
+    utc_now_iso,
+)
 from .operations import (
     AppLifecycleManager,
     OperationError,
@@ -433,6 +438,9 @@ def _resources_snapshot(repo_root: Path) -> dict[str, Any]:
 
 def _task_to_dict(task: Any, *, superseded: bool = False, state: Any = None) -> dict[str, Any]:
     from .models import task_projection
+    from .recovery import ownership_proof_for_task
+
+    proof = ownership_proof_for_task(task, allow_subprocess=False) if task.state == TASK_RUNNING else None
 
     execution_lease_facts = None
     if state is not None and task.worktree:
@@ -458,6 +466,8 @@ def _task_to_dict(task: Any, *, superseded: bool = False, state: Any = None) -> 
         "priority": task.priority,
         "dependencies": list(task.dependencies),
         "pid": task.pid,
+        "process_ownership": proof.verdict if proof else "NOT_ACTIVE",
+        "process_evidence_class": proof.evidence_class if proof else "NOT_APPLICABLE",
         "worktree": task.worktree,
         "result": task.result,
         "last_error": task.last_error,
@@ -487,6 +497,26 @@ def _task_to_dict(task: Any, *, superseded: bool = False, state: Any = None) -> 
         "selected_worker_reason": task.selected_worker_reason,
         "selected_provider": task.selected_provider,
         "selection_alternatives": list(task.selection_alternatives),
+    }
+
+
+def _acceptance_execution(state: Any, runbook: Any) -> dict[str, str]:
+    """Project acceptance activity from the held lease or exact review task."""
+
+    from .advancement_lease import daemon_authority_observed, runbook_advancement_active
+    from .recovery import OWNERSHIP_LIVE, ownership_proof_for_task
+
+    if runbook_advancement_active(state, runbook.id) is True:
+        return {"stage": runbook.acceptance_stage, "execution": "RUNNING", "source": "RUNBOOK_ADVANCEMENT_LEASE"}
+    review = (runbook.acceptance_evidence or {}).get("review") or {}
+    review_task = state.get_task(review.get("task_id")) if review.get("task_id") else None
+    if review_task and review_task.state == TASK_RUNNING and ownership_proof_for_task(review_task, allow_subprocess=False).verdict == OWNERSHIP_LIVE:
+        return {"stage": runbook.acceptance_stage, "execution": "RUNNING", "source": "REVIEW_WORKER_PROCESS"}
+    daemon = daemon_authority_observed(state)
+    return {
+        "stage": runbook.acceptance_stage,
+        "execution": "WAITING" if daemon is True else "STALLED" if daemon is False else "UNKNOWN",
+        "source": "DAEMON_AUTHORITY" if daemon is not None else "NOT_OBSERVED",
     }
 
 
@@ -537,6 +567,10 @@ def _runbook_to_dict(runbook: Any, *, state: Any = None, registry: Any = None) -
         "acceptance_evidence": runbook.acceptance_evidence,
     }
     if state is not None:
+        if runbook.status in {RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING}:
+            body["acceptance_execution"] = _acceptance_execution(state, runbook)["execution"]
+        else:
+            body["acceptance_execution"] = "NOT_ACTIVE"
         # OCTAREL-OPS-02: persisted advancement decision (never recomputed on read).
         body["advancement"] = state.get_advancement(runbook.id)
     if state is not None and registry is not None:
@@ -630,7 +664,7 @@ def _provider_to_dict(provider: Any, *, registry: Any = None, tasks: list[Any] |
         "free-verified": "Free",
         "supplemental-configured": "Free",
         "free-dynamic": "Free",
-        "metered-configured": "API",
+        "metered-configured": "Metered CLI session",
         "optional-overflow": "Disabled",
         "catalog-only": "Not Configured",
     }.get(provider.cost_class, "Unknown")
@@ -1141,6 +1175,44 @@ def create_app(
         _runs, old_tasks = superseded()
         return [t for t in scoped_tasks() if t.id not in old_tasks]
 
+    def runtime_health() -> dict[str, Any]:
+        from .advancement_lease import (
+            daemon_authority_observed,
+            runbook_advancement_active,
+        )
+        from .recovery import OWNERSHIP_LIVE, ownership_proof_for_task
+
+        daemon = daemon_authority_observed(ctx.state)
+        tick_at = ctx.state.get_control_setting("daemon_last_reconcile_at")
+        tick_age = None
+        if tick_at:
+            try:
+                tick_age = max(0.0, (_dt.datetime.now(_dt.timezone.utc) - _dt.datetime.fromisoformat(tick_at)).total_seconds())
+            except ValueError:
+                pass
+        acceptance_busy = daemon is True and any(
+            runbook_advancement_active(ctx.state, rb.id) is True
+            for rb in scoped_runbooks()
+            if rb.status in {RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING}
+        )
+        reconciler = (
+            "NOT_RUNNING" if daemon is False else "BUSY_ACCEPTANCE" if acceptance_busy
+            else "RUNNING" if daemon is True and tick_age is not None and tick_age <= 30
+            else "STALE" if daemon is True and tick_age is not None
+            else "UNKNOWN"
+        )
+        running = [task for task in current_tasks() if task.state == TASK_RUNNING]
+        live = sum(ownership_proof_for_task(task, allow_subprocess=False).verdict == OWNERSHIP_LIVE for task in running)
+        return {
+            "dashboard": "SERVING",
+            "daemon": "RUNNING" if daemon is True else "NOT_RUNNING" if daemon is False else "UNKNOWN",
+            "scheduler_reconciler": reconciler,
+            "last_reconcile_at": tick_at,
+            "last_reconcile_age_seconds": tick_age,
+            "worker_live": live,
+            "worker_stale_or_unverified": len(running) - live,
+        }
+
     def scoped_events(limit: int) -> list[Any]:
         return ctx.state.list_events(limit=limit, project_id=ctx.selected_project_id)
 
@@ -1205,13 +1277,21 @@ def create_app(
         counts = {key: 0 for key in ("ACTIVE", "QUEUED", "PAUSED", "NEEDS_ATTENTION", "HISTORICAL")}
         for task in tasks:
             counts["HISTORICAL" if task.id in old_tasks else task_projection(task.state)] += 1
+        acceptance_counts = {"RUNNING": 0, "WAITING": 0, "STALLED": 0, "UNKNOWN": 0}
+        for runbook in scoped_runbooks():
+            if runbook.status in {RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING}:
+                execution = _acceptance_execution(ctx.state, runbook)["execution"]
+                acceptance_counts[execution] += 1
         return {
             "task_count": counts["ACTIVE"],
+            "active_work_count": counts["ACTIVE"] + acceptance_counts["RUNNING"],
+            "acceptance_counts": {key.lower(): value for key, value in acceptance_counts.items()},
             "task_counts": {key.lower(): value for key, value in counts.items()},
             "provider_count": len(providers),
             "configured_provider_count": sum(1 for p in providers if p.configured),
             "stop_after_current": ctx.stop_after_current,
             "octascene_app_status": app_lifecycle.status()["status"],
+            "runtime_health": runtime_health(),
             # ENG-PC-03 (issue #31): local state only, zero AI/provider calls.
             "wake_queue": wake_queue_depth(ctx.state, project_id=ctx.selected_project_id).as_dict(),
         }
@@ -1551,11 +1631,18 @@ def create_app(
 
     @app.get("/api/processes")
     def processes() -> list[dict[str, Any]]:
-        return [
-            {"task_id": t.id, "pid": t.pid, "worker": t.worker, "worktree": t.worktree}
-            for t in scoped_tasks()
-            if t.pid
-        ]
+        from .recovery import ownership_proof_for_task
+
+        rows = []
+        for task in scoped_tasks():
+            if task.pid:
+                proof = ownership_proof_for_task(task, allow_subprocess=False)
+                rows.append({
+                    "task_id": task.id, "pid": task.pid, "worker": task.worker,
+                    "worktree": task.worktree, "ownership": proof.verdict,
+                    "evidence_class": proof.evidence_class,
+                })
+        return rows
 
     @app.get("/api/workers")
     def workers() -> dict[str, Any]:
@@ -1685,6 +1772,8 @@ def create_app(
         null/empty; configured providers are never promoted to active stages.
         """
 
+        from .recovery import ownership_proof_for_task
+
         all_tasks = current_tasks()  # history (accepted/superseded) never becomes "the current task"
         active_states = {
             "RUNNING", "QUEUED", "PENDING", "PAUSED", "BLOCKED",
@@ -1695,11 +1784,16 @@ def create_app(
         for item in all_tasks:
             groups.setdefault(item.task_ref, []).append(item)
         if not groups:
-            return {"task": None, "orchestrator": None, "stages": [], "worktrees": [], "results": []}
+            return {"task": None, "orchestrator": None, "stages": [], "worktrees": [], "results": [], "acceptance": None}
+
+        active_runbook_task_ids = {
+            rb.task_id for rb in scoped_runbooks()
+            if rb.status in {RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING}
+        }
 
         def group_rank(pair: tuple[str, list[Any]]) -> tuple[int, str]:
             _ref, items = pair
-            active = any(item.state in active_states for item in items)
+            active = any(item.state in active_states or item.id in active_runbook_task_ids for item in items)
             newest = max((item.updated_at for item in items), default="")
             return (1 if active else 0, newest)
 
@@ -1713,10 +1807,13 @@ def create_app(
         # Runbook and let an older failed task determine the workflow state.
         runbooks = [rb for rb in scoped_runbooks() if rb.task_id in selected_ids]
         runbook = (
-            max(runbooks, key=lambda rb: (1 if rb.status in {"RUNNING", "PAUSED", "STOPPING"} else 0, rb.updated_at))
+            max(runbooks, key=lambda rb: (1 if rb.status in {"RUNNING", "PAUSED", "STOPPING", RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING} else 0, rb.updated_at))
             if runbooks
             else None
         )
+        acceptance = None
+        if runbook and runbook.status in {RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING}:
+            acceptance = _acceptance_execution(ctx.state, runbook)
         registry = ctx.registry.workers
         stage_labels = {
             "primary-implementation": "Implementation",
@@ -1758,6 +1855,7 @@ def create_app(
                     "category": item.role,
                     "label": stage_labels.get(item.role, item.role.replace("-", " ").title()),
                     "state": item.state,
+                    "worker_ownership": ownership_proof_for_task(item, allow_subprocess=False).verdict if item.state == TASK_RUNNING else "NOT_APPLICABLE",
                     "worker": item.worker,
                     "execution_system": worker.execution_system if worker else None,
                     "provider": worker.provider if worker else None,
@@ -1796,6 +1894,7 @@ def create_app(
             "stages": stages,
             "worktrees": list(worktrees.values()),
             "results": results,
+            "acceptance": acceptance,
         }
 
     @app.get("/api/providers")

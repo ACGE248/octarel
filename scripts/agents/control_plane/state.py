@@ -627,6 +627,7 @@ _TASKS_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     # whose authoritative lifecycle state they qualify. Consequently there is
     # no new table to add to _PROJECT_SCOPED_TABLES or to keep globally scoped.
     ("pid_create_time", "REAL"),
+    ("launch_id", "TEXT"),
     ("ownership_evidence_class", "TEXT NOT NULL DEFAULT 'NOT_REPORTED'"),
     ("recovery_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("recovery_max_attempts", "INTEGER NOT NULL DEFAULT 3"),
@@ -1331,6 +1332,14 @@ class State:
         else:
             self._conn.commit()
         return adopted
+
+    @_serialized
+    def planning_snapshot(self) -> "State":
+        """Copy the durable state into memory for a zero-write admission preview."""
+
+        snapshot = State(":memory:")
+        self._conn.backup(snapshot._conn)
+        return snapshot
 
     @_serialized
     def close(self) -> None:

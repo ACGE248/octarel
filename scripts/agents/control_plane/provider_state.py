@@ -341,6 +341,14 @@ def probe_and_update(state: "State", registry: Registry, name: str) -> ProviderS
     if provider is None:
         return None
     reason = worker.availability_reason()
+    if reason == REASON_LAUNCH_ENVIRONMENT_ERROR and provider.state in ROUTABLE_STATES:
+        # A stale AVAILABLE row must not authorize launch after an ambiguous
+        # check. Retry the same harmless local probe once before demoting it;
+        # an immediately successful identical check wins, while two ambiguous
+        # checks still fail closed with the truthful environment error.
+        retry_reason = worker.availability_reason()
+        if retry_reason != REASON_LAUNCH_ENVIRONMENT_ERROR:
+            reason = retry_reason
     provider.last_probe_at = utc_now_iso()
     if provider.configured and provider.state != STATE_COST_BLOCKED:
         provider.reason = reason

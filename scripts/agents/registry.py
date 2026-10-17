@@ -317,9 +317,12 @@ class Worker:
             # visibility failure, not a truthful logout signal.
             return AuthCheckResult.LAUNCH_ERROR
         if self.auth_check_success_pattern:
-            if self.auth_check_success_pattern.lower() in combined:
+            if result.returncode == 0 and self.auth_check_success_pattern.lower() in combined:
                 return AuthCheckResult.AUTHENTICATED
-            return AuthCheckResult.EXPLICIT_NOT_AUTHENTICATED
+            # An unfamiliar status response is not affirmative logout
+            # evidence. A restricted launch environment can produce a
+            # different, non-empty response from the same authenticated CLI.
+            return AuthCheckResult.LAUNCH_ERROR
         return AuthCheckResult.AUTHENTICATED if result.returncode == 0 else AuthCheckResult.EXPLICIT_NOT_AUTHENTICATED
 
     def check_auth(self, *, timeout: float = 5.0) -> bool | None:

@@ -89,6 +89,26 @@ def _failing_run_gate(**kwargs):
     return {"result": "fail", "prerequisite_failures": ["a required test failed"], "evidence_path": None}
 
 
+def test_recovered_done_stage_terminalizes_without_rerunning_acceptance(tmp_path):
+    state = State(":memory:")
+    rb, task = _implementation_runbook(state, tmp_path)
+    rb.status = RUNBOOK_ACCEPTANCE_PENDING
+    rb.acceptance_stage = acceptance.STAGE_DONE
+    rb.acceptance_evidence = {
+        stage: {"status": "PASS"}
+        for stage in ("implementation", "test", "review", "checkpoint", "pr_readiness")
+    }
+    state.upsert_runbook(rb)
+
+    acceptance.advance_acceptance_pipeline(
+        state=state, repo_root=tmp_path, registry=None, scheduler=None,
+        supervisor=None, runbook=rb, task=task,
+    )
+
+    assert rb.status == RUNBOOK_SUCCEEDED
+    assert rb.ended_at
+
+
 def test_acceptance_review_dispatch_honors_pinned_route_on_initial_and_resumed_stage(tmp_path):
     repo = _git_repo(tmp_path)
     state = State(":memory:")

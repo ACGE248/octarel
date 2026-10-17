@@ -370,7 +370,8 @@ def test_control_plane_and_operator_command_share_managed_dispatch(tmp_path):
     )
     assert result.ok
     assert result.data["admission"] == "ADMITTED"
-    assert supervisor.launched == ["manual"]
+    assert supervisor.launched == []
+    assert state.get_task("manual") is None
 
     caps = apply_command(
         ctx, "set_concurrency", global_count=3, write_count=2, read_count=2,

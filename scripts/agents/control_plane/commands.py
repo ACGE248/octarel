@@ -24,6 +24,7 @@ from .models import (
     TASK_PAUSED,
     TASK_PENDING,
     TASK_QUEUED,
+    TASK_RUNNING,
     Runbook,
     Task,
     utc_now_iso,
@@ -310,6 +311,15 @@ def cmd_enqueue(
     return CommandResult(ok=True, message=f"{task_id} enqueued", data={"task_id": task_id})
 
 
+class _PlanningSupervisor:
+    """Admission preview endpoint: the wrapper is never spawned."""
+
+    @staticmethod
+    def launch_task(task: Task, *, dry_run: bool = False) -> Task:
+        task.state = TASK_RUNNING
+        return task
+
+
 def cmd_start(ctx: CommandContext, *, task_id: str | None = None, dry_run: bool = False) -> CommandResult:
     """Start one explicit task, or the next scheduler-eligible task when omitted.
 
@@ -327,10 +337,32 @@ def cmd_start(ctx: CommandContext, *, task_id: str | None = None, dry_run: bool 
         task = runnable[0]
         task_id = task.id
     else:
-        task = _require_task(ctx, task_id)
-        held = ctx.held_task_ids
-        held.discard(task_id)
-        ctx.set_held_task_ids(held)
+        task = ctx.state.get_task(task_id) if dry_run else _require_task(ctx, task_id)
+        if task is None:
+            return CommandResult(ok=False, message=f"task {task_id!r} does not exist", data={"task": task_id, "admission": "BLOCKED"})
+        if not dry_run:
+            held = ctx.held_task_ids
+            held.discard(task_id)
+            ctx.set_held_task_ids(held)
+
+    if dry_run:
+        # The production admission path records claims, decisions and task
+        # states. Preview it on a SQLite backup and substitute a no-spawn
+        # supervisor so even a successful verdict leaves durable state intact.
+        with ctx.state.planning_snapshot() as planning_state:
+            planning_task = planning_state.get_task(task.id)
+            if planning_task is None:
+                return CommandResult(ok=False, message=f"task {task.id!r} disappeared", data={"task": task.id, "admission": "BLOCKED"})
+            admission = managed_admit(
+                state=planning_state, registry=ctx.registry, scheduler=ctx.scheduler,
+                supervisor=_PlanningSupervisor(), repo_root=ctx.repo_root,
+                task=planning_task, dry_run=True,
+            )
+        return CommandResult(
+            ok=admission.launched,
+            message=f"dry run: {admission.reason}",
+            data={"task": task.id, "state": admission.task.state, "admission": admission.outcome},
+        )
 
     admission = managed_admit(
         state=ctx.state,
@@ -352,6 +384,16 @@ def cmd_managed_dispatch(ctx: CommandContext, **fields: Any) -> CommandResult:
     """Operator-facing create+admit entrypoint using the same Control Plane path."""
 
     dry_run = bool(fields.pop("dry_run", False))
+    if dry_run:
+        with ctx.state.planning_snapshot() as planning_state:
+            planning_ctx = CommandContext(
+                state=planning_state, registry=ctx.registry, scheduler=ctx.scheduler,
+                supervisor=_PlanningSupervisor(), repo_root=ctx.repo_root,
+            )
+            created = cmd_enqueue(planning_ctx, **fields)
+            if not created.ok:
+                return created
+            return cmd_start(planning_ctx, task_id=str(created.data["task_id"]), dry_run=True)
     created = cmd_enqueue(ctx, **fields)
     if not created.ok:
         return created

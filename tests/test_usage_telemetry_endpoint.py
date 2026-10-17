@@ -177,8 +177,9 @@ def test_a_run_that_recorded_no_billing_class_is_marked_as_inferred(ctx, client)
     seed(ctx, "rb-inferred", [{"worker": "grok-build", "provider": "xAI", "model": "grok-4.6"}])
     row = row_for(client, "rb-inferred")
 
-    # grok-build is metered in the shipped registry, so the row is API-billed...
-    assert row["billing"]["class"] == "API_BILLED"
+    # Grok's configured CLI session consumes metered capacity but prohibits
+    # API billing; the current registry can infer that route, not a charge.
+    assert row["billing"]["class"] == "METERED_SESSION"
     # ...but the classification is flagged as derived from today's config.
     assert row["billing"]["established"] == "DERIVED"
     assert "current registry" in row["billing"]["source"]

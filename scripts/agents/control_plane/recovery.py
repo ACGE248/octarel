@@ -9,6 +9,7 @@ live worktree lock that a crashed process abandoned.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import re
 import subprocess
@@ -78,7 +79,7 @@ class OwnershipProof:
     observed_create_time: float | None = None
 
 
-def process_create_time(pid: int) -> float | None:
+def process_create_time(pid: int, *, allow_subprocess: bool = True) -> float | None:
     """Return the OS-reported process create time without a new dependency.
 
     Reuse the repository's existing psutil dependency (also used by operations
@@ -92,6 +93,8 @@ def process_create_time(pid: int) -> float | None:
         return psutil.Process(pid).create_time()
     except Exception:  # noqa: BLE001 - fall through to the dependency-free OS query
         pass
+    if not allow_subprocess:
+        return None
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "lstart="],
@@ -114,6 +117,7 @@ def classify_process_owner(
     *,
     recorded_create_time: float | None = None,
     recorded_at: float | None = None,
+    allow_subprocess: bool = True,
 ) -> OwnershipProof:
     """Classify process identity from recorded facts; never from argv/name.
 
@@ -125,7 +129,7 @@ def classify_process_owner(
 
     if not pid or not pid_is_alive(pid):
         return OwnershipProof(OWNERSHIP_RECLAIMABLE, EVIDENCE_PID_ABSENT, "recorded pid is not alive")
-    observed = process_create_time(pid)
+    observed = process_create_time(pid) if allow_subprocess else process_create_time(pid, allow_subprocess=False)
     if observed is None:
         return OwnershipProof(
             OWNERSHIP_AMBIGUOUS,
@@ -157,7 +161,9 @@ def classify_process_owner(
                 "pid is live but the recorded write time is a legacy placeholder",
                 observed,
             )
-        if observed > recorded_at:
+        # Legacy task timestamps have one-second precision; a process born
+        # within that same second is not evidence of PID reuse.
+        if observed > recorded_at + 1:
             return OwnershipProof(
                 OWNERSHIP_RECLAIMABLE,
                 EVIDENCE_PID_LOCK_TIME,
@@ -430,7 +436,7 @@ def _recorded_at(task: Task) -> float | None:
         return None
 
 
-def ownership_proof_for_task(task: Task) -> OwnershipProof:
+def ownership_proof_for_task(task: Task, *, allow_subprocess: bool = True) -> OwnershipProof:
     """Observe the current owner using the canonical task identity evidence."""
 
     # Only legacy rows lack the strong ``pid_create_time`` stamped at launch.
@@ -442,6 +448,7 @@ def ownership_proof_for_task(task: Task) -> OwnershipProof:
         task.pid,
         recorded_create_time=task.pid_create_time,
         recorded_at=_recorded_at(task),
+        allow_subprocess=allow_subprocess,
     )
 
 
@@ -490,14 +497,142 @@ def recover_orphan_task(state: State, task: Task) -> tuple[bool, OwnershipProof,
     return True, proof, None
 
 
+def reconcile_completed_manifest(state: State, task: Task) -> bool:
+    """Use only a manifest bound to this exact launch before considering replay.
+
+    A legacy task without a launch id has no safe way to distinguish an older
+    attempt's manifest from the just-finished worker. It follows the existing
+    recovery path. Multiple or malformed matching manifests require owner
+    action; neither condition can authorize another writer.
+    """
+
+    if not task.launch_id or not task.worktree:
+        return False
+    from .agent_activity import UnsafeIdentifier, _run_dir, _validate_slug
+
+    try:
+        _validate_slug(task.task_ref, field="task_ref")
+        _validate_slug(task.worker, field="worker")
+    except UnsafeIdentifier:
+        return False
+    base = Path(task.worktree) / _AGENT_OUTPUT_DIRNAME / task.task_ref / task.worker
+    if not base.is_dir():
+        return False
+    try:
+        entries = list(base.iterdir())
+    except OSError:
+        return False
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            path = _run_dir(Path(task.worktree), task.task_ref, task.worker, entry.name) / "manifest.json"
+            if not path.is_file() or path.stat().st_size > 1_000_000:
+                continue
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (UnsafeIdentifier, OSError, ValueError, TypeError):
+            continue
+        if isinstance(manifest, dict) and manifest.get("launch_id") == task.launch_id:
+            matches.append((path, manifest))
+    if not matches:
+        return False
+    manifest_path, manifest = matches[0]
+    identity_ok = (
+        len(matches) == 1
+        and manifest.get("task") == task.task_ref
+        and manifest.get("worker") == task.worker
+        and manifest.get("role") == task.role
+        and bool(manifest.get("finished_at"))
+    )
+    previous = task.state
+    if not identity_ok or manifest.get("result") not in {"PASS", "FAIL", "BLOCKED", "UNSUPPORTED"}:
+        task.state = TASK_OWNER_ACTION_REQUIRED
+        task.last_error = "completed worker evidence is ambiguous; inspect this launch before retrying"
+    elif manifest.get("result") == "PASS" and manifest.get("exit_status") == 0:
+        task.state = TASK_SUCCEEDED
+        task.result = "PASS"
+        task.last_error = None
+    else:
+        task.state = TASK_FAILED
+        task.result = "FAIL"
+        task.last_error = "worker finished before daemon reconciliation; inspect its retained manifest"
+    task.pid = None
+    task.pid_create_time = None
+    if identity_ok:
+        paths = manifest.get("paths")
+        relative_log = paths.get("log") if isinstance(paths, dict) else None
+        if isinstance(relative_log, str):
+            evidence_root = (Path(task.worktree) / _AGENT_OUTPUT_DIRNAME).resolve()
+            log_path = (Path(task.worktree) / relative_log).resolve()
+            if log_path.is_relative_to(manifest_path.parent.resolve()) and log_path.is_file():
+                if log_path.is_relative_to(evidence_root):
+                    from .supervisor import record_usage_for_task
+
+                    record_usage_for_task(state, task, f"LOG: {relative_log}")
+        from .usage_policy import finalize_route_attempt
+
+        finalize_route_attempt(state, task)
+    state.upsert_task(task)
+    if task.state == TASK_SUCCEEDED and task.runbook_id:
+        runbook = state.get_runbook(task.runbook_id)
+        if runbook is not None and runbook.status in {
+            RUNBOOK_RUNNING, RUNBOOK_RECOVERABLE_ORPHAN, RUNBOOK_WAITING_PROVIDER,
+            RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING,
+        }:
+            from .acceptance import (
+                STAGE_TEST,
+                is_acceptance_applicable,
+                start_acceptance,
+            )
+
+            if is_acceptance_applicable(role=task.role):
+                if runbook.status not in {RUNBOOK_IMPLEMENTATION_COMPLETE, RUNBOOK_ACCEPTANCE_PENDING}:
+                    start_acceptance(runbook=runbook, task=task)
+                if any(
+                    key in runbook.acceptance_evidence
+                    for key in ("review", "test", "checkpoint", "pr_readiness")
+                ):
+                    tree_sha = _candidate_tree_sha(runbook.worktree)
+                    if tree_sha is not None:
+                        stage = minimum_remaining_acceptance_stage(runbook, tree_sha=tree_sha)
+                        runbook.acceptance_stage = STAGE_TEST if stage == "implementation" else stage
+                state.upsert_runbook(runbook)
+    if task.state == TASK_OWNER_ACTION_REQUIRED:
+        _sync_runbook_recovery_state(state, task)
+    state.record_event(
+        category="recovery", task_id=task.id,
+        level="info" if task.state == TASK_SUCCEEDED else "warning",
+        message=f"reconciled completed launch manifest: {previous} -> {task.state}",
+        project_id=task.project_id,
+    )
+    return True
+
+
+def preserve_unresolved_launch(state: State, task: Task, proof: OwnershipProof) -> None:
+    """Keep a dead exact launch recoverable without silently replaying it."""
+
+    previous = task.state
+    task.recovery_attempts += 1
+    task.state = (
+        TASK_OWNER_ACTION_REQUIRED
+        if task.recovery_attempts >= task.recovery_max_attempts
+        else TASK_RECOVERABLE_ORPHAN
+    )
+    task.last_error = "worker outcome is unproven: no completed manifest matches this launch"
+    task.ownership_evidence_class = proof.evidence_class
+    state.upsert_task(task)
+    _sync_runbook_recovery_state(state, task)
+    _emit_transition(state, task, previous=previous, current=task.state, proof=proof)
+
+
 def reconcile_tasks(state: State, *, project_id: str | None = None) -> dict[str, int]:
     """Reclaim tasks marked ``RUNNING`` whose recorded PID is no longer alive.
 
-    A task with a live PID is left untouched (never duplicated). A task with a
-    dead/missing PID is requeued if it has none, or marked ``FAILED`` if a
-    successful requeue is unsafe to infer automatically (default: requeue, on
-    the theory that a killed daemon should retry rather than silently drop
-    work; the scheduler's normal concurrency/priority rules apply on retry).
+    A task with a live PID is left untouched. For a dead exact launch, a
+    matching completed manifest determines the result; absent evidence stays
+    recoverable without an automatic replay. Legacy rows without a launch ID
+    retain their prior bounded requeue behavior.
     """
 
     reclaimed = 0
@@ -529,6 +664,11 @@ def reconcile_tasks(state: State, *, project_id: str | None = None) -> dict[str,
             state.upsert_task(task)
             _sync_runbook_recovery_state(state, task)
             _emit_transition(state, task, previous=previous, current=task.state, proof=proof)
+            continue
+        if reconcile_completed_manifest(state, task):
+            continue
+        if task.launch_id:
+            preserve_unresolved_launch(state, task, proof)
             continue
         previous = task.state
         task.state = TASK_RECOVERABLE_ORPHAN
