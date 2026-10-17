@@ -1819,7 +1819,7 @@ td button { min-height: 36px; min-width: 0; margin: 2px; }
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .flow-node { min-width: 260px; }
-  .quickstart-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quickstart-row { grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); }
   .pipeline-stages { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
   .sheet {
