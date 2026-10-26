@@ -515,7 +515,9 @@ Automatic fallback decisions use a durable compare-and-set claim. This matters f
 explicit Start Development request and the background reconciliation tick may observe the same new provider
 failure concurrently: only the claim winner may select or launch a replacement, while the other path returns the
 winner's persisted result. Restart remains at-most-once and can reconcile a legacy live-replacement/failed-Runbook
-presentation without launching another process.
+presentation without launching another process. An ineligible failure persists an explicit negative fallback
+decision on its first terminal reconciliation; later ticks treat the runbook as terminal and do not append duplicate
+finalization events.
 
 Managed-project exact-tree validation remains a synchronous acceptance stage under the per-runbook advancement
 lease. Its subprocess wait invokes a bounded progress callback so the owning daemon continues polling and reaping
