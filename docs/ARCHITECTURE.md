@@ -185,6 +185,10 @@ killed, so a crashed owner never needs stale-lease cleanup. `POST /api/runbooks/
 returns 409 with the owner record instead of advancing; the overnight tick's successor advancement withholds and retries next tick when another process owns the runbook. Lease file names carry a hash of the runbook id so distinct ids never share a lease. The daemon additionally holds `daemon-authority.lock` for its
 lifetime; while another process holds it the dashboard loop only polls its own subprocesses and never reconciles, so the
 dashboard stays a monitoring surface. Operator pause/resume/stop remain plain state writes that the next owner honours.
+While a managed project's synchronous exact-tree validation subprocess holds one runbook's advancement lease, its adapter
+yields bounded progress callbacks to that same daemon's `Supervisor.poll_once()`. Other children owned by the daemon are
+therefore reaped and durably terminalized during a long gate; the callback neither advances another runbook nor changes the
+gate, lease, scheduler, provider, or worktree-safety authority.
 
 Each worker launch stores a fresh launch ID on the task and passes it to the wrapper manifest. Startup and periodic
 reconciliation accept a completed manifest only when its launch ID, task reference, role and worker match the dead

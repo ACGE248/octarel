@@ -193,20 +193,45 @@ def run_octascene_exact_tree_gate(worktree: Path | str, *, project: ProjectContr
         argv.extend(["--independent-review-evidence", str(evidence)])
     if gate_kwargs.get("dry_run"):
         argv.append("--dry-run")
-    result = subprocess.run(
-        argv,
-        cwd=str(target),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=isolated_environment(os.environ, environment),
-    )
-    stdout = result.stdout or ""
-    passed = result.returncode == 0
+    progress_callback = gate_kwargs.get("progress_callback")
+    child_env = isolated_environment(os.environ, environment)
+    if progress_callback is None:
+        result = subprocess.run(
+            argv,
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=child_env,
+        )
+        returncode = result.returncode
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+    else:
+        # Managed-project gates can run for hours.  They remain synchronous
+        # acceptance work, but a bounded communicate timeout gives the owning
+        # daemon a chance to poll/reap its *other* supervised children instead
+        # of leaving an exited worker as a zombie until this gate returns.
+        process = subprocess.Popen(  # noqa: S603 - fixed, repository-declared argv
+            argv,
+            cwd=str(target),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=child_env,
+        )
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=1.0)
+                break
+            except subprocess.TimeoutExpired:
+                progress_callback()
+        returncode = process.returncode
+    passed = returncode == 0
     return {
         "result": "pass" if passed else "fail",
-        "exit_code": result.returncode,
-        "output": stdout + (result.stderr or ""),
+        "exit_code": returncode,
+        "output": stdout + stderr,
         "ready": passed,
         "adapter": "exact_tree_local_gate",
         "worktree": str(target),

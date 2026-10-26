@@ -48,7 +48,8 @@ from scripts.agents.registry import load_registry
 MANAGED_ONLY = "managedonly"
 
 FAKE_GATE = """\
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
+time.sleep(float(os.environ.get("GATE_DELAY_SECONDS", "0")))
 pathlib.Path(os.environ["GATE_REPORT"]).write_text(json.dumps({
     "executable": sys.executable,
     "prefix": sys.prefix,
@@ -180,6 +181,24 @@ def test_exact_tree_gate_runs_a_fresh_sibling_worktree_under_the_managed_project
     # Source-tree evidence is untouched: no .venv link (or anything else) was written into the worktree.
     assert _tree_listing(worktree) == before
     assert not (worktree / ".venv").exists() and not (worktree / ".venv").is_symlink()
+
+
+def test_exact_tree_gate_reports_progress_while_the_managed_child_is_still_running(
+    tmp_path: Path, venvs: dict[str, Path], octarel_active: Path, gate_report: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path, venvs)
+    worktree = _fresh_sibling_worktree(project)
+    monkeypatch.setenv("GATE_DELAY_SECONDS", "1.2")
+    progress: list[str] = []
+
+    result = run_selected_project_validation(
+        project,
+        worktree=worktree,
+        gate_kwargs={"progress_callback": lambda: progress.append("polled")},
+    )
+
+    assert result["result"] == "pass", result["output"]
+    assert progress == ["polled"]
 
 
 def test_octarel_active_environment_never_reaches_the_gate_child(

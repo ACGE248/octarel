@@ -470,6 +470,12 @@ def _advance_test_and_review(
     if project is not None:
         from .validation_adapter import run_selected_project_validation
 
+        poll_once = getattr(supervisor, "poll_once", None)
+        if callable(poll_once):
+            # A managed-project gate is synchronous, but it must not starve
+            # the daemon's child-process lifecycle. The adapter invokes this
+            # hook at bounded intervals while validation is still running.
+            gate_kwargs["progress_callback"] = poll_once
         result = run_selected_project_validation(project, worktree=worktree, gate_kwargs=gate_kwargs)
     else:
         result = run_gate(root=worktree, **gate_kwargs)

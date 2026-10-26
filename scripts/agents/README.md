@@ -517,6 +517,11 @@ failure concurrently: only the claim winner may select or launch a replacement, 
 winner's persisted result. Restart remains at-most-once and can reconcile a legacy live-replacement/failed-Runbook
 presentation without launching another process.
 
+Managed-project exact-tree validation remains a synchronous acceptance stage under the per-runbook advancement
+lease. Its subprocess wait invokes a bounded progress callback so the owning daemon continues polling and reaping
+its other supervised worker children during a long gate. The callback does not schedule work or recursively advance
+runbooks; it only preserves truthful task/lease lifecycle state until the normal daemon tick resumes.
+
 The Usage & Routing panel reports classification, policy, eligibility,
 invocations, exact/estimated/unknown token quality, route history, and durable
 escalation state. Context manifests describe only bounded relevant material and
