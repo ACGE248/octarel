@@ -701,6 +701,64 @@ def test_reconcile_runbooks_finalizes_a_failed_task_as_failed(tmp_path):
     assert state.get_runbook(rb.id).status == RUNBOOK_FAILED
 
 
+def test_ineligible_automatic_fallback_is_resolved_once_without_terminal_event_storm(tmp_path):
+    state = State(":memory:")
+    task = Task(
+        id="t-policy",
+        task_ref="x",
+        role="primary-implementation",
+        worker="claude-code",
+        state=TASK_FAILED,
+        last_error="worker tool action was denied by the configured read-only permission boundary",
+        failure_reason_sanitized="worker tool action was denied by the configured read-only permission boundary",
+        fallback_automatic=None,
+    )
+    state.upsert_task(task)
+    rb = runbooks.create_runbook(
+        state=state,
+        registry=load_registry(),
+        name="policy failure",
+        preset="test-fix",
+        source_ref="x",
+        branch="b",
+        worktree=str(tmp_path),
+    )
+    rb.task_id = task.id
+    rb.status = RUNBOOK_RUNNING
+    task.runbook_id = rb.id
+    state.upsert_task(task)
+    state.upsert_runbook(rb)
+
+    class NeverLaunch:
+        @staticmethod
+        def launch_task(_task):
+            raise AssertionError("a safety/policy failure must never provider-hop")
+
+    first = runbooks.reconcile_runbooks(
+        state=state,
+        repo_root=tmp_path,
+        registry=load_registry(),
+        supervisor=NeverLaunch(),
+    )
+    second = runbooks.reconcile_runbooks(
+        state=state,
+        repo_root=tmp_path,
+        registry=load_registry(),
+        supervisor=NeverLaunch(),
+    )
+
+    saved_task = state.get_task(task.id)
+    saved_runbook = state.get_runbook(rb.id)
+    finalized = [event for event in state.list_events() if f"runbook {rb.id} finalized as FAILED" in event.message]
+    assert first["finalized"] == 1
+    assert second["finalized"] == 0
+    assert saved_task.fallback_automatic is False
+    assert saved_task.fallback_selected_worker is None
+    assert saved_runbook.status == RUNBOOK_FAILED
+    assert "ineligible for failure category 'capability'" in saved_runbook.recovery_note
+    assert len(finalized) == 1
+
+
 def test_reconcile_runbooks_flags_deadline_without_touching_a_live_task(tmp_path):
     state = State(":memory:")
     task = Task(id="t1", task_ref="x", role="primary-implementation", worker="claude-code", state=TASK_RUNNING)

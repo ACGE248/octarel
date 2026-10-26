@@ -1326,6 +1326,19 @@ def automatic_fallback_runbook(
     runbook, task = _require_launched(state, runbook_id)
     failure = classify_failure(task.failure_reason_sanitized or task.last_error)
     if failure not in {"quota", "rate-limit", "auth-cli", "provider-outage"}:
+        # ``None`` means "the bounded automatic-fallback decision has not
+        # happened yet". Leaving it there for an ineligible failure makes
+        # every reconcile tick repeat terminalization and append another
+        # identical event forever. Persist the negative decision once; the
+        # ordinary terminal runbook path records the single final outcome.
+        task.fallback_automatic = False
+        task.fallback_selected_worker = None
+        task.fallback_alternatives = ()
+        state.upsert_task(task)
+        runbook.recovery_note = (
+            f"Automatic fallback is ineligible for failure category {failure!r}; manual recovery is required."
+        )
+        state.upsert_runbook(runbook)
         return None
     preset = PRESETS.get(runbook.preset)
     role = preset.role if preset else task.role
@@ -1334,6 +1347,15 @@ def automatic_fallback_runbook(
         "primary-implementation",
         "secondary-implementation",
     }:
+        task.fallback_automatic = False
+        task.fallback_selected_worker = None
+        task.fallback_alternatives = ()
+        state.upsert_task(task)
+        runbook.recovery_note = (
+            "Automatic fallback is ineligible because the failed route is not a write-capable "
+            "implementation route; manual recovery is required."
+        )
+        state.upsert_runbook(runbook)
         return None
     if not state.claim_pending_fallback(task.id):
         # The explicit start request and the dashboard's reconciliation loop
@@ -1898,6 +1920,11 @@ def reconcile_runbooks(
                     if retried is not None:
                         auto_fallbacks += 1
                         continue
+                    # The fallback decision may have persisted a blocked/
+                    # ineligible recovery note. Reload before generate_report
+                    # writes this object back, or the pre-decision in-memory
+                    # row would erase that durable explanation.
+                    runbook = state.get_runbook(runbook.id) or runbook
                 generate_report(state=state, repo_root=repo_root, runbook=runbook, task=task)
                 state.record_event(
                     category="runbook",
