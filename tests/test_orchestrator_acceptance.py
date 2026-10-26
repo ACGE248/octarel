@@ -181,6 +181,47 @@ def test_test_stage_failure_blocks_without_finalizing_succeeded(tmp_path, monkey
     assert rb.acceptance_stage != acceptance.STAGE_CHECKPOINT
 
 
+def test_managed_gate_progress_polls_an_exited_supervised_child_before_validation_returns(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    state = State(":memory:")
+    rb, task = _implementation_runbook(state, repo)
+    acceptance.start_acceptance(runbook=rb, task=task)
+    observed: list[str] = []
+
+    class PollingSupervisor(FakeSupervisor):
+        def poll_once(self):
+            observed.append("child-reconciled")
+            return []
+
+    def validation(_project, *, worktree, gate_kwargs):  # noqa: ARG001
+        observed.append("validation-running")
+        gate_kwargs["progress_callback"]()
+        observed.append("validation-finished")
+        return {"result": "pass", "evidence_path": ".local-gate/fake.json"}
+
+    monkeypatch.setattr(acceptance, "classify", lambda paths: type("R", (), {"review_level": "low"})())
+    monkeypatch.setattr(
+        "scripts.agents.control_plane.validation_adapter.run_selected_project_validation",
+        validation,
+    )
+
+    acceptance.advance_acceptance_pipeline(
+        state=state,
+        repo_root=repo,
+        registry=None,
+        scheduler=None,
+        supervisor=PollingSupervisor(),
+        runbook=rb,
+        task=task,
+        base_ref="HEAD",
+        project=object(),
+    )
+
+    assert observed == ["validation-running", "child-reconciled", "validation-finished"]
+    assert rb.acceptance_evidence["test"]["status"] == "PASS"
+    assert rb.acceptance_stage == acceptance.STAGE_CHECKPOINT
+
+
 # --------------------------------------------------------------------------- _review_scope_paths (issue #144)
 
 
