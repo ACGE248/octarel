@@ -465,10 +465,20 @@ def test_runbook_create_start_pause_resume_stop_round_trip(tmp_path, monkeypatch
     supervisor = Supervisor(registry=registry, repo_root=repo, state=state)
 
     class FakeProcess:
-        pid = 999
+        # Deliberately outside the platform PID range so Supervisor cannot
+        # mistake an unrelated real process group for this synthetic child.
+        pid = 2**31 - 1
 
     monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: FakeProcess())
     monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+    # The durable execution lease normally validates a real OS pid before it
+    # attaches it. This fixture deliberately models a live process that this
+    # Supervisor does not own, so make that synthetic lease attachment
+    # explicit instead of relying on a synthetic PID to pass OS checks.
+    monkeypatch.setattr(
+        "scripts.agents.control_plane.supervisor.execution_lease.attach_pid",
+        lambda *a, **k: True,
+    )
     # The fake worker is not a process this Supervisor owns, and it is genuinely live: stop must report
     # STOPPING, not CANCELLED (a dead/no-PID task is cancelled immediately, see stop_runbook).
     monkeypatch.setattr("scripts.agents.control_plane.runbooks.pid_is_alive", lambda pid: pid == FakeProcess.pid)
