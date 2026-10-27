@@ -199,6 +199,8 @@ def _validation_environment(project: ProjectContract, target: Path) -> dict[str,
     -- the command is not started.
     """
 
+    from scripts.ci.development_storage import environment_for_development
+
     from .managed_environment import (
         KIND_NOT_FOUND,
         ManagedEnvironmentError,
@@ -207,7 +209,7 @@ def _validation_environment(project: ProjectContract, target: Path) -> dict[str,
         resolve_managed_environment,
     )
 
-    base = worker_environment()
+    base = environment_for_development(target, worker_environment())
     if is_octarel_own_project(project):
         return base
     try:
@@ -216,4 +218,4 @@ def _validation_environment(project: ProjectContract, target: Path) -> dict[str,
         if exc.kind != KIND_NOT_FOUND:
             raise ProjectValidationError(exc.reason) from exc
         environment = None
-    return isolated_environment(base, environment)
+    return environment_for_development(target, isolated_environment(base, environment))

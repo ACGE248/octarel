@@ -168,7 +168,10 @@ class Supervisor:
         and the reason is recorded.
         """
 
-        env = sanitized_subprocess_env()
+        from scripts.ci.development_storage import environment_for_development
+
+        worktree = Path(task.worktree) if task.worktree else self.repo_root
+        env = environment_for_development(worktree, sanitized_subprocess_env())
         if not task.project_id:
             return env
         from .managed_environment import (
@@ -196,7 +199,7 @@ class Supervisor:
                 message=f"managed Python environment unavailable for worker launch: {exc.reason}; "
                 "launching with Octarel's own environment removed from PATH",
             )
-        return isolated_environment(env, environment)
+        return environment_for_development(worktree, isolated_environment(env, environment))
 
     def _spawn(self, argv: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
         """Isolated so tests can substitute a fake process without a real CLI.

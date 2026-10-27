@@ -250,7 +250,11 @@ def write_lock(worker: Worker, lock_dir: Path) -> Iterator[None]:
             pass
 
 
-_ALLOWED_ENV_NAMES = {"HOME", "PATH", "SHELL", "TMPDIR", "USER", "LOGNAME", "LANG", "TERM", "COLORTERM", "NO_COLOR"}
+_ALLOWED_ENV_NAMES = {
+    "HOME", "PATH", "SHELL", "TMPDIR", "TMP", "TEMP", "USER", "LOGNAME", "LANG", "TERM",
+    "COLORTERM", "NO_COLOR", "OCTA_DEV_STORAGE_ROOT", "OCTA_TEST_ARTIFACT_ROOT", "npm_config_cache",
+    "NPM_CONFIG_CACHE", "PIP_CACHE_DIR", "PLAYWRIGHT_BROWSERS_PATH", "PYTHONPYCACHEPREFIX",
+}
 
 
 def _worker_environment() -> dict[str, str]:
@@ -296,6 +300,9 @@ def run_worker_process(
     ``env`` derived from :func:`worker_environment`.
     """
 
+    from scripts.ci.development_storage import environment_for_development
+
+    command_env = environment_for_development(root, _environment_for_command(command, env))
     try:
         completed = subprocess.run(
             command,
@@ -303,7 +310,7 @@ def run_worker_process(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=_environment_for_command(command, env),
+            env=command_env,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
@@ -322,13 +329,15 @@ def run_worker_process_group(
     starts and ``None`` when the process has finished, so a caller can reap stragglers.
     """
 
+    from scripts.ci.development_storage import environment_for_development
+
     process = subprocess.Popen(
         command,
         cwd=root,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=_worker_environment(),
+        env=environment_for_development(root, _worker_environment()),
         start_new_session=True,
     )
     if on_group is not None:

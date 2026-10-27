@@ -194,7 +194,9 @@ def run_octascene_exact_tree_gate(worktree: Path | str, *, project: ProjectContr
     if gate_kwargs.get("dry_run"):
         argv.append("--dry-run")
     progress_callback = gate_kwargs.get("progress_callback")
-    child_env = isolated_environment(os.environ, environment)
+    from scripts.ci.development_storage import environment_for_development
+
+    child_env = environment_for_development(target, isolated_environment(os.environ, environment))
     if progress_callback is None:
         result = subprocess.run(
             argv,

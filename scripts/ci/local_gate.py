@@ -26,6 +26,10 @@ from typing import Any
 
 try:
     from scripts.ci.change_risk import ChangeRisk, classify
+    from scripts.ci.development_storage import (
+        DevelopmentStorageError,
+        apply_development_storage,
+    )
     from scripts.ci.environment import (
         bootstrap_dependencies,
         prepare_worktree,
@@ -47,6 +51,7 @@ try:
     from scripts.ci.test_impact import TestImpact, select_tests
 except ModuleNotFoundError:  # direct ``python scripts/ci/local_gate.py`` entry point
     from change_risk import ChangeRisk, classify
+    from development_storage import DevelopmentStorageError, apply_development_storage
     from environment import bootstrap_dependencies, prepare_worktree, resolve_python
     from ports import PortLeases
     from review_contract import (
@@ -616,6 +621,10 @@ def run_gate(*, root: Path, base: str, docs_reviewed: bool, review_provider: str
              force_full: bool = False, dry_run: bool = False,
              reuse_evidence: bool = True, rerun_reason: str | None = None,
              registry_root: Path | None = None) -> dict[str, Any]:
+    try:
+        storage = apply_development_storage(root)
+    except DevelopmentStorageError as exc:
+        return {"result": "fail", "prerequisite_failures": [str(exc)], "ready": False}
     tree, head, paths = candidate(root, base)
     risk = classify(paths, force_full=force_full)
     impact = select_tests(root, risk, paths)
@@ -636,6 +645,12 @@ def run_gate(*, root: Path, base: str, docs_reviewed: bool, review_provider: str
     logs = out / "logs" / tree
     logs.mkdir(parents=True, exist_ok=True)
     prerequisites: list[str] = []
+    storage_facts = {
+        "root": str(storage.root), "free_bytes": storage.free_bytes,
+        "tmpdir": storage.environment["TMPDIR"],
+        "npm_cache": storage.environment["npm_config_cache"],
+        "playwright_browsers": storage.environment["PLAYWRIGHT_BROWSERS_PATH"],
+    }
     if not docs_reviewed:
         prerequisites.append("documentation reconciliation was not attested")
     if risk.review_level in {"high", "critical"} and not review_provider:
@@ -703,6 +718,7 @@ def run_gate(*, root: Path, base: str, docs_reviewed: bool, review_provider: str
             review_provider=review_provider if risk.review_level in {"high", "critical"} else None,
             registry_root=registry_root,
         )
+        preflight_result["development_storage"] = storage_facts
         prerequisites.extend(preflight_result["failures"])
         estimates = _estimate_phases(root, phases)
         if dry_run or prerequisites:
