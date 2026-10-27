@@ -26,6 +26,7 @@ layout.
 - [Providers](docs/PROVIDERS.md)
 - [Worktrees](docs/WORKTREES.md)
 - [Testing and review](docs/TESTING.md)
+- [Development storage](docs/engineering/DEVELOPMENT_STORAGE.md)
 - [Remote access](docs/REMOTE_ACCESS.md)
 - [State, backup, restore](docs/STATE.md)
 - [Releases, upgrades, migrations](docs/RELEASE.md)

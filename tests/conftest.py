@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+from scripts.ci.development_storage import apply_development_storage
+
+apply_development_storage(Path(__file__).resolve().parents[1])
 
 # Intentionally empty of application bootstrap. Isolation of Octarel from
 # ``app.bootstrap.services`` is a CPX-05 acceptance requirement.
