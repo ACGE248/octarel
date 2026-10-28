@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.agents.control_plane import execution_lease
 from scripts.agents.control_plane.models import (
     KIND_WRITE,
     TASK_BLOCKED,
@@ -20,6 +21,7 @@ from scripts.agents.control_plane.models import (
 from scripts.agents.control_plane.state import State
 from scripts.agents.control_plane.supervisor import Supervisor
 from scripts.agents.registry import load_registry
+from scripts.agents.runner import WriteSafetyError
 
 
 def _write_task(tmp_path: Path, *, worker="claude-code", command=(), worktree: Path | None = None) -> Task:
@@ -447,6 +449,95 @@ def test_launch_task_refuses_a_second_task_into_a_worktree_a_live_lease_already_
     assert spawned == [], "a lease conflict must never reach subprocess spawn"
 
 
+def test_launch_task_recognizes_same_task_live_lease_without_overwriting_running_projection(tmp_path, monkeypatch):
+    """Issue #94: daemon and command admission may race on the same PENDING task.
+
+    The execution lease is the atomic winner.  A second Supervisor must adopt
+    that exact task-owned launch, never mark the durable task BLOCKED or spawn a
+    second process.  Different-task refusal remains covered by the test above.
+    """
+
+    registry = load_registry()
+    state = State(":memory:")
+    winner = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    observer = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    monkeypatch.setattr("scripts.agents.control_plane.supervisor.assert_write_safety", lambda *a, **k: None)
+
+    class FakeProcess:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(winner, "_spawn", lambda argv, cwd, env=None: FakeProcess())
+    task = _write_task(tmp_path)
+    task.id = "same-task"
+    task.runbook_id = "rb-same"
+    task.project_id = "project-same"
+    assert winner.launch_task(task).state == TASK_RUNNING
+
+    # Reproduce the stale PENDING window/projection seen in issue #94 while the
+    # attached worker pid remains authoritatively live in the execution lease.
+    stale = state.get_task(task.id)
+    stale.state = "PENDING"
+    stale.pid = None
+    stale.last_error = "stale self-lock projection"
+    state.upsert_task(stale)
+
+    spawned = []
+    monkeypatch.setattr(observer, "_spawn", lambda argv, cwd, env=None: spawned.append(argv) or FakeProcess())
+    duplicate = _write_task(tmp_path)
+    duplicate.id = task.id
+    duplicate.runbook_id = task.runbook_id
+    duplicate.project_id = task.project_id
+    result = observer.launch_task(duplicate)
+
+    assert result.state == TASK_RUNNING
+    assert result.pid == os.getpid()
+    assert result.last_error is None
+    assert state.get_task(task.id).state == TASK_RUNNING
+    assert state.get_task(task.id).last_error is None
+    assert spawned == []
+
+
+def test_same_task_write_lock_precheck_uses_matching_live_lease(tmp_path, monkeypatch):
+    """The text lock may appear before the racing caller reaches lease acquire."""
+
+    registry = load_registry()
+    state = State(":memory:")
+    supervisor = Supervisor(registry=registry, repo_root=tmp_path, state=state)
+    task = _write_task(tmp_path)
+    task.id = "same-task"
+    task.runbook_id = "rb-same"
+    state.upsert_task(task)
+    grant = execution_lease.acquire(
+        state,
+        worktree=str(tmp_path),
+        task_id=task.id,
+        runbook_id=task.runbook_id,
+        worker=task.worker,
+    )
+    assert state.update_execution_lease_pid(
+        worktree=str(tmp_path),
+        expected_generation=grant.generation,
+        pid=os.getpid(),
+        pid_create_time=None,
+    )
+    monkeypatch.setattr(
+        "scripts.agents.control_plane.supervisor.assert_write_safety",
+        lambda *a, **k: (_ for _ in ()).throw(WriteSafetyError("same lock")),
+    )
+    spawned = []
+    monkeypatch.setattr(supervisor, "_spawn", lambda argv, cwd, env=None: spawned.append(argv))
+
+    result = supervisor.launch_task(task)
+
+    assert result.state == TASK_RUNNING
+    assert result.pid == os.getpid()
+    assert result.last_error is None
+    assert spawned == []
+
+
 def test_terminate_task_frees_the_execution_lease_for_a_new_launch(tmp_path, monkeypatch):
     registry = load_registry()
     state = State(":memory:")
@@ -562,8 +653,14 @@ def test_poll_once_frees_the_execution_lease_on_completion(tmp_path, monkeypatch
     first = _write_task(tmp_path)
     first.id = "first"
     supervisor.launch_task(first)
+    projected = state.get_task(first.id)
+    projected.last_error = "stale self-lock presentation"
+    state.upsert_task(projected)
     process.wait(timeout=5)
     supervisor.poll_once()
+    completed = state.get_task(first.id)
+    assert completed.state == TASK_SUCCEEDED
+    assert completed.last_error is None
 
     class FakeProcess:
         pid = os.getpid()

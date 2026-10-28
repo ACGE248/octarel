@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from ..redaction import redact_text
@@ -55,6 +56,59 @@ _AGENT_OUTPUT_DIRNAME = ".agent-output"
 
 class SupervisorError(RuntimeError):
     pass
+
+
+def _same_task_live_lease(state: State, task: Task, worktree: Path) -> Task | None:
+    """Project an already-launched copy of ``task`` instead of self-conflicting.
+
+    A dashboard command and the daemon scheduler can race after the command has
+    persisted a PENDING task but before either caller has persisted RUNNING.  The
+    execution lease is the atomic launch authority in that window.  If it names
+    this exact task/runbook/project/worker and its owner is still live, the losing
+    caller must observe the launch rather than overwrite it with BLOCKED.
+
+    While ``spawn_pending`` is true the recorded pid is the launching supervisor,
+    not the worker, so return a transient RUNNING projection only; the winning
+    caller will persist the worker pid after ``attach_pid``.  Once attached, the
+    lease supplies enough pid identity to repair the durable task projection.
+    Any identity mismatch remains a real conflict and returns ``None``.
+    """
+
+    lease = state.get_execution_lease(str(worktree))
+    if lease is None or lease.status != "ACQUIRED" or lease.task_id != task.id:
+        return None
+    if lease.runbook_id != task.runbook_id or lease.project_id != task.project_id or lease.worker != task.worker:
+        return None
+    classification, _ = execution_lease._classify_owner(lease)
+    if classification != "live":
+        return None
+
+    current = state.get_task(task.id) or task
+    projection = replace(
+        current,
+        state=TASK_RUNNING,
+        last_error=None,
+        admission_state=ADMISSION_ADMITTED,
+    )
+    if lease.spawn_pending:
+        return projection
+
+    projection.pid = lease.owner_pid
+    projection.pid_create_time = lease.owner_pid_create_time
+    projection.ownership_evidence_class = (
+        "PID_CREATE_TIME" if lease.owner_pid_create_time is not None else "PID_ONLY"
+    )
+    state.upsert_task(projection)
+    state.record_event(
+        category="supervisor",
+        task_id=task.id,
+        level="info",
+        message=(
+            f"recognized same-task execution lease generation={lease.generation} "
+            f"pid={lease.owner_pid}; preserved RUNNING projection"
+        ),
+    )
+    return projection
 
 
 def record_usage_for_task(state: State, task: Task, stdout: str) -> None:
@@ -425,6 +479,9 @@ class Supervisor:
                 lock_dir = worktree / _AGENT_OUTPUT_DIRNAME
                 assert_write_safety(worker, worktree, allow_write=True, lock_dir=lock_dir)
             except WriteSafetyError as exc:
+                same_task = _same_task_live_lease(self.state, task, worktree)
+                if same_task is not None:
+                    return same_task
                 task.state = TASK_BLOCKED
                 task.last_error = f"write-safety pre-check failed: {exc}"
                 self.state.upsert_task(task)
@@ -454,6 +511,9 @@ class Supervisor:
                     worker=task.worker,
                 )
             except execution_lease.ExecutionLeaseConflict as exc:
+                same_task = _same_task_live_lease(self.state, task, worktree)
+                if same_task is not None:
+                    return same_task
                 task.state = TASK_BLOCKED
                 task.last_error = f"execution lease conflict: {exc.reason}"
                 self.state.upsert_task(task)
@@ -574,7 +634,13 @@ class Supervisor:
                     stdout, stderr = self._completed_output(process)
                     task.state = TASK_SUCCEEDED if return_code == 0 else TASK_FAILED
                     task.result = "PASS" if return_code == 0 else "FAIL"
-                    if return_code != 0:
+                    if return_code == 0:
+                        # A racing same-task admission used to overwrite a live
+                        # task with a false self-lock error.  Successful process
+                        # completion is authoritative for this attempt and must
+                        # not retain that stale presentation.
+                        task.last_error = None
+                    else:
                         task.last_error = self._failure_reason(task, stdout, stderr, return_code)
                         # A manifest pointer proves the delegation wrapper got
                         # far enough to evaluate/invoke the worker. Import,
