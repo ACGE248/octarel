@@ -175,6 +175,12 @@ It is bounded by duration and accepted-task count, allows one write-capable task
 enables paid/API fallback, and merges only with explicit per-session authorization plus the project's `overnight_merge`
 capability. The dashboard/API/CLI only create and control it. See `scripts/agents/README.md`.
 
+For OctaScene, repository truth includes the declared Creator Beta, Sketch, Motion, and Video Editor maintained
+ledgers. The resolver evaluates those sources in declared order, skips dependency-blocked candidates so an independent
+lane can proceed, and prepares the exact selected task through an explicit Quick Start key. Durable accepted-runbook
+evidence can satisfy a predecessor while its maintained row awaits the next normal reconciliation, but an already
+accepted task that the source still marks eligible is treated as stale and is never replayed.
+
 ## Single-writer runbook advancement
 
 Exactly one Octarel process may advance a runbook at a time (ENG-AO-07). `control_plane/advancement_lease.py` holds a

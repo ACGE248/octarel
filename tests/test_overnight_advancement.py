@@ -709,7 +709,8 @@ def test_default_starter_is_the_normal_quickstart_path_with_no_provider_argument
         workers={"w": SimpleNamespace(enabled=True, allow_api_billing=False, cost_class="subscription", provider="p")},
     )
     ovn.tick(state=state, registry=good, supervisor=sup, scheduler=sched, ops=FakeOps().ops(), now=T0)
-    assert captured["key"] == "continue-next-task" and captured["supervisor"] is sup and captured["scheduler"] is sched
+    assert captured["key"] == "continue-next-task:A-01"
+    assert captured["supervisor"] is sup and captured["scheduler"] is sched
     assert not {"worker", "provider", "model"} & set(captured)
     assert state.get_overnight_session(sid)["current_runbook_id"]
 

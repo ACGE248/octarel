@@ -31,8 +31,8 @@ from scripts.agents.control_plane.project import (
 )
 from scripts.agents.control_plane.quickstart import (
     VIDEO_EDITOR_LEDGER_RELATIVE,
-    next_eligible_video_editor_task,
 )
+from scripts.agents.control_plane.task_sources import discover_tasks, next_eligible_task
 
 
 def _init_git_repo(root: Path) -> None:
@@ -100,14 +100,15 @@ def test_octascene_adapter_resolves_current_policy_roadmap_and_task_sources() ->
     assert project.validation_command[:2] == ("python3", "scripts/ci/local_gate.py")
 
 
-def test_octascene_next_task_behavior_is_unchanged_through_the_adapter() -> None:
+def test_octascene_adapter_discovers_current_program_tasks() -> None:
     root = _this_octages_checkout()
     project = octascene_project(repo_root=root)
 
-    direct = next_eligible_video_editor_task(root)
-    via_project = next_eligible_video_editor_task(project.local_repo_root)
-
-    assert via_project == direct
+    tasks = discover_tasks(project)
+    assert any(task.task_id.startswith("SKETCH-") for task in tasks)
+    assert any(task.task_id.startswith("MOTION-") for task in tasks)
+    assert any(task.task_id.startswith("BETA-") for task in tasks)
+    assert next_eligible_task(project) is not None
 
 
 def test_synthetic_second_repository_is_representable_without_octascene_assumptions(tmp_path: Path) -> None:

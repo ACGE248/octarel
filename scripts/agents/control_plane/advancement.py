@@ -32,6 +32,7 @@ from .provider_state import ROUTABLE_STATES
 from .state import State
 from .task_sources import (
     ADAPTER_GITHUB_ISSUES,
+    ADAPTER_OCTASCENE_PROGRAM_LEDGERS,
     ADAPTER_VIDEO_EDITOR_LEDGER,
     DiscoveredTask,
     GithubIssueFetcher,
@@ -222,7 +223,11 @@ def completed_work_refs(project: Any) -> frozenset[str]:
     if project is None:
         return frozenset()
     try:
-        if task_source_adapter_name(project) not in {ADAPTER_FILE_LEDGER, ADAPTER_VIDEO_EDITOR_LEDGER}:
+        if task_source_adapter_name(project) not in {
+            ADAPTER_FILE_LEDGER,
+            ADAPTER_VIDEO_EDITOR_LEDGER,
+            ADAPTER_OCTASCENE_PROGRAM_LEDGERS,
+        }:
             return frozenset()
         return frozenset(t.task_id for t in discover_tasks(project) if t.status.lower() in COMPLETE_STATUSES)
     except (TaskSourceError, OSError):
@@ -357,12 +362,63 @@ def _evaluate(
     }
     record["completed_task_id"] = _completed_task_id(runbook, tasks) if runbook else None
     by_id = {task.task_id: task for task in tasks}
-    nxt = next((task for task in tasks if task.eligible), None)
+    accepted_task_ids = _accepted_task_ids(state, project_id, tasks)
+    raw_eligible = [task for task in tasks if task.eligible]
+    dependency_blocks: list[tuple[DiscoveredTask, list[dict[str, str]], list[str]]] = []
+    stale_accepted: list[str] = []
+    nxt = None
+    selected_deps: list[dict[str, str]] = []
+    for candidate in raw_eligible:
+        if candidate.task_id in accepted_task_ids:
+            stale_accepted.append(candidate.task_id)
+            continue
+        deps: list[dict[str, str]] = []
+        for dep_id in parse_dependencies(candidate):
+            dep = by_id.get(dep_id)
+            if dep is not None and dep.status.lower() in COMPLETE_STATUSES:
+                status = "satisfied"
+            elif dep_id in accepted_task_ids:
+                status = "satisfied (accepted runbook evidence)"
+            elif dep is not None:
+                status = "satisfied" if dep.status.lower() in COMPLETE_STATUSES else f"unsatisfied ({dep.status})"
+            elif adapter == ADAPTER_GITHUB_ISSUES:
+                status = "satisfied"  # only open issues are listed; an absent one is closed
+            else:
+                status = "unsatisfied (not found in task source)"
+            deps.append({"task_id": dep_id, "status": status})
+        unmet = [item["task_id"] for item in deps if not item["status"].startswith("satisfied")]
+        if unmet:
+            dependency_blocks.append((candidate, deps, unmet))
+            continue
+        nxt = candidate
+        selected_deps = deps
+        break
+
+    if stale_accepted:
+        return _stop(
+            record,
+            ADV_BLOCKED,
+            "stale/inconsistent repository state: accepted work is still listed as eligible: "
+            + ", ".join(stale_accepted)
+            + "; not replaying it",
+            STOP_STALE_REPOSITORY_STATE,
+        ), None
 
     if nxt is None:
         undecided = [t.task_id for t in tasks if t.status.lower() in OWNER_DECISION_STATUSES]
         if undecided:
             return _stop(record, ADV_OWNER_DECISION_REQUIRED, "owner decision required for: " + ", ".join(undecided)), None
+        if dependency_blocks:
+            blocked_summary = "; ".join(
+                f"{task.task_id} waits on {', '.join(unmet)}" for task, _deps, unmet in dependency_blocks
+            )
+            record["dependency_status"] = [item for _task, deps, _unmet in dependency_blocks for item in deps]
+            return _stop(
+                record,
+                ADV_BLOCKED,
+                f"no startable task; dependency-blocked candidates: {blocked_summary}",
+                STOP_DEPENDENCY_BLOCKED,
+            ), None
         blocked = [t.task_id for t in tasks if t.status.lower() == "blocked"]
         if blocked:
             return _stop(
@@ -382,7 +438,7 @@ def _evaluate(
             ), None
 
     # Never replay accepted work (including the run that just completed).
-    if nxt.task_id == record["completed_task_id"] or nxt.task_id in _accepted_task_ids(state, project_id, tasks):
+    if nxt.task_id == record["completed_task_id"] or nxt.task_id in accepted_task_ids:
         return _stop(
             record,
             ADV_BLOCKED,
@@ -391,24 +447,12 @@ def _evaluate(
             STOP_STALE_REPOSITORY_STATE,
         ), None
 
-    deps: list[dict[str, str]] = []
-    for dep_id in parse_dependencies(nxt):
-        dep = by_id.get(dep_id)
-        if dep is not None:
-            status = "satisfied" if dep.status.lower() in COMPLETE_STATUSES else f"unsatisfied ({dep.status})"
-        elif adapter == ADAPTER_GITHUB_ISSUES:
-            status = "satisfied"  # only open issues are listed; an absent one is closed
-        else:
-            status = "unsatisfied (not found in task source)"
-        deps.append({"task_id": dep_id, "status": status})
+    deps = selected_deps
     record["dependency_status"] = deps
-    unmet = [d["task_id"] for d in deps if not d["status"].startswith("satisfied")]
-    if unmet:
-        return _stop(
-            record, ADV_BLOCKED, f"{nxt.task_id} waits on unmet dependencies: {', '.join(unmet)}", STOP_DEPENDENCY_BLOCKED
-        ), None
 
     key = "continue-video-editor" if adapter == ADAPTER_VIDEO_EDITOR_LEDGER else "continue-next-task"
+    if key == "continue-next-task":
+        key = f"continue-next-task:{nxt.task_id}"
     try:
         option = resolve_quickstart_option(project.local_repo_root, key, project=project)
     except Exception as exc:  # noqa: BLE001

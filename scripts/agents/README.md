@@ -37,9 +37,13 @@ security rules.
 
 Task discovery, policy loading, and repository-owned validation go through selected-project adapters in
 `control_plane/task_sources.py`, `control_plane/policy_loader.py`, and `control_plane/validation_adapter.py`.
-Generic Control Plane code does not parse the OctaScene Video Editor ledger, assume `AGENTS.md`, or
-hard-code `scripts/ci/local_gate.py`. OctaScene remains a compatibility adapter in
-`control_plane/octascene_project.py`. See [`docs/engineering/ENG-CP-04.md`](../../docs/engineering/ENG-CP-04.md).
+Generic Control Plane code does not assume `AGENTS.md` or hard-code `scripts/ci/local_gate.py`. OctaScene remains a
+compatibility adapter in `control_plane/octascene_project.py`; its declared task sources combine the maintained
+Creator Beta, Sketch, Motion, and Video Editor ledgers without copying their content into Octarel state. Advancement
+skips an eligible row whose declared dependency is not yet complete so another independent lane may proceed, while
+accepted durable evidence may satisfy a predecessor that is awaiting normal ledger reconciliation. A task that the
+source still marks eligible after its own acceptance remains a fail-closed inconsistency and is never replayed. See
+[`docs/engineering/ENG-CP-04.md`](../../docs/engineering/ENG-CP-04.md).
 
 ## What it does
 

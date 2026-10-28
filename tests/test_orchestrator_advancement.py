@@ -154,6 +154,48 @@ def test_success_selects_next_eligible_task_with_reason_and_dependency_status(st
     assert record["started_runbook_id"] is None  # prepared only: auto_advance is off by default
 
 
+def test_resolution_skips_dependency_blocked_lane_for_parallel_eligible_lane(state, alpha):
+    register(state, "alpha", alpha)
+    write_ledger(
+        alpha,
+        [
+            ("A-01", "in-progress", "active predecessor"),
+            ("A-02", "pending", "depends on A-01"),
+            ("B-01", "complete", "done"),
+            ("B-02", "pending", "depends on B-01"),
+        ],
+    )
+
+    record, option = adv.resolve_next_task(state=state, project_id="alpha")
+
+    assert record["state"] == adv.ADV_NEXT_SELECTED
+    assert record["next_task"]["task_id"] == "B-02"
+    assert record["dependency_status"] == [{"task_id": "B-01", "status": "satisfied"}]
+    assert option.task_id == "B-02"
+    assert option.key == "continue-next-task:B-02"
+
+
+def test_accepted_runbook_satisfies_dependency_when_maintained_ledger_awaits_reconciliation(state, alpha):
+    register(state, "alpha", alpha)
+    write_ledger(
+        alpha,
+        [
+            ("A-01", "in-progress", "accepted candidate awaiting ledger reconciliation"),
+            ("A-02", "pending", "depends on A-01"),
+        ],
+    )
+    done_runbook(state, "alpha", "A-01")
+
+    record, option = adv.resolve_next_task(state=state, project_id="alpha")
+
+    assert record["state"] == adv.ADV_NEXT_SELECTED
+    assert record["next_task"]["task_id"] == "A-02"
+    assert record["dependency_status"] == [
+        {"task_id": "A-01", "status": "satisfied (accepted runbook evidence)"}
+    ]
+    assert option.task_id == "A-02"
+
+
 def test_auto_advance_goes_through_advancing_then_starts_via_starter(state, alpha):
     register(state, "alpha", alpha, auto_advance="true")
     starter = Starter(state)

@@ -34,11 +34,12 @@ from scripts.agents.control_plane.quickstart import (
 from scripts.agents.control_plane.task_sources import (
     ADAPTER_FILE_LEDGER,
     ADAPTER_GITHUB_ISSUES,
-    ADAPTER_VIDEO_EDITOR_LEDGER,
+    ADAPTER_OCTASCENE_PROGRAM_LEDGERS,
     TaskSourceError,
     discover_tasks,
     next_eligible_task,
     parse_file_ledger,
+    parse_octascene_program_ledger,
     task_source_adapter_name,
 )
 from scripts.agents.control_plane.validation_adapter import (
@@ -136,6 +137,24 @@ def test_markdown_checklist_alias_uses_file_ledger(tmp_path: Path) -> None:
     )
     assert task_source_adapter_name(project) == ADAPTER_FILE_LEDGER
     assert next_eligible_task(project).task_id == "ITEM-1"
+
+
+def test_octascene_program_table_parser_preserves_status_and_dependencies() -> None:
+    tasks = parse_octascene_program_ledger(
+        "| Task | Status |\n"
+        "|---|---|\n"
+        "| `SKETCH-07` — integration | implementation candidate undergoing exact-tree acceptance |\n"
+        "| `SKETCH-08` — QA | pending after `SKETCH-07` |\n"
+        "| `SKETCH-GATE-V2` | blocked by `SKETCH-08` |\n",
+        source_ref="docs/sketch.md",
+    )
+
+    assert [(task.task_id, task.status) for task in tasks] == [
+        ("SKETCH-07", "in-progress"),
+        ("SKETCH-08", "pending"),
+        ("SKETCH-GATE-V2", "blocked"),
+    ]
+    assert "depends on SKETCH-07" in tasks[1].notes
 
 
 def test_github_issues_adapter_uses_injected_fetcher_not_live_api(tmp_path: Path) -> None:
@@ -338,24 +357,21 @@ def test_generic_second_repository_task_policy_and_validation(tmp_path: Path, mo
     assert all(item["key"] != "continue-video-editor" for item in options)
 
 
-def test_octascene_compatibility_next_eligible_matches_current_ledger() -> None:
+def test_octascene_discovers_all_declared_program_ledgers() -> None:
     root = octascene_checkout()
     if root is None:
         pytest.skip("set OCTAREL_OCTASCENE_ROOT to a real Octages checkout")
     project = octascene_project(repo_root=root)
-    assert task_source_adapter_name(project) == ADAPTER_VIDEO_EDITOR_LEDGER
+    assert task_source_adapter_name(project) == ADAPTER_OCTASCENE_PROGRAM_LEDGERS
     assert validation_adapter_name(project) == ADAPTER_EXACT_TREE_LOCAL_GATE
+    tasks = discover_tasks(project)
+    ids = {task.task_id for task in tasks}
+    assert {"SKETCH-05", "MOTION-05", "BETA-V2-01"} <= ids
     direct = next_eligible_video_editor_task(root)
-    via_adapter = next_eligible_task(project)
-    if direct is None:
-        assert via_adapter is None
-    else:
-        assert via_adapter is not None
-        assert via_adapter.task_id == direct.task_id
-        assert via_adapter.status == direct.status
-        assert via_adapter.notes == direct.notes
+    if direct is not None:
+        assert direct.task_id in ids
     options = list_quickstart_options(root, project=project)
-    assert options[0]["key"] == "continue-video-editor"
+    assert options[0]["key"] == "continue-next-task"
 
 
 def test_switching_back_to_octascene_does_not_leak_second_repo(tmp_path: Path) -> None:
@@ -367,13 +383,9 @@ def test_switching_back_to_octascene_does_not_leak_second_repo(tmp_path: Path) -
     b_task = next_eligible_task(second)
     o_task = next_eligible_task(octascene)
     assert b_task is not None and b_task.task_id == "B-02"
-    direct = next_eligible_video_editor_task(live)
-    if direct is None:
-        assert o_task is None
-    else:
-        assert o_task is not None
-        assert o_task.task_id == direct.task_id
-        assert o_task.task_id != b_task.task_id
+    assert o_task is not None
+    assert o_task.task_id != b_task.task_id
+    assert o_task.source == ADAPTER_OCTASCENE_PROGRAM_LEDGERS
     b_policy = load_project_policy(second)
     o_policy = load_project_policy(octascene)
     assert "POLICY.md" in b_policy.texts

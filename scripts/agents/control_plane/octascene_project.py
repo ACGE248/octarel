@@ -1,8 +1,9 @@
 """ENG-CP-01 (issue #165): OctaScene compatibility adapter for :mod:`project`.
 
 Resolves current ``ACGE248/octages`` truth -- ``AGENTS.md``,
-``docs/PRODUCT_ROADMAP.md``, the Video Editor ledger/commands docs, and the
-repository-owned local gate -- into a generic :class:`ProjectContract`. This
+``docs/PRODUCT_ROADMAP.md``, the maintained Sketch, Motion, Creator Beta, and
+Video Editor ledgers, and the repository-owned local gate -- into a generic
+:class:`ProjectContract`. This
 module only *points at* those repository-owned sources by relative path; it
 never copies, parses beyond existence-checking, or duplicates their content
 into Control Plane code or state. Actual ledger parsing continues to live in
@@ -37,10 +38,16 @@ OCTASCENE_DEFAULT_BRANCH = "main"
 OCTASCENE_GITHUB_REMOTE = "ACGE248/octages"
 OCTASCENE_POLICY_ENTRYPOINTS: tuple[str, ...] = ("AGENTS.md",)
 OCTASCENE_ROADMAP_PATHS: tuple[str, ...] = ("docs/PRODUCT_ROADMAP.md",)
-OCTASCENE_TASK_SOURCES: tuple[str, ...] = (str(VIDEO_EDITOR_LEDGER_RELATIVE), VIDEO_EDITOR_COMMANDS_RELATIVE)
+OCTASCENE_TASK_SOURCES: tuple[str, ...] = (
+    "docs/OCTASCENE_CREATOR_BETA_IMPLEMENTATION_PLAN.md",
+    "docs/engineering/sketch-studio-progress/README.md",
+    "docs/engineering/motion-studio-progress/README.md",
+    str(VIDEO_EDITOR_LEDGER_RELATIVE),
+    VIDEO_EDITOR_COMMANDS_RELATIVE,
+)
 OCTASCENE_VALIDATION_COMMAND: tuple[str, ...] = ("python3", "scripts/ci/local_gate.py", "--docs-reviewed")
 OCTASCENE_CAPABILITIES: dict[str, str] = {
-    "task_source_adapter": "video_editor_ledger",
+    "task_source_adapter": "octascene_program_ledgers",
     "validation_adapter": "exact_tree_local_gate",
     "worktree_convention": "sibling-directory",
     "validation_authority": "repository-owned-exact-tree-local-gate",
@@ -120,20 +127,21 @@ def present_task_sources(project: ProjectContract) -> tuple[str, ...]:
 
 
 def next_eligible_octascene_task(project: ProjectContract | None = None, repo_root: Path | str | None = None):
-    """Current next-eligible Video Editor task, via the dedicated ledger helper.
+    """Current next-eligible OctaScene task from all declared task sources.
 
     ENG-CP-04: generic CP code must call
     :func:`task_sources.next_eligible_task` rather than this function. This
-    remains the OctaScene compatibility path so existing next-eligible
-    behavior stays equivalent to :func:`quickstart.next_eligible_video_editor_task`.
+    remains the OctaScene compatibility path for callers that have not yet
+    moved to the generic resolver.
     """
 
-    from .quickstart import next_eligible_video_editor_task
+    from .task_sources import next_eligible_task
 
     root = project.local_repo_root if project is not None else repo_root
     if root is None:
         root = octascene_project().local_repo_root
-    return next_eligible_video_editor_task(Path(root))
+    selected = project if project is not None else octascene_project(Path(root))
+    return next_eligible_task(selected)
 
 
 #: Modules the OctaScene exact-tree gate's Python phases need in the managed interpreter (its own

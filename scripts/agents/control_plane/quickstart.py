@@ -543,14 +543,26 @@ def _uses_video_editor_quickstart(project: Any | None) -> bool:
         return False
 
 
-def continue_next_task_option(project: Any, repo_root: Path) -> QuickStartOption:
+def continue_next_task_option(
+    project: Any, repo_root: Path, *, selected_task_id: str | None = None
+) -> QuickStartOption:
     """Generic Quick Start option from the selected project's task-source adapter."""
 
-    from .task_sources import TaskSourceError, next_eligible_task
+    from .task_sources import TaskSourceError, discover_tasks, next_eligible_task
 
     program = getattr(project, "display_name", None) or "selected project"
     try:
-        task = next_eligible_task(project)
+        if selected_task_id is None:
+            task = next_eligible_task(project)
+        else:
+            task = next(
+                (
+                    candidate
+                    for candidate in discover_tasks(project)
+                    if candidate.task_id == selected_task_id and candidate.eligible
+                ),
+                None,
+            )
     except TaskSourceError as exc:
         return QuickStartOption(
             key="continue-next-task",
@@ -582,7 +594,10 @@ def continue_next_task_option(project: Any, repo_root: Path) -> QuickStartOption
             why_next="The selected project's task source currently has no eligible task.",
             dependency_state="Blocked — no eligible task",
             unavailable_reason=(
-                f"project {project.project_id!r} currently has no eligible task in its declared task source"
+                f"project {project.project_id!r} has no eligible task {selected_task_id!r} "
+                "in its declared task source"
+                if selected_task_id
+                else f"project {project.project_id!r} currently has no eligible task in its declared task source"
             ),
         )
 
@@ -855,10 +870,15 @@ def resolve_quickstart_option(
 
 
 def _resolve_quickstart_option_base(repo_root: Path, key: str, project: Any | None = None) -> QuickStartOption:
-    if key == "continue-next-task":
+    next_task_prefix = "continue-next-task:"
+    if key == "continue-next-task" or key.startswith(next_task_prefix):
         if project is None:
             raise QuickStartError("continue-next-task requires a selected project")
-        return continue_next_task_option(project, repo_root)
+        selected_task_id = key.removeprefix(next_task_prefix) if key.startswith(next_task_prefix) else None
+        option = continue_next_task_option(project, repo_root, selected_task_id=selected_task_id)
+        if selected_task_id:
+            return QuickStartOption(**{**option.__dict__, "key": key})
+        return option
     video_editor_prefix = "continue-video-editor:"
     octascene_prefix = "continue-octascene:"
     if key in {"continue-video-editor", "continue-octascene"} or key.startswith(
